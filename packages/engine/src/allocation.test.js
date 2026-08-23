@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { computeAllocation, diffAllocations, type AllocationInput, type AllocationLine } from "./allocation.js";
+import { computeAllocation, diffAllocations } from "./allocation.js";
 import { toCents } from "./money.js";
+import { mustAt, mustFind } from "./invariant.js";
 
-const BASE_LINES: AllocationLine[] = [
+/** @import { AllocationInput, AllocationLine } from "./allocation.js" */
+
+/** @type {AllocationLine[]} */
+const BASE_LINES = [
   { id: "fixed", stage: 1, label: "Fixed", basis: "from_fixed_costs", value: null, goalPct: null, accountId: "bills" },
   { id: "variable", stage: 1, label: "Variable", basis: "from_variable_essentials", value: null, goalPct: null, accountId: "spending" },
   { id: "save", stage: 2, label: "Save", basis: "pct_of_gross", value: 10, goalPct: 10, accountId: "save" },
@@ -11,7 +15,11 @@ const BASE_LINES: AllocationLine[] = [
   { id: "sweep_b", stage: 3, label: "Sweep B", basis: "sweep", value: 1, goalPct: null, accountId: "y" },
 ];
 
-function baseInput(overrides: Partial<AllocationInput> = {}): AllocationInput {
+/**
+ * @param {Partial<AllocationInput>} [overrides]
+ * @returns {AllocationInput}
+ */
+function baseInput(overrides = {}) {
   return {
     grossPerMonthCents: toCents(10000),
     payCadence: "monthly",
@@ -51,8 +59,8 @@ describe("computeAllocation", () => {
 
   it("resolves per-line actual% and fidelity against each line's own goal", () => {
     const result = computeAllocation(baseInput());
-    const save = result.lines.find((l) => l.lineId === "save")!;
-    const invest = result.lines.find((l) => l.lineId === "invest")!;
+    const save = mustFind(result.lines, (l) => l.lineId === "save");
+    const invest = mustFind(result.lines, (l) => l.lineId === "invest");
     expect(save.actualPct).toBe(10);
     expect(save.fidelity).toBe(0); // exactly meeting the goal
     expect(invest.actualPct).toBe(5);
@@ -61,8 +69,8 @@ describe("computeAllocation", () => {
 
   it("splits a sweep stage across its lines by weight, consuming all of remaining", () => {
     const result = computeAllocation(baseInput());
-    const a = result.lines.find((l) => l.lineId === "sweep_a")!;
-    const b = result.lines.find((l) => l.lineId === "sweep_b")!;
+    const a = mustFind(result.lines, (l) => l.lineId === "sweep_a");
+    const b = mustFind(result.lines, (l) => l.lineId === "sweep_b");
     expect(a.perMonthCents).toBe(toCents(1750));
     expect(b.perMonthCents).toBe(toCents(1750));
     expect(result.unallocatedPerMonthCents).toBe(0);
@@ -82,7 +90,7 @@ describe("computeAllocation", () => {
 
   it("reconciles transfers exactly to gross for the pay cadence", () => {
     const result = computeAllocation(baseInput());
-    const total = result.transfers.reduce((sum, t) => sum + (t.perPayCents as number), 0);
+    const total = result.transfers.reduce((sum, t) => sum + t.perPayCents, 0);
     expect(total).toBe(toCents(10000));
   });
 
@@ -95,7 +103,8 @@ describe("computeAllocation", () => {
   });
 
   it("reports a positive unallocated amount when the lines don't sum to 100%, instead of it vanishing", () => {
-    const lines: AllocationLine[] = [
+    /** @type {AllocationLine[]} */
+    const lines = [
       { id: "fixed", stage: 1, label: "Fixed", basis: "from_fixed_costs", value: null, goalPct: null, accountId: "bills" },
     ];
     const result = computeAllocation(
@@ -109,31 +118,34 @@ describe("computeAllocation", () => {
   });
 
   it("resolves fixed_amount and pct_of_remaining bases", () => {
-    const lines: AllocationLine[] = [
+    /** @type {AllocationLine[]} */
+    const lines = [
       { id: "rent", stage: 1, label: "Rent", basis: "fixed_amount", value: 200000, goalPct: null, accountId: "landlord" },
       { id: "half_remaining", stage: 2, label: "Half of what's left", basis: "pct_of_remaining", value: 50, goalPct: null, accountId: "save" },
     ];
     const result = computeAllocation(baseInput({ lines }));
-    const rent = result.lines.find((l) => l.lineId === "rent")!;
-    const half = result.lines.find((l) => l.lineId === "half_remaining")!;
+    const rent = mustFind(result.lines, (l) => l.lineId === "rent");
+    const half = mustFind(result.lines, (l) => l.lineId === "half_remaining");
     expect(rent.perMonthCents).toBe(toCents(2000));
     // Remaining entering stage 2 is 10000 - 2000 = 8000; half of that is 4000.
     expect(half.perMonthCents).toBe(toCents(4000));
   });
 
   it("resolves every line in a stage against the same snapshot, independent of row order", () => {
-    const linesA: AllocationLine[] = [
+    /** @type {AllocationLine[]} */
+    const linesA = [
       { id: "a", stage: 1, label: "A", basis: "pct_of_remaining", value: 50, goalPct: null, accountId: "a" },
       { id: "b", stage: 1, label: "B", basis: "pct_of_remaining", value: 50, goalPct: null, accountId: "b" },
     ];
-    const linesB: AllocationLine[] = [linesA[1]!, linesA[0]!];
+    /** @type {AllocationLine[]} */
+    const linesB = [mustAt(linesA, 1), mustAt(linesA, 0)];
     const resultA = computeAllocation(baseInput({ lines: linesA }));
     const resultB = computeAllocation(baseInput({ lines: linesB }));
-    expect(resultA.lines.find((l) => l.lineId === "a")!.perMonthCents).toBe(
-      resultB.lines.find((l) => l.lineId === "a")!.perMonthCents,
+    expect(mustFind(resultA.lines, (l) => l.lineId === "a").perMonthCents).toBe(
+      mustFind(resultB.lines, (l) => l.lineId === "a").perMonthCents,
     );
-    expect(resultA.lines.find((l) => l.lineId === "b")!.perMonthCents).toBe(
-      resultB.lines.find((l) => l.lineId === "b")!.perMonthCents,
+    expect(mustFind(resultA.lines, (l) => l.lineId === "b").perMonthCents).toBe(
+      mustFind(resultB.lines, (l) => l.lineId === "b").perMonthCents,
     );
   });
 });

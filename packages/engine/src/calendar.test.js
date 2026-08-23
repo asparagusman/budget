@@ -7,30 +7,35 @@ import {
   resolveCycle,
   resolveVariant,
   windowLengthDays,
-  type PaySchedule,
 } from "./calendar.js";
+
+/** @import { PaySchedule } from "./calendar.js" */
 
 describe("projectPaydays", () => {
   it("projects a weekly schedule", () => {
-    const schedule: PaySchedule = { anchorDate: "2026-01-01", cadence: "weekly" };
+    /** @type {PaySchedule} */
+    const schedule = { anchorDate: "2026-01-01", cadence: "weekly" };
     const dates = projectPaydays(schedule, { from: "2026-01-01", to: "2026-02-01" });
     expect(dates).toEqual(["2026-01-01", "2026-01-08", "2026-01-15", "2026-01-22", "2026-01-29"]);
   });
 
   it("is half-open: excludes `to` itself", () => {
-    const schedule: PaySchedule = { anchorDate: "2026-01-01", cadence: "weekly" };
+    /** @type {PaySchedule} */
+    const schedule = { anchorDate: "2026-01-01", cadence: "weekly" };
     const dates = projectPaydays(schedule, { from: "2026-01-01", to: "2026-01-08" });
     expect(dates).toEqual(["2026-01-01"]);
   });
 
   it("excludes `from` when the anchor lands before the window", () => {
-    const schedule: PaySchedule = { anchorDate: "2026-01-01", cadence: "fortnightly" };
+    /** @type {PaySchedule} */
+    const schedule = { anchorDate: "2026-01-01", cadence: "fortnightly" };
     const dates = projectPaydays(schedule, { from: "2026-01-02", to: "2026-01-29" });
     expect(dates).toEqual(["2026-01-15"]);
   });
 
   it("handles an anchor far in the past relative to the window", () => {
-    const schedule: PaySchedule = { anchorDate: "2000-01-06", cadence: "fortnightly" };
+    /** @type {PaySchedule} */
+    const schedule = { anchorDate: "2000-01-06", cadence: "fortnightly" };
     const dates = projectPaydays(schedule, { from: "2026-01-01", to: "2026-01-29" });
     expect(dates.length).toBeGreaterThan(0);
     dates.forEach((d) => {
@@ -39,7 +44,8 @@ describe("projectPaydays", () => {
   });
 
   it("finds at least one 27-payday year for a fortnightly schedule over a 12-year window", () => {
-    const schedule: PaySchedule = { anchorDate: "2020-01-03", cadence: "fortnightly" };
+    /** @type {PaySchedule} */
+    const schedule = { anchorDate: "2020-01-03", cadence: "fortnightly" };
     let found27 = false;
     for (let year = 2020; year < 2032; year++) {
       const count = countPaydays(schedule, { from: `${year}-01-01`, to: `${year + 1}-01-01` });
@@ -52,7 +58,8 @@ describe("projectPaydays", () => {
 
   describe("month-end anchors", () => {
     it("clamps to the last day of a shorter month without permanent drift", () => {
-      const schedule: PaySchedule = { anchorDate: "2026-01-31", cadence: "monthly" };
+      /** @type {PaySchedule} */
+      const schedule = { anchorDate: "2026-01-31", cadence: "monthly" };
       const dates = projectPaydays(schedule, { from: "2026-01-01", to: "2026-05-01" });
       // Jan 31 -> Feb 28 (clamped, 2026 not a leap year) -> Mar 31 (anchor day
       // restored, computed straight from the anchor) -> Apr 30 (clamped).
@@ -60,19 +67,22 @@ describe("projectPaydays", () => {
     });
 
     it("clamps to Feb 29 in a leap year", () => {
-      const schedule: PaySchedule = { anchorDate: "2024-01-31", cadence: "monthly" };
+      /** @type {PaySchedule} */
+      const schedule = { anchorDate: "2024-01-31", cadence: "monthly" };
       const dates = projectPaydays(schedule, { from: "2024-01-01", to: "2024-04-01" });
       expect(dates).toEqual(["2024-01-31", "2024-02-29", "2024-03-31"]);
     });
 
     it("handles a 30th-anchored series through February", () => {
-      const schedule: PaySchedule = { anchorDate: "2026-01-30", cadence: "monthly" };
+      /** @type {PaySchedule} */
+      const schedule = { anchorDate: "2026-01-30", cadence: "monthly" };
       const dates = projectPaydays(schedule, { from: "2026-01-01", to: "2026-04-01" });
       expect(dates).toEqual(["2026-01-30", "2026-02-28", "2026-03-30"]);
     });
 
     it("handles a 29th-anchored series through a non-leap February", () => {
-      const schedule: PaySchedule = { anchorDate: "2026-01-29", cadence: "monthly" };
+      /** @type {PaySchedule} */
+      const schedule = { anchorDate: "2026-01-29", cadence: "monthly" };
       const dates = projectPaydays(schedule, { from: "2026-01-01", to: "2026-04-01" });
       expect(dates).toEqual(["2026-01-29", "2026-02-28", "2026-03-29"]);
     });
@@ -81,14 +91,16 @@ describe("projectPaydays", () => {
 
 describe("countPaydays", () => {
   it("counts the same set projectPaydays returns", () => {
-    const schedule: PaySchedule = { anchorDate: "2026-01-01", cadence: "weekly" };
+    /** @type {PaySchedule} */
+    const schedule = { anchorDate: "2026-01-01", cadence: "weekly" };
     const window = { from: "2026-01-01", to: "2026-02-01" };
     expect(countPaydays(schedule, window)).toBe(projectPaydays(schedule, window).length);
   });
 });
 
 describe("resolveCycle", () => {
-  const schedule: PaySchedule = { anchorDate: "2026-01-01", cadence: "fortnightly" };
+  /** @type {PaySchedule} */
+  const schedule = { anchorDate: "2026-01-01", cadence: "fortnightly" };
 
   it("finds the cycle containing a date between paydays", () => {
     expect(resolveCycle(schedule, "2026-01-10")).toEqual({ cycleStart: "2026-01-01", cycleEnd: "2026-01-15" });

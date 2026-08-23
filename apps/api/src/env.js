@@ -12,9 +12,13 @@ const envSchema = z.object({
   PUBLIC_ORIGIN: z.string().min(1, "PUBLIC_ORIGIN is required"),
 });
 
-export type Env = z.infer<typeof envSchema>;
+/** @typedef {z.infer<typeof envSchema>} Env */
 
-export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
+/**
+ * @param {NodeJS.ProcessEnv} [source]
+ * @returns {Env}
+ */
+export function loadEnv(source = process.env) {
   const result = envSchema.safeParse(source);
   if (!result.success) {
     console.error("Refusing to start: invalid environment configuration.");

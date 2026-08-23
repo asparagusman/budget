@@ -8,9 +8,12 @@ import * as tables from "./tables/index.js";
  * it in — this module never reads `process.env` itself, so it stays usable
  * from any context.
  */
-export function createDb(databaseUrl: string) {
+/**
+ * @param {string} databaseUrl
+ */
+export function createDb(databaseUrl) {
   const pool = new Pool({ connectionString: databaseUrl });
   return drizzle(pool, { schema: tables });
 }
 
-export type Db = ReturnType<typeof createDb>;
+/** @typedef {ReturnType<typeof createDb>} Db */

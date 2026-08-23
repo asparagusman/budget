@@ -4,13 +4,15 @@ import {
   projectInstances,
   requiredOpeningBalanceCents,
   simulateBalance,
-  type Bill,
-  type BillInstance,
 } from "./bills.js";
-import { toCents, type Cents } from "./money.js";
-import type { PaySchedule } from "./calendar.js";
+import { toCents } from "./money.js";
+import { mustAt } from "./invariant.js";
 
-const baseBill: Bill = {
+/** @import { Bill, BillInstance } from "./bills.js" */
+/** @import { PaySchedule } from "./calendar.js" */
+
+/** @type {Bill} */
+const baseBill = {
   id: "internet",
   baseAmountCents: toCents(90),
   frequency: "monthly",
@@ -29,7 +31,8 @@ describe("projectInstances", () => {
   });
 
   it("applies a step change as a new base, not a modifier", () => {
-    const bill: Bill = {
+    /** @type {Bill} */
+    const bill = {
       ...baseBill,
       stepChanges: [{ effectiveFrom: "2026-02-01", newAmountCents: toCents(100) }],
     };
@@ -38,7 +41,8 @@ describe("projectInstances", () => {
   });
 
   it("picks the latest applicable step change", () => {
-    const bill: Bill = {
+    /** @type {Bill} */
+    const bill = {
       ...baseBill,
       stepChanges: [
         { effectiveFrom: "2026-02-01", newAmountCents: toCents(100) },
@@ -50,7 +54,8 @@ describe("projectInstances", () => {
   });
 
   it("applies seasonal factors by month, defaulting to 1 when absent", () => {
-    const bill: Bill = {
+    /** @type {Bill} */
+    const bill = {
       ...baseBill,
       amountModel: "seasonal",
       seasonalFactors: { 1: 1.5 }, // only January is seasoned
@@ -60,7 +65,8 @@ describe("projectInstances", () => {
   });
 
   it("compounds escalation yearly from the anchor date", () => {
-    const bill: Bill = {
+    /** @type {Bill} */
+    const bill = {
       id: "rent",
       baseAmountCents: toCents(1000),
       frequency: "yearly",
@@ -80,39 +86,45 @@ describe("projectInstances", () => {
   });
 
   it("rolling_average falls back to base with insufficient history, and never throws", () => {
-    const bill: Bill = {
+    /** @type {Bill} */
+    const bill = {
       ...baseBill,
       amountModel: "rolling_average",
       rollingWindow: 3,
     };
-    const history: BillInstance[] = [
+    /** @type {BillInstance[]} */
+    const history = [
       { billId: "internet", dueDate: "2025-12-15", expectedCents: toCents(90), actualCents: toCents(80), isOverride: false },
     ];
     const instances = projectInstances(bill, { from: "2026-01-01", to: "2026-02-01" }, history);
-    expect(instances[0]!.expectedCents).toBe(toCents(90)); // falls back — only 1 of 3 needed
+    expect(mustAt(instances, 0).expectedCents).toBe(toCents(90)); // falls back — only 1 of 3 needed
   });
 
   it("rolling_average averages the most recent actuals once the window is full", () => {
-    const bill: Bill = {
+    /** @type {Bill} */
+    const bill = {
       ...baseBill,
       amountModel: "rolling_average",
       rollingWindow: 2,
     };
-    const history: BillInstance[] = [
+    /** @type {BillInstance[]} */
+    const history = [
       { billId: "internet", dueDate: "2025-11-15", expectedCents: toCents(90), actualCents: toCents(70), isOverride: false },
       { billId: "internet", dueDate: "2025-12-15", expectedCents: toCents(90), actualCents: toCents(90), isOverride: false },
     ];
     const instances = projectInstances(bill, { from: "2026-01-01", to: "2026-02-01" }, history);
-    expect(instances[0]!.expectedCents).toBe(toCents(80)); // mean of 70 and 90
+    expect(mustAt(instances, 0).expectedCents).toBe(toCents(80)); // mean of 70 and 90
   });
 
   it("an isOverride instance wins over every amount model", () => {
-    const bill: Bill = {
+    /** @type {Bill} */
+    const bill = {
       ...baseBill,
       amountModel: "escalating",
       escalationPct: 50, // would otherwise dramatically change the amount
     };
-    const history: BillInstance[] = [
+    /** @type {BillInstance[]} */
+    const history = [
       { billId: "internet", dueDate: "2026-01-15", expectedCents: toCents(90), actualCents: toCents(12345), isOverride: true },
     ];
     const instances = projectInstances(bill, { from: "2026-01-01", to: "2026-02-01" }, history);
@@ -126,16 +138,18 @@ describe("projectInstances", () => {
   });
 
   it("carries a non-override actual across from history", () => {
-    const history: BillInstance[] = [
+    /** @type {BillInstance[]} */
+    const history = [
       { billId: "internet", dueDate: "2026-01-15", expectedCents: toCents(90), actualCents: toCents(95), isOverride: false },
     ];
     const instances = projectInstances(baseBill, { from: "2026-01-01", to: "2026-02-01" }, history);
-    expect(instances[0]!.actualCents).toBe(toCents(95));
+    expect(mustAt(instances, 0).actualCents).toBe(toCents(95));
   });
 });
 
 describe("billsContribution", () => {
-  const paySchedule: PaySchedule = { anchorDate: "2024-01-01", cadence: "fortnightly" };
+  /** @type {PaySchedule} */
+  const paySchedule = { anchorDate: "2024-01-01", cadence: "fortnightly" };
   // Exactly 4 years = 1461 days = 365.25 * 4, so scaling to a 365.25-day
   // year exactly reproduces the true annual average with no window-edge
   // truncation, and a bill anchored at `window.from` lands its instances on
@@ -143,16 +157,18 @@ describe("billsContribution", () => {
   const window = { from: "2024-01-01", to: "2028-01-01" };
 
   it("uses actualCents when present, expectedCents otherwise", () => {
-    const bill: Bill = { id: "b", baseAmountCents: toCents(100), frequency: "monthly", anchorDate: "2024-01-01", amountModel: "flat" };
+    /** @type {Bill} */
+    const bill = { id: "b", baseAmountCents: toCents(100), frequency: "monthly", anchorDate: "2024-01-01", amountModel: "flat" };
     const instances = projectInstances(bill, { from: "2024-01-01", to: "2024-03-01" });
-    instances[0]!.actualCents = toCents(120);
+    mustAt(instances, 0).actualCents = toCents(120);
     const result = billsContribution(instances, { from: "2024-01-01", to: "2024-03-01" }, paySchedule);
     // Jan actual 120, Feb expected 100 -> total 220 over a 60-day window.
     expect(result.perYearCents).toBe(Math.round((22000 * 365.25) / 60));
   });
 
   it("scales a monthly bill's total to a 365.25-day year", () => {
-    const bill: Bill = { id: "b", baseAmountCents: toCents(100), frequency: "monthly", anchorDate: "2024-01-01", amountModel: "flat" };
+    /** @type {Bill} */
+    const bill = { id: "b", baseAmountCents: toCents(100), frequency: "monthly", anchorDate: "2024-01-01", amountModel: "flat" };
     const instances = projectInstances(bill, window);
     expect(instances).toHaveLength(48); // 12/yr * 4 years, no truncation
     const result = billsContribution(instances, window, paySchedule);
@@ -161,7 +177,8 @@ describe("billsContribution", () => {
   });
 
   it("divides the window total by the real payday count, not a nominal one", () => {
-    const bill: Bill = { id: "b", baseAmountCents: toCents(100), frequency: "monthly", anchorDate: "2024-01-01", amountModel: "flat" };
+    /** @type {Bill} */
+    const bill = { id: "b", baseAmountCents: toCents(100), frequency: "monthly", anchorDate: "2024-01-01", amountModel: "flat" };
     const instances = projectInstances(bill, window);
     const total = 48 * toCents(100);
     const paydayCount = 105; // real fortnightly count over this exact 1461-day window
@@ -170,12 +187,14 @@ describe("billsContribution", () => {
   });
 
   it("returns zero rather than dividing by zero when there are no paydays", () => {
-    const bill: Bill = { id: "b", baseAmountCents: toCents(100), frequency: "yearly", anchorDate: "2024-06-01", amountModel: "flat" };
+    /** @type {Bill} */
+    const bill = { id: "b", baseAmountCents: toCents(100), frequency: "yearly", anchorDate: "2024-06-01", amountModel: "flat" };
     const instances = projectInstances(bill, window);
     // A yearly schedule anchored 2026-06-15 has no occurrence at all inside
     // this narrow window — the surrounding occurrences (2025-06-15,
     // 2026-06-15) both fall outside it.
-    const noPaySchedule: PaySchedule = { anchorDate: "2026-06-15", cadence: "yearly" };
+    /** @type {PaySchedule} */
+    const noPaySchedule = { anchorDate: "2026-06-15", cadence: "yearly" };
     const narrowWindow = { from: "2026-01-01", to: "2026-06-01" };
     const result = billsContribution(instances, narrowWindow, noPaySchedule);
     expect(result.perPayCents).toBe(0);
@@ -184,10 +203,11 @@ describe("billsContribution", () => {
 
 describe("simulateBalance", () => {
   it("models the post-transfer balance without a payday spike", () => {
-    const instances: BillInstance[] = [
+    /** @type {BillInstance[]} */
+    const instances = [
       { billId: "b", dueDate: "2026-01-10", expectedCents: toCents(50), actualCents: null, isOverride: false },
     ];
-    const points = simulateBalance(instances, toCents(100) as Cents, ["2026-01-01", "2026-01-15"], toCents(0) as Cents);
+    const points = simulateBalance(instances, toCents(100), ["2026-01-01", "2026-01-15"], toCents(0));
     expect(points).toEqual([
       { date: "2026-01-01", balanceCents: toCents(100), event: "payday" },
       { date: "2026-01-10", balanceCents: toCents(50), event: "bill" },
@@ -196,10 +216,11 @@ describe("simulateBalance", () => {
   });
 
   it("credits a same-day payday before debiting a same-day bill", () => {
-    const instances: BillInstance[] = [
+    /** @type {BillInstance[]} */
+    const instances = [
       { billId: "b", dueDate: "2026-01-01", expectedCents: toCents(30), actualCents: null, isOverride: false },
     ];
-    const points = simulateBalance(instances, toCents(100) as Cents, ["2026-01-01"], toCents(0) as Cents);
+    const points = simulateBalance(instances, toCents(100), ["2026-01-01"], toCents(0));
     expect(points).toEqual([
       { date: "2026-01-01", balanceCents: toCents(100), event: "payday" },
       { date: "2026-01-01", balanceCents: toCents(70), event: "bill" },
@@ -209,20 +230,22 @@ describe("simulateBalance", () => {
 
 describe("requiredOpeningBalanceCents", () => {
   it("covers the lowest point of the cycle plus the buffer", () => {
-    const instances: BillInstance[] = [
+    /** @type {BillInstance[]} */
+    const instances = [
       { billId: "b", dueDate: "2026-01-05", expectedCents: toCents(200), actualCents: null, isOverride: false },
     ];
     // Starting from 0: payday +100 never happens before the bill, so the
     // simulated low point (before any payday) is -200.
-    const required = requiredOpeningBalanceCents(instances, toCents(100) as Cents, ["2026-01-20"], toCents(50) as Cents);
+    const required = requiredOpeningBalanceCents(instances, toCents(100), ["2026-01-20"], toCents(50));
     expect(required).toBe(toCents(250)); // 200 deficit + 50 buffer
   });
 
   it("needs only the buffer when the balance never dips negative", () => {
-    const instances: BillInstance[] = [
+    /** @type {BillInstance[]} */
+    const instances = [
       { billId: "b", dueDate: "2026-01-20", expectedCents: toCents(50), actualCents: null, isOverride: false },
     ];
-    const required = requiredOpeningBalanceCents(instances, toCents(100) as Cents, ["2026-01-01"], toCents(50) as Cents);
+    const required = requiredOpeningBalanceCents(instances, toCents(100), ["2026-01-01"], toCents(50));
     expect(required).toBe(toCents(50));
   });
 });

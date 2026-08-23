@@ -1,15 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { goalEta, goalRequired, resolveTargetCents, type Goal } from "./goals.js";
-import { toCents, type Cents } from "./money.js";
+import { goalEta, goalRequired, resolveTargetCents } from "./goals.js";
+import { toCents } from "./money.js";
+
+/** @import { Goal } from "./goals.js" */
 
 describe("resolveTargetCents", () => {
   it("returns the amount directly for an 'amount' goal", () => {
-    const goal: Goal = { id: "g", accountId: "a", targetMode: "amount", targetAmountCents: toCents(5000), targetMonths: null, targetDate: null };
+    /** @type {Goal} */
+    const goal = { id: "g", accountId: "a", targetMode: "amount", targetAmountCents: toCents(5000), targetMonths: null, targetDate: null };
     expect(resolveTargetCents(goal, toCents(1000))).toBe(toCents(5000));
   });
 
   it("resolves 'months_of_expenses' against the current essential burn", () => {
-    const goal: Goal = { id: "g", accountId: "a", targetMode: "months_of_expenses", targetAmountCents: null, targetMonths: 3, targetDate: null };
+    /** @type {Goal} */
+    const goal = { id: "g", accountId: "a", targetMode: "months_of_expenses", targetAmountCents: null, targetMonths: 3, targetDate: null };
     expect(resolveTargetCents(goal, toCents(2000))).toBe(toCents(6000));
   });
 });
@@ -39,14 +43,14 @@ describe("goalEta", () => {
     });
     expect(result.eta).toBeNull();
     expect(result.aheadBehindDays).toBeNull();
-    expect(Number.isFinite(result.eta as unknown as number)).toBe(false);
+    expect(Number.isFinite(result.eta)).toBe(false);
   });
 
   it("returns null for a negative contribution short of target", () => {
     const result = goalEta({
       targetCents: toCents(1000),
       currentBalanceCents: toCents(0),
-      contributionPerPayCents: toCents(-50) as Cents,
+      contributionPerPayCents: toCents(-50),
       payCadence: "fortnightly",
       annualGrowthRate: 0,
       from: "2026-01-01",
@@ -79,7 +83,7 @@ describe("goalEta", () => {
     });
     expect(result.eta).not.toBeNull();
     expect(result.aheadBehindDays).not.toBeNull();
-    expect(result.aheadBehindDays as number).toBeGreaterThanOrEqual(0);
+    expect(/** @type {number} */ (result.aheadBehindDays)).toBeGreaterThanOrEqual(0);
   });
 });
 

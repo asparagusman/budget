@@ -3,5 +3,7 @@
   "compilerOptions": {
     "types": ["node"]
   },
-  "include": ["src"]
+  "include": ["src", "tsup.config.js"],
+  // `checkJs` would otherwise happily typecheck the tsup bundle in dist/.
+  "exclude": ["dist"]
 }

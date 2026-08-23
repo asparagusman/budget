@@ -1,15 +1,14 @@
 import { defineConfig } from "tsup";
 
 export default defineConfig({
-  entry: ["src/index.ts"],
+  entry: ["src/index.js"],
   format: ["esm"],
   target: "node22",
   outDir: "dist",
   clean: true,
-  // @budget/schema and @budget/engine resolve to raw .ts source via
-  // node_modules, and Node's built-in type-stripping refuses to run on
-  // files under node_modules — so these two MUST be inlined into the
-  // bundle rather than left as runtime imports. Everything else (genuine
+  // @budget/schema and @budget/engine resolve to raw source via
+  // node_modules. Inlining them keeps the runtime image a single bundle
+  // with no workspace layout to reproduce. Everything else (genuine
   // npm deps) must stay external explicitly — tsup's automatic
   // dependency-externalization heuristic doesn't reliably apply to
   // packages that are only imported transitively (e.g. `pg`, imported by

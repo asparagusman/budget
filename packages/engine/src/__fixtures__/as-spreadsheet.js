@@ -11,14 +11,21 @@
 // so `anchorDate` is arbitrary (chosen as the fixture "today") and no
 // instance-projection edge case is exercised here; that behaviour has its
 // own dedicated tests in `bills.test.ts`.
-import type { Cents } from "../money.js";
 import { toCents } from "../money.js";
-import type { Bill } from "../bills.js";
-import type { AllocationLine } from "../allocation.js";
+
+/** @import { Cents } from "../money.js" */
+/** @import { Bill } from "../bills.js" */
+/** @import { AllocationLine } from "../allocation.js" */
 
 export const TODAY = "2026-01-01";
 
-function bill(id: string, dollars: number, frequency: Bill["frequency"]): Bill {
+/**
+ * @param {string} id
+ * @param {number} dollars
+ * @param {Bill["frequency"]} frequency
+ * @returns {Bill}
+ */
+function bill(id, dollars, frequency) {
   return {
     id,
     baseAmountCents: toCents(dollars),
@@ -28,7 +35,8 @@ function bill(id: string, dollars: number, frequency: Bill["frequency"]): Bill {
   };
 }
 
-export const FIXED_COST_BILLS: Bill[] = [
+/** @type {Bill[]} */
+export const FIXED_COST_BILLS = [
   // Entertainment
   bill("stan", 17.0, "monthly"),
   bill("spotify", 19.99, "monthly"),
@@ -78,29 +86,35 @@ export const CATEGORY_BILL_IDS = {
 };
 
 // Variable costs (monthly, given directly — no cadence conversion involved).
-export const VARIABLE_ESSENTIALS_MONTHLY_CENTS: Cents = toCents(71 + 1061 + 979); // Personal + Home + Transport = 2111
-export const VARIABLE_NON_ESSENTIAL_MONTHLY_CENTS: Cents = toCents(1143); // "Good Life"
+/** @type {Cents} */
+export const VARIABLE_ESSENTIALS_MONTHLY_CENTS = toCents(71 + 1061 + 979); // Personal + Home + Transport = 2111
+/** @type {Cents} */
+export const VARIABLE_NON_ESSENTIAL_MONTHLY_CENTS = toCents(1143); // "Good Life"
 
 // Income, "Usual" variant (fortnightly).
-export const GRACE_USUAL_FORTNIGHTLY_CENTS: Cents = toCents(2634.38);
-export const LACHLAN_USUAL_FORTNIGHTLY_CENTS: Cents = toCents(2207.23);
-export const GROSS_USUAL_FORTNIGHTLY_CENTS: Cents = (GRACE_USUAL_FORTNIGHTLY_CENTS +
-  LACHLAN_USUAL_FORTNIGHTLY_CENTS) as Cents;
+/** @type {Cents} */
+export const GRACE_USUAL_FORTNIGHTLY_CENTS = toCents(2634.38);
+/** @type {Cents} */
+export const LACHLAN_USUAL_FORTNIGHTLY_CENTS = toCents(2207.23);
+/** @type {Cents} */
+export const GROSS_USUAL_FORTNIGHTLY_CENTS = (GRACE_USUAL_FORTNIGHTLY_CENTS +
+  LACHLAN_USUAL_FORTNIGHTLY_CENTS);
 
 // Other income variants (fortnightly totals), for `resolveVariant` structural
 // tests — the dollar figures aren't re-verified downstream, only "Usual"
 // feeds the allocation fixture below.
 export const INCOME_VARIANTS_FORTNIGHTLY_CENTS = {
   usual: GROSS_USUAL_FORTNIGHTLY_CENTS,
-  pl_gov_high: (toCents(1896.2) + toCents(2207.23)) as Cents,
-  pl_torch_low: (toCents(1444.69) + toCents(2207.23)) as Cents,
-  pl_balanced: (toCents(1670.445) + toCents(2207.23)) as Cents,
+  pl_gov_high: (toCents(1896.2) + toCents(2207.23)),
+  pl_torch_low: (toCents(1444.69) + toCents(2207.23)),
+  pl_balanced: (toCents(1670.445) + toCents(2207.23)),
 };
 
 export const INCOME_LANDING_ACCOUNT_ID = "income_bills";
 
 // Allocation lines, "Usual" variant — order and stages exactly as documented.
-export const ALLOCATION_LINES: AllocationLine[] = [
+/** @type {AllocationLine[]} */
+export const ALLOCATION_LINES = [
   { id: "fixed", stage: 1, label: "Fixed", basis: "from_fixed_costs", value: null, goalPct: null, accountId: INCOME_LANDING_ACCOUNT_ID },
   { id: "variable", stage: 1, label: "Variable", basis: "from_variable_essentials", value: null, goalPct: null, accountId: "2up" },
   { id: "invest", stage: 2, label: "Invest", basis: "pct_of_gross", value: 8, goalPct: 10, accountId: "raiz" },

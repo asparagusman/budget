@@ -1,5 +1,5 @@
 import { createRootRoute, createRouter, Outlet } from "@tanstack/react-router";
-import { RootPage } from "./root-page.js";
+import { RootPage } from "./root-page.jsx";
 
 const rootRoute = createRootRoute({
   component: () => (
@@ -11,9 +11,3 @@ const rootRoute = createRootRoute({
 });
 
 export const router = createRouter({ routeTree: rootRoute });
-
-declare module "@tanstack/react-router" {
-  interface Register {
-    router: typeof router;
-  }
-}

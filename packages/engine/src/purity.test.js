@@ -6,12 +6,16 @@ import { join } from "node:path";
 
 const SRC_DIR = join(import.meta.dirname, ".");
 
-function listTsFiles(dir: string): string[] {
+/**
+ * @param {string} dir
+ * @returns {string[]}
+ */
+function listSourceFiles(dir) {
   const entries = readdirSync(dir, { withFileTypes: true });
   return entries.flatMap((entry) => {
     const full = join(dir, entry.name);
-    if (entry.isDirectory()) return listTsFiles(full);
-    if (entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts")) return [full];
+    if (entry.isDirectory()) return listSourceFiles(full);
+    if (entry.name.endsWith(".js") && !entry.name.endsWith(".test.js")) return [full];
     return [];
   });
 }
@@ -24,8 +28,9 @@ describe("purity", () => {
     const banned = [["new", "Date()"].join(" "), ["Date", "now()"].join(".")];
     const pattern = new RegExp(banned.map((s) => s.replace(/[().]/g, "\\$&")).join("|"));
 
-    const offenders: string[] = [];
-    for (const file of listTsFiles(SRC_DIR)) {
+    /** @type {string[]} */
+    const offenders = [];
+    for (const file of listSourceFiles(SRC_DIR)) {
       const text = readFileSync(file, "utf8");
       if (pattern.test(text)) offenders.push(file);
     }

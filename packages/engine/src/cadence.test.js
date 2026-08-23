@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { OCCURRENCES_PER_YEAR, annualise, equivalent, type Cadence } from "./cadence.js";
-import { toCents, type Cents } from "./money.js";
+import { OCCURRENCES_PER_YEAR, annualise, equivalent } from "./cadence.js";
+import { toCents } from "./money.js";
+
+/** @import { Cadence } from "./cadence.js" */
 
 describe("OCCURRENCES_PER_YEAR", () => {
   it("uses fixed conventional divisors, not the spreadsheet's 'Bimonthly'", () => {
@@ -29,13 +31,14 @@ describe("equivalent", () => {
 
   it("round-trips through the same cadence unchanged", () => {
     const amount = toCents(123.45);
-    (Object.keys(OCCURRENCES_PER_YEAR) as Cadence[]).forEach((cadence) => {
+    const cadences = /** @type {Cadence[]} */ (Object.keys(OCCURRENCES_PER_YEAR));
+    cadences.forEach((cadence) => {
       expect(equivalent(amount, cadence, cadence)).toBe(amount);
     });
   });
 
   it("is consistent with annualise for monthly -> yearly", () => {
-    const amount = toCents(500) as Cents;
+    const amount = toCents(500);
     expect(equivalent(amount, "monthly", "yearly")).toBe(annualise(amount, "monthly"));
   });
 });

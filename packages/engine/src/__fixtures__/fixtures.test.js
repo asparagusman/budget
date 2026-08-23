@@ -12,7 +12,8 @@
 import { describe, expect, it } from "vitest";
 import { computeAllocation } from "../allocation.js";
 import { equivalent } from "../cadence.js";
-import { toCents, type Cents } from "../money.js";
+import { toCents } from "../money.js";
+import { mustAt, mustFind, mustGet } from "../invariant.js";
 import { futureValueCents } from "../projections.js";
 import {
   ALLOCATION_LINES,
@@ -25,20 +26,37 @@ import {
 } from "./as-spreadsheet.js";
 import { FIXED_COST_BILLS_CORRECTED } from "./corrected.js";
 
-function centsToDollars(c: Cents): number {
-  return (c as number) / 100;
+/** @import { Cents } from "../money.js" */
+
+/**
+ * @param {Cents} c
+ * @returns {number}
+ */
+function centsToDollars(c) {
+  return c / 100;
 }
 
-function expectDollarsNear(actual: Cents, expectedDollars: number, toleranceCents = 2) {
-  expect(Math.abs((actual as number) - Math.round(expectedDollars * 100))).toBeLessThanOrEqual(toleranceCents);
+/**
+ * @param {Cents} actual
+ * @param {number} expectedDollars
+ * @param {number} [toleranceCents]
+ */
+function expectDollarsNear(actual, expectedDollars, toleranceCents = 2) {
+  expect(
+    Math.abs(actual - Math.round(expectedDollars * 100)),
+  ).toBeLessThanOrEqual(toleranceCents);
 }
 
 /** Sum of `equivalent(bill, 'monthly')` over a set of bills — the
  * conventional-equivalence fixed-cost total that feeds `AllocationInput`. */
-function fixedTotalMonthlyCents(bills: typeof FIXED_COST_BILLS): Cents {
+/**
+ * @param {typeof FIXED_COST_BILLS} bills
+ * @returns {Cents}
+ */
+function fixedTotalMonthlyCents(bills) {
   return bills
     .map((b) => equivalent(b.baseAmountCents, b.frequency, "monthly"))
-    .reduce((a, b) => (a + b) as Cents, 0 as Cents);
+    .reduce((a, b) => a + b, 0);
 }
 
 const GROSS_MONTHLY_CENTS = equivalent(GROSS_USUAL_FORTNIGHTLY_CENTS, "fortnightly", "monthly");
@@ -49,19 +67,19 @@ describe("Fixture A — as-spreadsheet", () => {
   });
 
   it("reproduces category subtotals via conventional equivalence", () => {
-    const byId = Object.fromEntries(FIXED_COST_BILLS.map((b) => [b.id, b]));
-    const entertainment = fixedTotalMonthlyCents([byId.stan!, byId.spotify!, byId.disney_plus!]);
+    const byId = new Map(FIXED_COST_BILLS.map((b) => [b.id, b]));
+    const entertainment = fixedTotalMonthlyCents([mustGet(byId, "stan"), mustGet(byId, "spotify"), mustGet(byId, "disney_plus")]);
     expectDollarsNear(equivalent(entertainment, "monthly", "yearly"), 635.76);
 
     const utilities = fixedTotalMonthlyCents([
-      byId.internet!,
-      byId.gas!,
-      byId.electricity!,
-      byId.water!,
-      byId.ambulance_cover!,
-      byId.ambulance_cover_lp!,
-      byId.phone!,
-      byId.phone_lp!,
+      mustGet(byId, "internet"),
+      mustGet(byId, "gas"),
+      mustGet(byId, "electricity"),
+      mustGet(byId, "water"),
+      mustGet(byId, "ambulance_cover"),
+      mustGet(byId, "ambulance_cover_lp"),
+      mustGet(byId, "phone"),
+      mustGet(byId, "phone_lp"),
     ]);
     // A category with 8 bills accumulates up to ~8 independent half-cent
     // roundings before the annual conversion — a wider tolerance here is
@@ -71,10 +89,10 @@ describe("Fixture A — as-spreadsheet", () => {
     // Spreadsheet Car subtotal deliberately EXCLUDES both Roadside Assist
     // rows — reproducing that omission is the point of Fixture A.
     const carSpreadsheetSubtotal = fixedTotalMonthlyCents([
-      byId.car_rego!,
-      byId.car_rego_lp!,
-      byId.car_insurance!,
-      byId.car_insurance_lp!,
+      mustGet(byId, "car_rego"),
+      mustGet(byId, "car_rego_lp"),
+      mustGet(byId, "car_insurance"),
+      mustGet(byId, "car_insurance_lp"),
     ]);
     expectDollarsNear(equivalent(carSpreadsheetSubtotal, "monthly", "yearly"), 3998.04);
   });
@@ -109,14 +127,14 @@ describe("Fixture A — as-spreadsheet", () => {
     });
 
     it("reproduces stage 1 (Fixed + Variable)", () => {
-      expectDollarsNear(result.stages[0]!.subtotalPerMonthCents, 5652.516667);
-      expectDollarsNear(result.stages[0]!.remainingPerMonthCents, 4837.638333);
-      expect(result.stages[0]!.actualPct).toBeCloseTo(53.88401474, 1);
+      expectDollarsNear(mustAt(result.stages, 0).subtotalPerMonthCents, 5652.516667);
+      expectDollarsNear(mustAt(result.stages, 0).remainingPerMonthCents, 4837.638333);
+      expect(mustAt(result.stages, 0).actualPct).toBeCloseTo(53.88401474, 1);
     });
 
     it("reproduces stage 2 (Invest/Save/Tithe/Bill Shock)", () => {
-      expectDollarsNear(result.stages[1]!.subtotalPerMonthCents, 3776.4558);
-      expectDollarsNear(result.stages[1]!.remainingPerMonthCents, 1061.182533);
+      expectDollarsNear(mustAt(result.stages, 1).subtotalPerMonthCents, 3776.4558);
+      expectDollarsNear(mustAt(result.stages, 1).remainingPerMonthCents, 1061.182533);
     });
 
     it("fully consumes remaining in stage 3 (Eating Out / Personal Prize 50/50)", () => {
@@ -129,25 +147,25 @@ describe("Fixture A — as-spreadsheet", () => {
     });
 
     it("reproduces every fortnightly transfer, and the total reconciles to fortnightly gross EXACTLY", () => {
-      const byAccount = Object.fromEntries(result.transfers.map((t) => [t.accountId, t]));
-      expectDollarsNear(byAccount["2up"]!.perPayCents, 1464.084246, 5);
-      expectDollarsNear(byAccount["ubank_house"]!.perPayCents, 387.3288, 3);
-      expectDollarsNear(byAccount["ubank_holiday"]!.perPayCents, 387.3288, 3);
-      expectDollarsNear(byAccount["raiz"]!.perPayCents, 387.3288, 3);
-      expectDollarsNear(byAccount["newhope"]!.perPayCents, 338.9127, 3);
-      expectDollarsNear(byAccount["ubank_generosity"]!.perPayCents, 96.8322, 3);
-      expectDollarsNear(byAccount[INCOME_LANDING_ACCOUNT_ID]!.perPayCents, 1634.546154, 3);
-      expectDollarsNear(byAccount["ubank_mojo"]!.perPayCents, 145.2483, 3);
-      expect(byAccount[INCOME_LANDING_ACCOUNT_ID]!.isNoOp).toBe(true);
+      const byAccount = new Map(result.transfers.map((t) => [t.accountId, t]));
+      expectDollarsNear(mustGet(byAccount, "2up").perPayCents, 1464.084246, 5);
+      expectDollarsNear(mustGet(byAccount, "ubank_house").perPayCents, 387.3288, 3);
+      expectDollarsNear(mustGet(byAccount, "ubank_holiday").perPayCents, 387.3288, 3);
+      expectDollarsNear(mustGet(byAccount, "raiz").perPayCents, 387.3288, 3);
+      expectDollarsNear(mustGet(byAccount, "newhope").perPayCents, 338.9127, 3);
+      expectDollarsNear(mustGet(byAccount, "ubank_generosity").perPayCents, 96.8322, 3);
+      expectDollarsNear(mustGet(byAccount, INCOME_LANDING_ACCOUNT_ID).perPayCents, 1634.546154, 3);
+      expectDollarsNear(mustGet(byAccount, "ubank_mojo").perPayCents, 145.2483, 3);
+      expect(mustGet(byAccount, INCOME_LANDING_ACCOUNT_ID).isNoOp).toBe(true);
 
-      const total = result.transfers.reduce((sum, t) => sum + (t.perPayCents as number), 0);
+      const total = result.transfers.reduce((sum, t) => sum + t.perPayCents, 0);
       expect(total).toBe(equivalent(GROSS_MONTHLY_CENTS, "monthly", "fortnightly"));
       expect(total).toBe(GROSS_USUAL_FORTNIGHTLY_CENTS);
     });
 
     it("reproduces Mojo's months-of-stage-1 targets and periods to save", () => {
-      const mojoPerPay = result.transfers.find((t) => t.accountId === "ubank_mojo")!.perPayCents as number;
-      const stage1Subtotal = result.stages[0]!.subtotalPerMonthCents as number;
+      const mojoPerPay = mustFind(result.transfers, (t) => t.accountId === "ubank_mojo").perPayCents;
+      const stage1Subtotal = mustAt(result.stages, 0).subtotalPerMonthCents;
       const targets = [1, 3, 6, 12].map((months) => months * stage1Subtotal);
       const periods = targets.map((target) => Math.ceil(target / mojoPerPay));
       // Labelled `fortnights` here, deliberately — the spreadsheet mislabels
@@ -176,14 +194,14 @@ describe("Fixture B — corrected (unlabelled duplicate Rent bill removed)", () 
   });
 
   it("reproduces stage 1 now under the 50% goal", () => {
-    expectDollarsNear(result.stages[0]!.subtotalPerMonthCents, 5029.656667);
-    expect(result.stages[0]!.actualPct).toBeCloseTo(47.9465, 1);
-    expectDollarsNear(result.stages[0]!.remainingPerMonthCents, 5460.498333);
+    expectDollarsNear(mustAt(result.stages, 0).subtotalPerMonthCents, 5029.656667);
+    expect(mustAt(result.stages, 0).actualPct).toBeCloseTo(47.9465, 1);
+    expectDollarsNear(mustAt(result.stages, 0).remainingPerMonthCents, 5460.498333);
   });
 
   it("leaves stage 2 unchanged — it's a pure percentage of gross", () => {
-    expectDollarsNear(result.stages[1]!.subtotalPerMonthCents, 3776.4558);
-    expectDollarsNear(result.stages[1]!.remainingPerMonthCents, 1684.042533);
+    expectDollarsNear(mustAt(result.stages, 1).subtotalPerMonthCents, 3776.4558);
+    expectDollarsNear(mustAt(result.stages, 1).remainingPerMonthCents, 1684.042533);
   });
 
   it("flips goodLifeFidelityCents to headroom (negative)", () => {
@@ -192,11 +210,11 @@ describe("Fixture B — corrected (unlabelled duplicate Rent bill removed)", () 
   });
 
   it("still reconciles the transfer total to fortnightly gross exactly", () => {
-    const byAccount = Object.fromEntries(result.transfers.map((t) => [t.accountId, t]));
-    expectDollarsNear(byAccount[INCOME_LANDING_ACCOUNT_ID]!.perPayCents, 1347.072308, 3);
-    expectDollarsNear(byAccount["2up"]!.perPayCents, 1751.558092, 5);
+    const byAccount = new Map(result.transfers.map((t) => [t.accountId, t]));
+    expectDollarsNear(mustGet(byAccount, INCOME_LANDING_ACCOUNT_ID).perPayCents, 1347.072308, 3);
+    expectDollarsNear(mustGet(byAccount, "2up").perPayCents, 1751.558092, 5);
 
-    const total = result.transfers.reduce((sum, t) => sum + (t.perPayCents as number), 0);
+    const total = result.transfers.reduce((sum, t) => sum + t.perPayCents, 0);
     expect(total).toBe(GROSS_USUAL_FORTNIGHTLY_CENTS);
   });
 });

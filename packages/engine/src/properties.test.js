@@ -2,13 +2,18 @@
 // `Math.random`) so a failure is reproducible from the printed seed and
 // re-running the suite never flakes.
 import { describe, expect, it } from "vitest";
-import { divideCents, sumCents, type Cents } from "./money.js";
-import { computeAllocation, type AllocationInput, type AllocationLine, type Basis } from "./allocation.js";
-import { equivalent, type Cadence } from "./cadence.js";
+import { divideCents, sumCents } from "./money.js";
+import { computeAllocation } from "./allocation.js";
+import { equivalent } from "./cadence.js";
 import { toCents } from "./money.js";
+import { mustAt } from "./invariant.js";
+
+/** @import { AllocationInput, AllocationLine, Basis } from "./allocation.js" */
+/** @import { Cadence } from "./cadence.js" */
 
 // mulberry32 — tiny, deterministic, good enough for test fuzzing.
-function makeRng(seed: number) {
+/** @param {number} seed */
+function makeRng(seed) {
   let a = seed;
   return function rng() {
     a |= 0;
@@ -22,47 +27,59 @@ function makeRng(seed: number) {
 const SEED = 20260823;
 const rng = makeRng(SEED);
 
-function randInt(min: number, max: number): number {
+/**
+ * @param {number} min
+ * @param {number} max
+ * @returns {number}
+ */
+function randInt(min, max) {
   return Math.floor(rng() * (max - min + 1)) + min;
 }
 
 describe("divideCents property: exact reconciliation", () => {
   it(`sums to exactly the total over ${500} randomised (total, weights) pairs, seed ${SEED}`, () => {
     for (let i = 0; i < 500; i++) {
-      const total = randInt(-100_000, 100_000) as Cents;
+      const total = randInt(-100_000, 100_000);
       const weightCount = randInt(1, 12);
       const weights = Array.from({ length: weightCount }, () => randInt(0, 1000));
       const shares = divideCents(total, weights);
-      expect(sumCents(shares as Cents[])).toBe(total);
+      expect(sumCents(shares)).toBe(total);
     }
   });
 
   it("reconciles for a single weight", () => {
-    expect(sumCents(divideCents(12345 as Cents, [1]) as Cents[])).toBe(12345);
+    expect(sumCents(divideCents(12345, [1]))).toBe(12345);
   });
 
   it("reconciles when weights sum to zero", () => {
     for (let i = 0; i < 20; i++) {
-      const total = randInt(-5000, 5000) as Cents;
+      const total = randInt(-5000, 5000);
       const weights = Array.from({ length: randInt(1, 6) }, () => 0);
-      expect(sumCents(divideCents(total, weights) as Cents[])).toBe(total);
+      expect(sumCents(divideCents(total, weights))).toBe(total);
     }
   });
 
   it("reconciles for an empty weight list (vacuously — nothing to sum)", () => {
-    expect(divideCents(500 as Cents, [])).toEqual([]);
+    expect(divideCents(500, [])).toEqual([]);
   });
 });
 
 describe("computeAllocation property: reconciliation and unallocated", () => {
-  const CADENCES: Cadence[] = ["weekly", "fortnightly", "monthly", "every_2_months", "quarterly", "every_6_months", "yearly"];
-  const PCT_BASES: Basis[] = ["pct_of_gross", "pct_of_remaining"];
+  /** @type {Cadence[]} */
+  const CADENCES = ["weekly", "fortnightly", "monthly", "every_2_months", "quarterly", "every_6_months", "yearly"];
+  /** @type {Basis[]} */
+  const PCT_BASES = ["pct_of_gross", "pct_of_remaining"];
 
-  function randomPlan(seedOffset: number): AllocationInput {
+  /**
+   * @param {number} seedOffset
+   * @returns {AllocationInput}
+   */
+  function randomPlan(seedOffset) {
     const gross = toCents(randInt(1000, 20000));
-    const payCadence = CADENCES[randInt(0, CADENCES.length - 1)]!;
+    const payCadence = mustAt(CADENCES, randInt(0, CADENCES.length - 1));
     const stageCount = randInt(1, 4);
-    const lines: AllocationLine[] = [];
+    /** @type {AllocationLine[]} */
+    const lines = [];
     let id = 0;
 
     for (let stage = 1; stage <= stageCount; stage++) {
@@ -87,7 +104,7 @@ describe("computeAllocation property: reconciliation and unallocated", () => {
         }
       } else {
         for (let i = 0; i < lineCount; i++) {
-          const basis = PCT_BASES[randInt(0, PCT_BASES.length - 1)]!;
+          const basis = mustAt(PCT_BASES, randInt(0, PCT_BASES.length - 1));
           lines.push({
             id: `l${id++}_${seedOffset}`,
             stage,
@@ -114,13 +131,19 @@ describe("computeAllocation property: reconciliation and unallocated", () => {
 
   /** Splits 100 into `count` non-negative integer percentages that sum to
    * exactly 100 — largest-remainder on integers, same idea as divideCents. */
-  function distributeIntPercentages(count: number, _rand: () => number): number[] {
+  /**
+   * @param {number} count
+   * @param {() => number} _rand
+   * @returns {number[]}
+   */
+  function distributeIntPercentages(count, _rand) {
     const base = Math.floor(100 / count);
-    const shares = new Array(count).fill(base);
+    const shares = Array.from({ length: count }, () => base);
     let leftover = 100 - base * count;
     let i = 0;
     while (leftover > 0) {
-      shares[i % count]! += 1;
+      const idx = i % count;
+      shares[idx] = mustAt(shares, idx) + 1;
       leftover--;
       i++;
     }

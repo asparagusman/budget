@@ -50,9 +50,10 @@ const routes = app.get("/health", async (c) => {
   return c.json({ ok: true, db: dbOk });
 });
 
-// Exported for the Hono RPC client — apps/web imports only this type,
-// never runtime code, so it stays type-only across the workspace boundary.
-export type ApiRoutes = typeof routes;
+// Consumed by the Hono RPC client in apps/web. A JSDoc @typedef in a module
+// is reachable cross-package as `import("@budget/api").ApiRoutes`, so web
+// still pulls types only — never this file's runtime code.
+/** @typedef {typeof routes} ApiRoutes */
 
 serve({ fetch: app.fetch, port: env.PORT }, (info) => {
   console.log(`API listening on http://localhost:${info.port}`);

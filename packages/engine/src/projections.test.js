@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { futureValueCents } from "./projections.js";
-import { toCents, type Cents } from "./money.js";
+import { toCents } from "./money.js";
 
 describe("futureValueCents", () => {
   it("degrades to simple addition when the rate is zero", () => {
@@ -20,7 +20,7 @@ describe("futureValueCents", () => {
   });
 
   it("handles a zero contribution (pure compounding)", () => {
-    const fv = futureValueCents(toCents(1000), 0 as Cents, 0.02, 6);
+    const fv = futureValueCents(toCents(1000), 0, 0.02, 6);
     expect(fv).toBe(Math.round(100000 * Math.pow(1.02, 6)));
   });
 });
