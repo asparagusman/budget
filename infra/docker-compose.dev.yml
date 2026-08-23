@@ -1,0 +1,7 @@
+services:
+  db:
+    # Local development convenience only: publish the port so host-side
+    # tools (pnpm db:migrate, pnpm db:seed, a local Drizzle Studio, etc.) can
+    # reach Postgres directly. Never add this to the base compose file.
+    ports:
+      - "5432:5432"
