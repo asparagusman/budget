@@ -1,0 +1,200 @@
+/*
+ * Design tokens — the single source of truth for every colour, radius and
+ * shadow in the app. See ".claude/plans/phases/02-design-system.md" and the
+ * phase README's "Aesthetic target" section for the rules this file exists
+ * to enforce:
+ *
+ *   - No phase after this one invents a colour, radius, shadow or spacing
+ *     value. If a token you need doesn't exist, add it here.
+ *   - Green/red (--positive / --negative) are reserved for financial
+ *     direction only — never UI chrome.
+ *
+ * Bare :root holds the COMPLETE light palette. The media-query block and the
+ * [data-theme="dark"] block only ever *redefine* names that already exist
+ * here — never introduce a token whose only definition lives in one of them.
+ */
+
+:root {
+  /* ---- ground & surfaces ---- */
+  --bg: oklch(0.969 0.004 264);
+  --surface: oklch(1 0 0);
+  --surface-muted: oklch(0.958 0.005 264);
+  --border: oklch(0.906 0.006 264);
+
+  /* ---- text ---- */
+  --text: oklch(0.205 0.012 264);
+  --text-muted: oklch(0.478 0.014 264);
+  --text-subtle: oklch(0.596 0.014 264);
+
+  /* ---- accent (the one restrained brand colour) ---- */
+  --accent: oklch(0.551 0.176 259);
+  --accent-fg: oklch(0.99 0 0);
+  --accent-soft: oklch(0.926 0.032 259);
+
+  /* ---- financial direction — never used as UI chrome ---- */
+  --positive: oklch(0.6 0.14 152);
+  --positive-soft: oklch(0.937 0.045 152);
+  --negative: oklch(0.577 0.192 25);
+  --negative-soft: oklch(0.936 0.05 25);
+  --warning: oklch(0.75 0.15 80);
+  --warning-soft: oklch(0.951 0.06 85);
+
+  /* ---- elevation ---- */
+  --shadow-card: 0 1px 2px oklch(0.2 0.02 264 / 4%), 0 8px 24px oklch(0.2 0.02 264 / 6%);
+  --shadow-raised: 0 4px 10px oklch(0.2 0.02 264 / 6%), 0 20px 48px oklch(0.2 0.02 264 / 10%);
+
+  /* ---- geometry ---- */
+  --radius-card: 1rem;
+  --radius-control: 0.625rem;
+  /* Tailwind's `rounded-full` is already exactly this value — prefer it in
+     JSX over `rounded-[var(--radius-pill)]`. The token still exists for the
+     rare non-Tailwind consumer (an inline style, an SVG clip-path). */
+  --radius-pill: 9999px;
+
+  /* ---- charts (categorical series + gridlines/axis, token-driven) ---- */
+  --chart-line-1: var(--accent);
+  --chart-line-2: oklch(0.7 0.15 200);
+  --chart-line-3: oklch(0.75 0.15 130);
+  --chart-line-4: oklch(0.7 0.16 40);
+  --chart-line-5: oklch(0.65 0.14 320);
+  --chart-grid: var(--border);
+  --chart-axis-label: var(--text-subtle);
+}
+
+/* ---- dark by system preference, unless explicitly set to light ---- */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: oklch(0.199 0.008 264);
+    --surface: oklch(0.257 0.009 264);
+    --surface-muted: oklch(0.303 0.01 264);
+    --border: oklch(0.354 0.012 264);
+
+    --text: oklch(0.946 0.004 264);
+    --text-muted: oklch(0.72 0.012 264);
+    --text-subtle: oklch(0.58 0.012 264);
+
+    --accent: oklch(0.716 0.146 259);
+    --accent-fg: oklch(0.15 0.03 259);
+    --accent-soft: oklch(0.348 0.06 259);
+
+    --positive: oklch(0.72 0.14 152);
+    --positive-soft: oklch(0.32 0.06 152);
+    --negative: oklch(0.7 0.17 25);
+    --negative-soft: oklch(0.34 0.07 25);
+    --warning: oklch(0.8 0.13 85);
+    --warning-soft: oklch(0.36 0.07 85);
+
+    --shadow-card: 0 1px 2px oklch(0 0 0 / 30%), 0 8px 24px oklch(0 0 0 / 40%);
+    --shadow-raised: 0 4px 10px oklch(0 0 0 / 35%), 0 20px 48px oklch(0 0 0 / 50%);
+
+    --chart-line-1: var(--accent);
+    --chart-line-2: oklch(0.72 0.13 200);
+    --chart-line-3: oklch(0.78 0.14 130);
+    --chart-line-4: oklch(0.74 0.15 40);
+    --chart-line-5: oklch(0.72 0.13 320);
+  }
+}
+
+/* ---- dark by explicit choice ---- */
+:root[data-theme="dark"] {
+  --bg: oklch(0.199 0.008 264);
+  --surface: oklch(0.257 0.009 264);
+  --surface-muted: oklch(0.303 0.01 264);
+  --border: oklch(0.354 0.012 264);
+
+  --text: oklch(0.946 0.004 264);
+  --text-muted: oklch(0.72 0.012 264);
+  --text-subtle: oklch(0.58 0.012 264);
+
+  --accent: oklch(0.716 0.146 259);
+  --accent-fg: oklch(0.15 0.03 259);
+  --accent-soft: oklch(0.348 0.06 259);
+
+  --positive: oklch(0.72 0.14 152);
+  --positive-soft: oklch(0.32 0.06 152);
+  --negative: oklch(0.7 0.17 25);
+  --negative-soft: oklch(0.34 0.07 25);
+  --warning: oklch(0.8 0.13 85);
+  --warning-soft: oklch(0.36 0.07 85);
+
+  --shadow-card: 0 1px 2px oklch(0 0 0 / 30%), 0 8px 24px oklch(0 0 0 / 40%);
+  --shadow-raised: 0 4px 10px oklch(0 0 0 / 35%), 0 20px 48px oklch(0 0 0 / 50%);
+
+  --chart-line-1: var(--accent);
+  --chart-line-2: oklch(0.72 0.13 200);
+  --chart-line-3: oklch(0.78 0.14 130);
+  --chart-line-4: oklch(0.74 0.15 40);
+  --chart-line-5: oklch(0.72 0.13 320);
+}
+
+@theme {
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  /* shadcn's generated CardTitle/DialogTitle use `font-heading`; we use one
+     geometric sans for everything, so it's just an alias. */
+  --font-heading: var(--font-sans);
+
+  /* Expose every token as a Tailwind utility (bg-surface, text-muted, …). */
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
+  --color-border: var(--border);
+
+  --color-text: var(--text);
+  --color-text-muted: var(--text-muted);
+  --color-text-subtle: var(--text-subtle);
+
+  /* Our brand accent is exposed as `accent-brand`, not `accent` — shadcn's
+     own `--color-accent` (below) means a neutral hover/highlight tint, and
+     the two must not collide. For the brand blue, prefer `bg-primary` /
+     `text-primary` (also mapped to it, below) in shadcn-composed UI, and
+     `bg-accent-brand` / `text-accent-brand` in bespoke components. */
+  --color-accent-brand: var(--accent);
+  --color-accent-brand-fg: var(--accent-fg);
+  --color-accent-brand-soft: var(--accent-soft);
+
+  --color-positive: var(--positive);
+  --color-positive-soft: var(--positive-soft);
+  --color-negative: var(--negative);
+  --color-negative-soft: var(--negative-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+
+  /* Radius, shadow and chart tokens stay off this block deliberately: their
+     names are already the ones Tailwind's own namespaces would generate
+     (`--radius-card` IS the `--radius-*` namespace), so re-declaring them
+     here would self-reference against the bare :root value instead of
+     aliasing it. Reach for them as `rounded-[var(--radius-card)]`,
+     `shadow-[var(--shadow-card)]` etc. — arbitrary values read the real
+     custom property with no risk of that cycle. */
+
+  /* ---- shadcn/ui primitives: wired onto our tokens, never a parallel
+     palette. Only the names shadcn's generated components actually consume
+     are mapped — see the grep in the phase-02 notes for the full list. ---- */
+  --color-background: var(--bg);
+  --color-foreground: var(--text);
+  --color-card: var(--surface);
+  --color-card-foreground: var(--text);
+  --color-popover: var(--surface);
+  --color-popover-foreground: var(--text);
+  --color-primary: var(--accent);
+  --color-primary-foreground: var(--accent-fg);
+  --color-secondary: var(--surface-muted);
+  --color-secondary-foreground: var(--text);
+  --color-muted: var(--surface-muted);
+  --color-muted-foreground: var(--text-muted);
+  /* shadcn's "accent" is a neutral hover/highlight tint (menu items, select
+     rows) — a different concept from our brand --accent above. */
+  --color-accent: var(--accent-soft);
+  --color-accent-foreground: var(--text);
+  --color-destructive: var(--negative);
+  --color-input: var(--border);
+  --color-ring: var(--accent);
+
+  --radius: var(--radius-control);
+  --radius-md: var(--radius-control);
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+}

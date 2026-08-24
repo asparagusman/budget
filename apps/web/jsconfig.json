@@ -8,7 +8,14 @@
     // this file is named jsconfig.json, TypeScript forces its own default of
     // 2 over any *inherited* value, and only a locally-set one wins. At 2,
     // checkJs typechecks dependencies' own .js sources (chai, via vitest).
-    "maxNodeModuleJsDepth": 0
+    "maxNodeModuleJsDepth": 0,
+    // `@/*` mirrors the alias in vite.config.js. Needed for shadcn/ui's
+    // generated imports and used throughout src/ instead of long `../../`
+    // chains that break when a file moves.
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    }
   },
   "include": ["src", "vite.config.js"],
   // `checkJs` would otherwise typecheck the built bundle in dist/.

@@ -4,6 +4,26 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Budget</title>
+    <!--
+      Blocking, synchronous and deliberately tiny: applies the stored theme
+      preference before first paint. Doing this from React is too late — the
+      page would flash light before hydration flips it to dark. Keep this in
+      lockstep with src/lib/theme.js (same storage key, same values).
+    -->
+    <script>
+      (function () {
+        try {
+          var stored = localStorage.getItem("budget:theme");
+          if (stored === "light" || stored === "dark") {
+            document.documentElement.setAttribute("data-theme", stored);
+          }
+          // "system", missing, or anything unrecognised: leave data-theme
+          // unset so prefers-color-scheme decides, per tokens.css.
+        } catch {
+          // Private window or blocked storage — fall back to system.
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

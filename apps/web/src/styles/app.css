@@ -1,1 +1,36 @@
 @import "tailwindcss";
+
+/* Radix's data-state animations (accordion/dialog/dropdown open+close etc.)
+   used by the generated shadcn/ui primitives. */
+@import "tw-animate-css";
+
+/* Self-hosted, variable-weight Inter. No Google Fonts request — this app is
+   served over Tailscale to devices that may have no general internet route,
+   and a blocked font request must not leave the page rendering in the
+   system fallback. */
+@import "@fontsource-variable/inter";
+
+@import "./tokens.css";
+
+@custom-variant dark (&:is([data-theme="dark"] *));
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+  }
+
+  body {
+    /* Tokens, not Tailwind's bg-white/text-black — see tokens.css. */
+    background: var(--bg);
+    color: var(--text);
+  }
+
+  /* The page body itself never scrolls horizontally; a table or chart wide
+     enough to overflow gets its own `overflow-x: auto` container instead. */
+  html,
+  body,
+  #root {
+    overflow-x: hidden;
+    max-width: 100%;
+  }
+}
