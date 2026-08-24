@@ -8,11 +8,15 @@
     "dev": "node --watch src/index.js",
     "build": "tsup",
     "start": "node dist/index.js",
-    "typecheck": "tsc -p jsconfig.json"
+    "typecheck": "tsc -p jsconfig.json",
+    "auth:invite": "node src/scripts/auth-invite.js"
   },
   "dependencies": {
+    "@budget/engine": "workspace:*",
     "@budget/schema": "workspace:*",
     "@hono/node-server": "^2.1.1",
+    "@hono/zod-validator": "^0.9.0",
+    "@simplewebauthn/server": "^13.3.2",
     "dotenv": "^17.4.2",
     "drizzle-orm": "^0.45.2",
     "hono": "^4.13.3",

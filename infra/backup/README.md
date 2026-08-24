@@ -58,3 +58,22 @@ age -d -i backup-key.txt /path/on/host/backups/budget-20260101-030000.sql.gz.age
 Restoring into a fresh/empty database is the normal case. Restoring on top of an existing
 one will conflict on primary keys — drop and recreate the `budget` database first, or
 restore into a scratch database and reconcile by hand.
+
+## Recovery — losing every passkey
+
+There are no recovery codes to lose, and no email-based reset. The operator has shell
+access to the box, so recovery is a single CLI command run inside the running `api`
+container:
+
+```sh
+docker compose exec api pnpm auth:invite --user "Lachlan" --purpose new_device
+```
+
+It prints a fresh invite link (open it on whatever device you're recovering with) and
+writes an `audit_log` entry with `createdBy: null`, so it's distinguishable from an invite
+minted by a logged-in user. The invite is single-use and expires after 24 hours, same as
+one minted from Settings → Users.
+
+To recover the very first user's access when the `users` table itself is somehow empty
+again (e.g. a restore from a backup taken before bootstrap), just visit the app — it
+detects the empty table and shows the bootstrap screen again, no CLI needed.

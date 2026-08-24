@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { router } from "./router.jsx";
 import { ThemeProvider } from "./lib/theme.jsx";
 import { SettingsProvider } from "./lib/settings.jsx";
+import { AuthProvider } from "./lib/auth.jsx";
 import { TooltipProvider } from "./components/ui/tooltip.jsx";
 import { Toaster } from "./components/ui/sonner.jsx";
 import { CommandPalette } from "./components/command-palette.jsx";
@@ -20,11 +21,13 @@ createRoot(rootEl).render(
     <ThemeProvider>
       <SettingsProvider>
         <QueryClientProvider client={queryClient}>
-          <TooltipProvider>
-            <RouterProvider router={router} />
-            <CommandPalette />
-            <Toaster />
-          </TooltipProvider>
+          <AuthProvider>
+            <TooltipProvider>
+              <RouterProvider router={router} />
+              <CommandPalette />
+              <Toaster />
+            </TooltipProvider>
+          </AuthProvider>
         </QueryClientProvider>
       </SettingsProvider>
     </ThemeProvider>

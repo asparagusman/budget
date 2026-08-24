@@ -15,4 +15,9 @@ export default defineConfig({
   server: {
     port: 5173,
   },
+  // Vite's default envDir is this package's own directory; the repo keeps a
+  // single .env at the root (see apps/api/src/env.js, packages/schema's
+  // seed/drizzle configs), so VITE_* vars — VITE_API_URL in particular —
+  // would otherwise silently never load in dev.
+  envDir: fileURLToPath(new URL("../../", import.meta.url)),
 });

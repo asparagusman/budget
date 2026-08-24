@@ -13,7 +13,8 @@
     "test": "pnpm -r test",
     "db:migrate": "pnpm -F @budget/schema migrate",
     "db:generate": "pnpm -F @budget/schema generate",
-    "db:seed": "pnpm -F @budget/schema seed"
+    "db:seed": "pnpm -F @budget/schema seed",
+    "auth:invite": "pnpm -F @budget/api auth:invite"
   },
   "devDependencies": {
     "concurrently": "^9.0.0",

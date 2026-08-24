@@ -1,10 +1,20 @@
 import { useEffect, useState } from "react";
-import { Link, useRouterState } from "@tanstack/react-router";
-import { ChevronsLeft, ChevronsRight, Search } from "lucide-react";
+import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
+import { ChevronsLeft, ChevronsRight, LogOut, Search } from "lucide-react";
 import { cn } from "@/lib/utils.js";
 import { NAV_ITEMS } from "@/lib/nav.js";
 import { ThemeToggle } from "@/components/theme-toggle.jsx";
 import { toggleCommandPalette } from "@/lib/commands.js";
+import { api } from "@/lib/api.js";
+import { useAuth } from "@/lib/auth.jsx";
+
+/** @param {string} name */
+function initials(name) {
+  const parts = name.trim().split(/\s+/);
+  const first = parts[0]?.[0] ?? "";
+  const last = parts.length > 1 ? parts[parts.length - 1]?.[0] ?? "" : "";
+  return (first + last).toUpperCase() || "?";
+}
 
 const STORAGE_KEY = "budget:sidebar-collapsed";
 
@@ -34,6 +44,15 @@ function writeCollapsed(collapsed) {
 export function Sidebar() {
   const [collapsed, setCollapsed] = useState(readCollapsed);
   const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const navigate = useNavigate();
+  const { state: authState, refresh } = useAuth();
+  const user = authState?.user ?? null;
+
+  async function signOut() {
+    await api.auth.logout.$post();
+    await refresh();
+    navigate({ to: "/login", replace: true });
+  }
 
   useEffect(() => {
     writeCollapsed(collapsed);
@@ -101,19 +120,29 @@ export function Sidebar() {
 
       <div className="flex flex-col gap-3 border-t border-border p-3">
         <div className="flex items-center gap-2">
-          <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-surface-muted text-xs font-medium text-text-muted">
-            ?
+          <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent-brand-soft text-xs font-medium text-accent-brand">
+            {user ? initials(user.displayName) : "?"}
           </div>
           {!collapsed && (
-            <div className="min-w-0">
-              {/* Placeholder user block — phase 03 owns real identity. */}
+            <div className="min-w-0 flex-1">
               <p className="truncate text-sm font-medium text-text">
-                Operator
+                {user?.displayName ?? "Not signed in"}
               </p>
               <p className="truncate text-xs text-text-subtle">
-                Not signed in
+                {user?.email ?? ""}
               </p>
             </div>
+          )}
+          {!collapsed && user && (
+            <button
+              type="button"
+              onClick={signOut}
+              title="Sign out"
+              aria-label="Sign out"
+              className="flex size-8 shrink-0 items-center justify-center rounded-full text-text-muted transition-colors hover:bg-surface-muted hover:text-text"
+            >
+              <LogOut className="size-4" aria-hidden="true" />
+            </button>
           )}
         </div>
         <div

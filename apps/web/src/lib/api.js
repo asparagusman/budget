@@ -20,6 +20,10 @@ if (!apiUrl) {
   throw new Error("VITE_API_URL is not set.");
 }
 
+// `credentials: 'include'` so the session cookie travels on every call —
+// web and api are on different ports in dev (different origins, same site;
+// see apps/api/src/index.js's CORS setup) and share one origin in
+// production, where this is a no-op.
 export const api = /** @type {ReturnType<typeof hc<ApiRoutes>>} */ (
-  /** @type {unknown} */ (hc(apiUrl))
+  /** @type {unknown} */ (hc(apiUrl, { init: { credentials: "include" } }))
 );

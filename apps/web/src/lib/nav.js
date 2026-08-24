@@ -32,7 +32,10 @@ export const NAV_ITEMS = [
   { to: "/projections", label: "Projections", icon: TrendingUp, phase: "09", chord: "p" },
   { to: "/calendar", label: "Calendar", icon: CalendarDays, phase: "06", chord: "c" },
   { to: "/accounts", label: "Accounts", icon: Landmark, phase: "04", chord: "a" },
-  { to: "/settings", label: "Settings", icon: SettingsIcon, phase: "03/04", chord: "s" },
+  // Phase 03 only builds the users/devices/sessions/invites surface — a
+  // later phase may grow a general /settings landing page with this as one
+  // tab among others; until then this nav entry points straight at it.
+  { to: "/settings/users", label: "Settings", icon: SettingsIcon, phase: "03", chord: "s" },
 ];
 
 // The five destinations that get a permanent slot in the mobile bottom nav.

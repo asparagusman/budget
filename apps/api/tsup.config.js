@@ -15,5 +15,14 @@ export default defineConfig({
   // @budget/schema rather than by src/index.ts directly), so this list is
   // spelled out rather than left to the default.
   noExternal: ["@budget/schema", "@budget/engine"],
-  external: ["hono", "@hono/node-server", "pg", "drizzle-orm", "zod", "dotenv"],
+  external: [
+    "hono",
+    "@hono/node-server",
+    "@hono/zod-validator",
+    "pg",
+    "drizzle-orm",
+    "zod",
+    "dotenv",
+    "@simplewebauthn/server",
+  ],
 });
