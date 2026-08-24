@@ -17,26 +17,17 @@ import { mustAt } from "./invariant.js";
 /**
  * Half-open: [from, to).
  *
- * @typedef {object} DateWindow
- * @property {IsoDate} from
- * @property {IsoDate} to
+ * @typedef {{ from: IsoDate, to: IsoDate }} DateWindow
  */
 
-/**
- * @typedef {object} PaySchedule
- * @property {IsoDate} anchorDate
- * @property {Cadence} cadence
- */
+/** @typedef {{ anchorDate: IsoDate, cadence: Cadence }} PaySchedule */
 
 // Internal only: Date is used purely as a calendar-arithmetic scratchpad.
 // Every value is constructed and read back through *local* getters/setters
 // only — never UTC, never toISOString — so the machine's timezone can never
 // leak into a result. As long as construction and reading stay on the same
 // side of that line, the actual local offset is irrelevant.
-/**
- * @param {IsoDate} iso
- * @returns {Date}
- */
+/** @param {IsoDate} iso */
 function parseIsoDate(iso) {
   const parts = iso.split("-");
   const y = Number(parts[0]);
@@ -45,10 +36,7 @@ function parseIsoDate(iso) {
   return new Date(y, m - 1, d);
 }
 
-/**
- * @param {Date} date
- * @returns {IsoDate}
- */
+/** @param {Date} date */
 function formatIsoDate(date) {
   const y = date.getFullYear();
   const m = String(date.getMonth() + 1).padStart(2, "0");
@@ -77,7 +65,6 @@ const MONTHS_PER_OCCURRENCE = {
  * fails loudly instead of silently producing NaN dates.
  *
  * @param {Cadence} cadence
- * @returns {number}
  */
 function monthsPerOccurrence(cadence) {
   const months = MONTHS_PER_OCCURRENCE[cadence];
@@ -97,7 +84,6 @@ function monthsPerOccurrence(cadence) {
  * @param {Date} anchor
  * @param {Cadence} cadence
  * @param {number} k
- * @returns {Date}
  */
 function occurrenceDate(anchor, cadence, k) {
   const days = DAYS_PER_OCCURRENCE[cadence];
@@ -111,7 +97,6 @@ function occurrenceDate(anchor, cadence, k) {
  * @param {Date} anchor
  * @param {Cadence} cadence
  * @param {Date} target
- * @returns {number}
  */
 function estimateIndex(anchor, cadence, target) {
   const days = DAYS_PER_OCCURRENCE[cadence];
@@ -129,7 +114,6 @@ const MAX_WALK = 1_000_000;
  *
  * @param {PaySchedule} schedule
  * @param {DateWindow} window
- * @returns {IsoDate[]}
  */
 export function projectPaydays(schedule, window) {
   const anchor = parseIsoDate(schedule.anchorDate);
@@ -168,7 +152,6 @@ export function projectPaydays(schedule, window) {
 /**
  * @param {PaySchedule} schedule
  * @param {DateWindow} window
- * @returns {number}
  */
 export function countPaydays(schedule, window) {
   return projectPaydays(schedule, window).length;
@@ -178,7 +161,6 @@ export function countPaydays(schedule, window) {
  * `[from, to)` convention).
  *
  * @param {DateWindow} window
- * @returns {number}
  */
 export function windowLengthDays(window) {
   return differenceInCalendarDays(
@@ -191,7 +173,6 @@ export function windowLengthDays(window) {
  *
  * @param {IsoDate} date
  * @param {number} days
- * @returns {IsoDate}
  */
 export function addDaysIso(date, days) {
   return formatIsoDate(addDays(parseIsoDate(date), days));
@@ -201,7 +182,6 @@ export function addDaysIso(date, days) {
  *
  * @param {IsoDate} from
  * @param {IsoDate} to
- * @returns {number}
  */
 export function daysBetween(from, to) {
   return differenceInCalendarDays(parseIsoDate(to), parseIsoDate(from));
@@ -212,7 +192,6 @@ export function daysBetween(from, to) {
  *
  * @param {PaySchedule} primary
  * @param {IsoDate} on
- * @returns {{ cycleStart: IsoDate, cycleEnd: IsoDate }}
  */
 export function resolveCycle(primary, on) {
   const anchor = parseIsoDate(primary.anchorDate);
@@ -240,10 +219,13 @@ export function resolveCycle(primary, on) {
 }
 
 /**
- * @typedef {object} VariantScheduleEntry
- * @property {string} variantId
- * @property {IsoDate} startsOn
- * @property {IsoDate | null} endsOn null = open-ended, still in effect.
+ * @typedef {{
+ *   variantId: string,
+ *   startsOn: IsoDate,
+ *   endsOn: IsoDate | null
+ * }} VariantScheduleEntry
+ *
+ * - `endsOn` — null = open-ended, still in effect.
  */
 
 /**
@@ -252,9 +234,10 @@ export function resolveCycle(primary, on) {
  */
 
 /**
- * @typedef {object} VariantResolution
- * @property {string | null} variantId
- * @property {VariantDiagnostic[]} diagnostics
+ * @typedef {{
+ *   variantId: string | null,
+ *   diagnostics: VariantDiagnostic[]
+ * }} VariantResolution
  */
 
 /**
@@ -273,7 +256,6 @@ export function resolveCycle(primary, on) {
  *
  * @param {VariantScheduleEntry[]} entries
  * @param {IsoDate} on
- * @returns {VariantResolution}
  */
 export function resolveVariant(entries, on) {
   const onDate = parseIsoDate(on);

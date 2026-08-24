@@ -31,7 +31,6 @@ export const OCCURRENCES_PER_YEAR = {
  *
  * @param {Cents} amount
  * @param {Cadence} from
- * @returns {Cents}
  */
 export function annualise(amount, from) {
   return Math.round(amount * OCCURRENCES_PER_YEAR[from]);
@@ -41,7 +40,6 @@ export function annualise(amount, from) {
  * @param {Cents} amount
  * @param {Cadence} from
  * @param {Cadence} to
- * @returns {Cents}
  */
 export function equivalent(amount, from, to) {
   const annual = amount * OCCURRENCES_PER_YEAR[from];

@@ -28,10 +28,7 @@ import { FIXED_COST_BILLS_CORRECTED } from "./corrected.js";
 
 /** @import { Cents } from "../money.js" */
 
-/**
- * @param {Cents} c
- * @returns {number}
- */
+/** @param {Cents} c */
 function centsToDollars(c) {
   return c / 100;
 }
@@ -49,10 +46,7 @@ function expectDollarsNear(actual, expectedDollars, toleranceCents = 2) {
 
 /** Sum of `equivalent(bill, 'monthly')` over a set of bills — the
  * conventional-equivalence fixed-cost total that feeds `AllocationInput`. */
-/**
- * @param {typeof FIXED_COST_BILLS} bills
- * @returns {Cents}
- */
+/** @param {typeof FIXED_COST_BILLS} bills */
 function fixedTotalMonthlyCents(bills) {
   return bills
     .map((b) => equivalent(b.baseAmountCents, b.frequency, "monthly"))

@@ -30,7 +30,6 @@ const rng = makeRng(SEED);
 /**
  * @param {number} min
  * @param {number} max
- * @returns {number}
  */
 function randInt(min, max) {
   return Math.floor(rng() * (max - min + 1)) + min;
@@ -70,10 +69,7 @@ describe("computeAllocation property: reconciliation and unallocated", () => {
   /** @type {Basis[]} */
   const PCT_BASES = ["pct_of_gross", "pct_of_remaining"];
 
-  /**
-   * @param {number} seedOffset
-   * @returns {AllocationInput}
-   */
+  /** @param {number} seedOffset */
   function randomPlan(seedOffset) {
     const gross = toCents(randInt(1000, 20000));
     const payCadence = mustAt(CADENCES, randInt(0, CADENCES.length - 1));
@@ -134,7 +130,6 @@ describe("computeAllocation property: reconciliation and unallocated", () => {
   /**
    * @param {number} count
    * @param {() => number} _rand
-   * @returns {number[]}
    */
   function distributeIntPercentages(count, _rand) {
     const base = Math.floor(100 / count);

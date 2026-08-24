@@ -12,25 +12,31 @@ import {
 /** @typedef {"flat" | "seasonal" | "rolling_average" | "escalating"} AmountModel */
 
 /**
- * @typedef {object} Bill
- * @property {string} id
- * @property {Cents} baseAmountCents
- * @property {Cadence} frequency
- * @property {IsoDate} anchorDate
- * @property {AmountModel} amountModel
- * @property {number} [escalationPct] % per year, `escalating` only.
- * @property {number} [rollingWindow] N past actuals to average, `rolling_average` only.
- * @property {Record<number, number>} [seasonalFactors] month 1-12 → multiplier, `seasonal` only.
- * @property {Array<{ effectiveFrom: IsoDate, newAmountCents: Cents }>} [stepChanges]
+ * @typedef {{
+ *   id: string,
+ *   baseAmountCents: Cents,
+ *   frequency: Cadence,
+ *   anchorDate: IsoDate,
+ *   amountModel: AmountModel,
+ *   escalationPct?: number,
+ *   rollingWindow?: number,
+ *   seasonalFactors?: Record<number, number>,
+ *   stepChanges?: Array<{ effectiveFrom: IsoDate, newAmountCents: Cents }>
+ * }} Bill
+ *
+ * - `escalationPct` — % per year, `escalating` only.
+ * - `rollingWindow` — N past actuals to average, `rolling_average` only.
+ * - `seasonalFactors` — month 1-12 → multiplier, `seasonal` only.
  */
 
 /**
- * @typedef {object} BillInstance
- * @property {string} billId
- * @property {IsoDate} dueDate
- * @property {Cents} expectedCents
- * @property {Cents | null} actualCents
- * @property {boolean} isOverride
+ * @typedef {{
+ *   billId: string,
+ *   dueDate: IsoDate,
+ *   expectedCents: Cents,
+ *   actualCents: Cents | null,
+ *   isOverride: boolean
+ * }} BillInstance
  */
 
 /** The step-adjusted base at `dueDate`: the latest step change with
@@ -40,7 +46,6 @@ import {
  *
  * @param {Bill} bill
  * @param {IsoDate} dueDate
- * @returns {Cents}
  */
 function stepAdjustedBase(bill, dueDate) {
   const applicable = (bill.stepChanges ?? []).filter(
@@ -59,7 +64,6 @@ function stepAdjustedBase(bill, dueDate) {
  *
  * @param {IsoDate} anchor
  * @param {IsoDate} due
- * @returns {number}
  */
 function fullYearsElapsed(anchor, due) {
   const a = anchor.split("-");
@@ -79,7 +83,6 @@ function fullYearsElapsed(anchor, due) {
  * @param {Bill} bill
  * @param {IsoDate} dueDate
  * @param {BillInstance[]} history
- * @returns {Cents}
  */
 function computeExpectedCents(bill, dueDate, history) {
   const base = stepAdjustedBase(bill, dueDate);
@@ -123,7 +126,6 @@ function computeExpectedCents(bill, dueDate, history) {
  * @param {Bill} bill
  * @param {DateWindow} window
  * @param {BillInstance[]} [history]
- * @returns {BillInstance[]}
  */
 export function projectInstances(bill, window, history = []) {
   const dueDates = projectPaydays(
@@ -162,7 +164,6 @@ export function projectInstances(bill, window, history = []) {
  * @param {BillInstance[]} instances
  * @param {DateWindow} window
  * @param {PaySchedule} paySchedule
- * @returns {{ perPayCents: Cents, perMonthCents: Cents, perYearCents: Cents }}
  */
 export function billsContribution(instances, window, paySchedule) {
   const inWindow = instances.filter(
@@ -184,21 +185,23 @@ export function billsContribution(instances, window, paySchedule) {
 }
 
 /**
- * @typedef {object} BalancePoint
- * @property {IsoDate} date
- * @property {Cents} balanceCents
- * @property {"payday" | "bill"} event
+ * @typedef {{
+ *   date: IsoDate,
+ *   balanceCents: Cents,
+ *   event: "payday" | "bill"
+ * }} BalancePoint
  */
 
 /**
  * One credit or debit in the simulated ledger. Module-level rather than
  * function-local because JSDoc typedefs have no function scope.
  *
- * @typedef {object} BalanceEvent
- * @property {IsoDate} date
- * @property {"payday" | "bill"} kind
- * @property {Cents} amountCents
- * @property {number} order
+ * @typedef {{
+ *   date: IsoDate,
+ *   kind: "payday" | "bill",
+ *   amountCents: Cents,
+ *   order: number
+ * }} BalanceEvent
  */
 
 /**
@@ -206,7 +209,6 @@ export function billsContribution(instances, window, paySchedule) {
  * @param {"payday" | "bill"} kind
  * @param {Cents} amountCents
  * @param {number} order
- * @returns {BalanceEvent}
  */
 function balanceEvent(date, kind, amountCents, order) {
   return { date, kind, amountCents, order };
@@ -223,7 +225,6 @@ function balanceEvent(date, kind, amountCents, order) {
  * @param {Cents} contributionPerPayCents
  * @param {IsoDate[]} paydays
  * @param {Cents} openingBalanceCents
- * @returns {BalancePoint[]}
  */
 export function simulateBalance(
   instances,
@@ -270,7 +271,6 @@ export function simulateBalance(
  * @param {Cents} contributionPerPayCents
  * @param {IsoDate[]} paydays
  * @param {Cents} bufferCents
- * @returns {Cents}
  */
 export function requiredOpeningBalanceCents(
   instances,

@@ -8,13 +8,14 @@ import { addDaysIso, daysBetween } from "./calendar.js";
 /** @typedef {"amount" | "months_of_expenses"} TargetMode */
 
 /**
- * @typedef {object} Goal
- * @property {string} id
- * @property {string} accountId
- * @property {TargetMode} targetMode
- * @property {Cents | null} targetAmountCents
- * @property {number | null} targetMonths
- * @property {IsoDate | null} targetDate
+ * @typedef {{
+ *   id: string,
+ *   accountId: string,
+ *   targetMode: TargetMode,
+ *   targetAmountCents: Cents | null,
+ *   targetMonths: number | null,
+ *   targetDate: IsoDate | null
+ * }} Goal
  */
 
 /** @typedef {{ date: IsoDate, balanceCents: Cents }} CurvePoint */
@@ -24,7 +25,6 @@ import { addDaysIso, daysBetween } from "./calendar.js";
  *
  * @param {Goal} goal
  * @param {Cents} monthlyEssentialBurnCents
- * @returns {Cents}
  */
 export function resolveTargetCents(goal, monthlyEssentialBurnCents) {
   if (goal.targetMode === "amount") {
@@ -36,17 +36,13 @@ export function resolveTargetCents(goal, monthlyEssentialBurnCents) {
 /**
  * @param {number} annualGrowthRate
  * @param {Cadence} cadence
- * @returns {number}
  */
 function perPeriodRate(annualGrowthRate, cadence) {
   if (annualGrowthRate === 0) return 0;
   return Math.pow(1 + annualGrowthRate, 1 / OCCURRENCES_PER_YEAR[cadence]) - 1;
 }
 
-/**
- * @param {Cadence} cadence
- * @returns {number}
- */
+/** @param {Cadence} cadence */
 function approxDaysPerPeriod(cadence) {
   return 365.25 / OCCURRENCES_PER_YEAR[cadence];
 }
@@ -67,11 +63,6 @@ const MAX_PERIODS = 5_000_000;
  *   annualGrowthRate: number,
  *   from: IsoDate,
  * }} args `annualGrowthRate` is 0 for no growth.
- * @returns {{
- *   eta: IsoDate | null,
- *   aheadBehindDays: number | null,
- *   curve: CurvePoint[],
- * }}
  */
 export function goalEta(args) {
   const {
@@ -102,10 +93,7 @@ export function goalEta(args) {
   const rate = perPeriodRate(annualGrowthRate, payCadence);
   const daysStep = approxDaysPerPeriod(payCadence);
 
-  /**
-   * @param {number} r
-   * @returns {{ curve: CurvePoint[], elapsedDays: number, reached: boolean }}
-   */
+  /** @param {number} r */
   const simulate = (r) => {
     /** @type {CurvePoint[]} */
     const curve = [{ date: from, balanceCents: currentBalanceCents }];
@@ -158,12 +146,6 @@ export function goalEta(args) {
  *   grossPerMonthCents: Cents,
  *   from: IsoDate,
  * }} args
- * @returns {{
- *   perPayCents: Cents,
- *   perMonthCents: Cents,
- *   pctOfGross: number,
- *   feasible: boolean,
- * }}
  */
 export function goalRequired(args) {
   const days = daysBetween(args.from, args.targetDate);

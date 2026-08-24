@@ -13,7 +13,6 @@
  * @param {Map<K, V>} map
  * @param {K} key
  * @param {string} [label] Noun used in the error message.
- * @returns {V}
  */
 export function mustGet(map, key, label = "value") {
   const found = map.get(key);
@@ -30,7 +29,6 @@ export function mustGet(map, key, label = "value") {
  * @param {readonly T[]} arr
  * @param {number} index
  * @param {string} [label] Noun used in the error message.
- * @returns {T}
  */
 export function mustAt(arr, index, label = "element") {
   const found = arr[index];
@@ -49,7 +47,6 @@ export function mustAt(arr, index, label = "element") {
  * @param {readonly T[]} arr
  * @param {(item: T) => boolean} predicate
  * @param {string} [label] Noun used in the error message.
- * @returns {T}
  */
 export function mustFind(arr, predicate, label = "match") {
   const found = arr.find(predicate);

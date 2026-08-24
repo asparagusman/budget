@@ -1,9 +1,0 @@
-{
-  "extends": "../../tsconfig.base.json",
-  "compilerOptions": {
-    "types": ["node"]
-  },
-  "include": ["src", "tsup.config.js"],
-  // `checkJs` would otherwise happily typecheck the tsup bundle in dist/.
-  "exclude": ["dist"]
-}

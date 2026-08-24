@@ -17,8 +17,7 @@ export function RootPage() {
         <h1 className="text-xl font-semibold text-gray-900">Foundation OK</h1>
         <p className="mt-2 text-sm text-gray-500">
           {health.isLoading && "Checking API…"}
-          {health.isError &&
-            `API unreachable: ${/** @type {Error} */ (health.error).message}`}
+          {health.isError && `API unreachable: ${health.error?.message}`}
           {health.data &&
             `API ok: ${health.data.ok}, db: ${health.data.db}`}
         </p>

@@ -6,11 +6,13 @@
     "moduleResolution": "Bundler",
     "moduleDetection": "force",
 
-    // Sources are plain JS with types in JSDoc. `checkJs` is what keeps
-    // `pnpm typecheck` meaningful — without it this config would pass while
-    // checking nothing at all.
-    "allowJs": true,
+    // jsconfig implies allowJs. `checkJs` is what keeps `pnpm typecheck`
+    // meaningful — without it this config would pass while checking nothing.
     "checkJs": true,
+    // NOTE: setting this here does nothing — TypeScript forces the
+    // jsconfig-name default of 2 over inherited values, so each package
+    // repeats it locally. Left documented here so the next person doesn't
+    // "tidy" the duplicates away. See any package's jsconfig.json.
 
     "strict": true,
     // Guards the largest-remainder division in engine/money.js and the

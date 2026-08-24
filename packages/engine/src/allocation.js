@@ -22,63 +22,81 @@ import { mustAt, mustGet } from "./invariant.js";
  */
 
 /**
- * @typedef {object} AllocationLine
- * @property {string} id
- * @property {number} stage 1..N, evaluated in ascending order
- * @property {string} label
- * @property {Basis} basis
- * @property {number | null} value
- * @property {number | null} goalPct
- * @property {string} accountId
+ * @typedef {{
+ *   id: string,
+ *   stage: number,
+ *   label: string,
+ *   basis: Basis,
+ *   value: number | null,
+ *   goalPct: number | null,
+ *   accountId: string
+ * }} AllocationLine
+ *
+ * - `stage` — 1..N, evaluated in ascending order
  */
 
 /**
- * @typedef {object} AllocationInput
- * @property {Cents} grossPerMonthCents
- * @property {Cadence} payCadence cadence transfers are expressed in
- * @property {Cents} fixedTotalPerMonthCents
- * @property {Cents} variableEssentialsPerMonthCents
- * @property {Cents} variableNonEssentialPerMonthCents benchmark only — NEVER deducted
- * @property {string} incomeLandingAccountId
- * @property {AllocationLine[]} lines
+ * @typedef {{
+ *   grossPerMonthCents: Cents,
+ *   payCadence: Cadence,
+ *   fixedTotalPerMonthCents: Cents,
+ *   variableEssentialsPerMonthCents: Cents,
+ *   variableNonEssentialPerMonthCents: Cents,
+ *   incomeLandingAccountId: string,
+ *   lines: AllocationLine[]
+ * }} AllocationInput
+ *
+ * - `payCadence` — cadence transfers are expressed in
+ * - `variableNonEssentialPerMonthCents` — benchmark only — NEVER deducted
  */
 
 /**
- * @typedef {object} ResolvedLine
- * @property {string} lineId
- * @property {Cents} perMonthCents
- * @property {Cents} perPayCents
- * @property {Cents} perWeekCents
- * @property {number | null} actualPct of gross
- * @property {number | null} fidelity (actualPct - goalPct) / goalPct
+ * @typedef {{
+ *   lineId: string,
+ *   perMonthCents: Cents,
+ *   perPayCents: Cents,
+ *   perWeekCents: Cents,
+ *   actualPct: number | null,
+ *   fidelity: number | null
+ * }} ResolvedLine
+ *
+ * - `actualPct` — of gross
+ * - `fidelity` — (actualPct - goalPct) / goalPct
  */
 
 /**
- * @typedef {object} StageResult
- * @property {number} stage
- * @property {Cents} subtotalPerMonthCents
- * @property {Cents} remainingPerMonthCents
- * @property {number | null} goalPct
- * @property {number | null} actualPct
- * @property {number | null} fidelity
+ * @typedef {{
+ *   stage: number,
+ *   subtotalPerMonthCents: Cents,
+ *   remainingPerMonthCents: Cents,
+ *   goalPct: number | null,
+ *   actualPct: number | null,
+ *   fidelity: number | null
+ * }} StageResult
  */
 
 /**
- * @typedef {object} Transfer
- * @property {string} accountId
- * @property {Cents} perMonthCents
- * @property {Cents} perPayCents
- * @property {string[]} lineIds
- * @property {boolean} isNoOp true for incomeLandingAccountId — money that stays put
+ * @typedef {{
+ *   accountId: string,
+ *   perMonthCents: Cents,
+ *   perPayCents: Cents,
+ *   lineIds: string[],
+ *   isNoOp: boolean
+ * }} Transfer
+ *
+ * - `isNoOp` — true for incomeLandingAccountId — money that stays put
  */
 
 /**
- * @typedef {object} AllocationResult
- * @property {ResolvedLine[]} lines
- * @property {StageResult[]} stages
- * @property {Transfer[]} transfers
- * @property {Cents} unallocatedPerMonthCents
- * @property {Cents} goodLifeFidelityCents nonEssential − final remaining; positive = short of aspiration
+ * @typedef {{
+ *   lines: ResolvedLine[],
+ *   stages: StageResult[],
+ *   transfers: Transfer[],
+ *   unallocatedPerMonthCents: Cents,
+ *   goodLifeFidelityCents: Cents
+ * }} AllocationResult
+ *
+ * - `goodLifeFidelityCents` — nonEssential − final remaining; positive = short of aspiration
  */
 
 /**
@@ -100,7 +118,6 @@ import { mustAt, mustGet } from "./invariant.js";
  * @param {AllocationLine[]} stageLines
  * @param {AllocationInput} input
  * @param {Cents} remainingAtStageStart
- * @returns {Map<string, Cents>}
  */
 function resolveStageLineAmounts(stageLines, input, remainingAtStageStart) {
   /** @type {Map<string, Cents>} */
@@ -158,7 +175,6 @@ function resolveStageLineAmounts(stageLines, input, remainingAtStageStart) {
 /**
  * @param {Cents} amountCents
  * @param {Cents} grossPerMonthCents
- * @returns {number | null}
  */
 function pctOfGross(amountCents, grossPerMonthCents) {
   if (grossPerMonthCents === 0) return null;
@@ -168,7 +184,6 @@ function pctOfGross(amountCents, grossPerMonthCents) {
 /**
  * @param {number | null} actualPct
  * @param {number | null} goalPct
- * @returns {number | null}
  */
 function fidelityOf(actualPct, goalPct) {
   if (actualPct === null || goalPct === null || goalPct === 0) return null;
@@ -192,7 +207,6 @@ function fidelityOf(actualPct, goalPct) {
  * per-account rounding drift off the true total.
  *
  * @param {AllocationInput} input
- * @returns {AllocationResult}
  */
 export function computeAllocation(input) {
   const gross = input.grossPerMonthCents;
@@ -324,11 +338,15 @@ export function computeAllocation(input) {
 }
 
 /**
- * @typedef {object} TransferDelta
- * @property {string} accountId
- * @property {Cents | null} fromPerPayCents null = new destination
- * @property {Cents | null} toPerPayCents null = destination removed
- * @property {Cents} deltaPerPayCents
+ * @typedef {{
+ *   accountId: string,
+ *   fromPerPayCents: Cents | null,
+ *   toPerPayCents: Cents | null,
+ *   deltaPerPayCents: Cents
+ * }} TransferDelta
+ *
+ * - `fromPerPayCents` — null = new destination
+ * - `toPerPayCents` — null = destination removed
  */
 
 /** Compares two allocation results' transfers, account by account — used to
@@ -337,7 +355,6 @@ export function computeAllocation(input) {
  *
  * @param {AllocationResult} active
  * @param {AllocationResult} draft
- * @returns {TransferDelta[]}
  */
 export function diffAllocations(active, draft) {
   const accountIds = new Set([

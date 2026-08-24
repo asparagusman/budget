@@ -9,7 +9,6 @@
  * @param {Cents} contributionPerMonthCents
  * @param {number} monthlyRate
  * @param {number} months
- * @returns {Cents}
  */
 export function futureValueCents(
   principalCents,

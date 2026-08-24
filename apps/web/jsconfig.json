@@ -1,0 +1,16 @@
+{
+  "extends": "../../jsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "types": ["vite/client"],
+    // MUST be repeated in every package, not just the base config: because
+    // this file is named jsconfig.json, TypeScript forces its own default of
+    // 2 over any *inherited* value, and only a locally-set one wins. At 2,
+    // checkJs typechecks dependencies' own .js sources (chai, via vitest).
+    "maxNodeModuleJsDepth": 0
+  },
+  "include": ["src", "vite.config.js"],
+  // `checkJs` would otherwise typecheck the built bundle in dist/.
+  "exclude": ["dist"]
+}

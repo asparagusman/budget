@@ -14,7 +14,6 @@ import { mustAt } from "./invariant.js";
  * half-up on the cent to absorb floating-point noise in the input.
  *
  * @param {number} dollars
- * @returns {Cents}
  */
 export function toCents(dollars) {
   return Math.round(dollars * 100);
@@ -32,7 +31,6 @@ export function toCents(dollars) {
  *
  * @param {Cents} total
  * @param {number[]} weights
- * @returns {Cents[]}
  */
 export function divideCents(total, weights) {
   const n = weights.length;
@@ -83,16 +81,12 @@ export function divideCents(total, weights) {
  *
  * @param {Cents} amount
  * @param {number} pct
- * @returns {Cents}
  */
 export function pctOfCents(amount, pct) {
   return Math.round((amount * pct) / 100);
 }
 
-/**
- * @param {Cents[]} values
- * @returns {Cents}
- */
+/** @param {Cents[]} values */
 export function sumCents(values) {
   return values.reduce((a, b) => a + b, 0);
 }
