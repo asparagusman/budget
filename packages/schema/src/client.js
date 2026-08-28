@@ -17,3 +17,10 @@ export function createDb(databaseUrl) {
 }
 
 /** @typedef {ReturnType<typeof createDb>} Db */
+
+// The transaction handle `db.transaction(async (tx) => …)` hands its
+// callback. A helper that only reads — `linesForVersion`, say — should be
+// callable with either, so it can be reused inside a transaction without a
+// second copy; derived from `Db` rather than named from drizzle's own
+// generics so it can never drift from what `createDb` actually returns.
+/** @typedef {Parameters<Parameters<Db["transaction"]>[0]>[0]} Tx */

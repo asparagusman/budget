@@ -5,7 +5,7 @@ import { cn } from "@/lib/utils.js";
  * headline number should beat its label by a clear step in size and weight.
  *
  * @param {{
- *   label: string,
+ *   label: import("react").ReactNode,
  *   value: import("react").ReactNode,
  *   delta?: import("react").ReactNode,
  *   sparkline?: import("react").ReactNode,

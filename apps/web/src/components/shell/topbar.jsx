@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useRouterState } from "@tanstack/react-router";
 import { setTopBarSlotEl } from "@/lib/topbar-slot.js";
-import { NAV_ITEMS } from "@/lib/nav.js";
+import { pageTitle } from "@/lib/nav.js";
 
 /**
  * Mobile-only sticky bar: page title + one contextual action, filled in via
@@ -12,7 +12,7 @@ import { NAV_ITEMS } from "@/lib/nav.js";
 export function TopBar() {
   const slotRef = useRef(/** @type {HTMLDivElement | null} */ (null));
   const pathname = useRouterState({ select: (state) => state.location.pathname });
-  const current = NAV_ITEMS.find((item) => item.to === pathname);
+  const title = pageTitle(pathname);
 
   useEffect(() => {
     setTopBarSlotEl(slotRef.current);
@@ -25,7 +25,7 @@ export function TopBar() {
       style={{ paddingTop: "env(safe-area-inset-top)" }}
     >
       <h1 className="truncate text-base font-semibold text-text">
-        {current?.label ?? "Budget"}
+        {title}
       </h1>
       <div ref={slotRef} className="flex items-center gap-2" />
     </header>

@@ -1,0 +1,1100 @@
+import { useEffect, useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link, useNavigate, useSearch } from "@tanstack/react-router";
+import { addDaysIso, daysBetween } from "@budget/engine";
+import {
+  AlertTriangleIcon,
+  ArrowLeftRightIcon,
+  ArrowRightIcon,
+  BanknoteIcon,
+  CalendarDaysIcon,
+  CheckCircle2Icon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  ReceiptIcon,
+  ShieldIcon,
+  SparklesIcon,
+  TargetIcon,
+  TrendingUpIcon,
+} from "lucide-react";
+import { toast } from "sonner";
+import { Badge } from "@/components/ui/badge.jsx";
+import { Button } from "@/components/ui/button.jsx";
+import { Skeleton } from "@/components/ui/skeleton.jsx";
+import { AllocationFlow } from "@/components/allocation-flow.jsx";
+import { Chart } from "@/components/chart.jsx";
+import { Delta } from "@/components/delta.jsx";
+import { GoodLifeFidelity } from "@/components/good-life-fidelity.jsx";
+import { Money } from "@/components/money.jsx";
+import { PageHeader } from "@/components/page-header.jsx";
+import { QuickBalanceSheet } from "@/components/quick-balance-sheet.jsx";
+import { StatTile } from "@/components/stat-tile.jsx";
+import { UnallocatedIndicator } from "@/components/unallocated-indicator.jsx";
+import { api } from "@/lib/api.js";
+import { readApiError } from "@/lib/api-error.js";
+import { registerCommands } from "@/lib/commands.js";
+import { CADENCE_LABELS, CADENCE_PERIOD_NOUNS } from "@/lib/constants.js";
+import { formatIsoDate, formatIsoDateRange, relativeDayLabel, todayIso } from "@/lib/dates.js";
+import { formatMoney } from "@/lib/format-money.js";
+import { useSettings } from "@/lib/settings.jsx";
+import { cn } from "@/lib/utils.js";
+
+/** @import { Cadence, Cents, Transfer } from "@budget/engine" */
+
+/** @typedef {{ id: string, name: string, type: "transaction" | "savings" | "investment" | "external", isIncomeLanding: boolean, latestBalance: { amountCents: Cents, asAt: string } | null }} DashAccount */
+/** @typedef {{ stage: number, subtotalPerMonthCents: Cents, remainingPerMonthCents: Cents, goalPct: number | null, actualPct: number | null, fidelity: number | null, subtotalPerPayCents: Cents | null }} DashStage */
+/** @typedef {{ lineId: string, perMonthCents: Cents, perPayCents: Cents, perWeekCents: Cents, actualPct: number | null, fidelity: number | null }} DashResolvedLine */
+/** @typedef {{ key: string, perMonthCents: Cents, perPayCents: Cents | null, pctOfGross: number | null, lineCount: number }} DashBreakdown */
+/**
+ * @typedef {{
+ *   on: string,
+ *   cycle: { cycleStart: string, cycleEnd: string, payCadence: Cadence, daysRemaining: number, previousOn: string, nextOn: string } | null,
+ *   variant: { id: string | null, name: string | null, totalPerPayCents: Cents | null, totalPerMonthCents: Cents | null, diagnostics: ({ kind: "overlap", variantIds: string[], from: string, to: string } | { kind: "gap", from: string, to: string })[] },
+ *   bills: {
+ *     contributionPerPayCents: Cents | null, contributionPerMonthCents: Cents,
+ *     dueNext14DaysCents: Cents, dueSoonDays: number,
+ *     nextDue: { billId: string, billName: string, dueDate: string, amountCents: Cents } | null,
+ *     upcoming: { billId: string, billName: string, dueDate: string, amountCents: Cents }[],
+ *     billCount: number,
+ *   },
+ *   variable: {
+ *     essentialPerMonthCents: Cents, essentialPerPayCents: Cents | null,
+ *     nonEssentialPerMonthCents: Cents,
+ *     trailingAveragePerMonthCents: Cents | null, trailingAveragePerPayCents: Cents | null,
+ *     varianceCents: Cents | null, categoriesWithHistory: number, cyclesRecorded: number,
+ *   },
+ *   allocation: {
+ *     versionId: string, version: number, planId: string, planName: string, incomeVariantId: string,
+ *     grossPerMonthCents: Cents, grossPerPayCents: Cents | null,
+ *     transfers: Transfer[], stages: DashStage[],
+ *     lines: { id: string, stage: number, label: string, accountId: string }[],
+ *     resolvedLines: DashResolvedLine[], breakdown: DashBreakdown[],
+ *     unallocatedPerMonthCents: Cents, goodLifeFidelityCents: Cents, hasDraft: boolean,
+ *   } | null,
+ *   accounts: DashAccount[],
+ *   netWorth: { totalCents: Cents, series: { date: string, totalCents: Cents }[], stalestAsAt: string | null, staleDays: number | null, staleAfterDays: number, accountsWithoutBalance: number },
+ *   mojo: {
+ *     goalId: string, name: string, accountName: string, balanceCents: Cents,
+ *     monthsCovered: number | null, burnPerMonthCents: Cents,
+ *     nextThresholdMonths: number | null, periodsToNextThreshold: number | null,
+ *     approxMonthsToNextThreshold: number | null, nextThresholdEta: string | null, payCadence: Cadence,
+ *   } | null,
+ *   goals: { id: string, name: string, accountName: string, progressPct: number, etaDate: string | null, aheadBehindDays: number | null, isFunded: boolean, reached: boolean, currentBalanceCents: Cents, targetCents: Cents }[],
+ *   setup: { people: boolean, paySchedule: boolean, accounts: boolean, bills: boolean, allocation: boolean, complete: boolean },
+ *   warnings: { code: string, message: string, href: string }[],
+ * }} DashboardData
+ */
+
+// A wall of warnings gets ignored, which defeats the purpose
+// (phases/10-dashboard.md "Warnings strip").
+const MAX_VISIBLE_WARNINGS = 3;
+
+// What each hero tile is called. The grouping itself is the API's (by
+// allocation basis) — this only names it. "Allocated out" rather than
+// "Saving" deliberately: everything that is not a bill and not an essential
+// is money the operator directed somewhere, and some of it is giving or the
+// prize pool, not saving. The app does not get to reclassify it.
+/** @type {Record<string, { label: string, hint: string }>} */
+const BREAKDOWN_LABELS = {
+  bills: { label: "Bills", hint: "Fixed costs, set aside" },
+  spending: { label: "Spending", hint: "Variable essentials" },
+  allocated: { label: "Allocated out", hint: "Saving, investing, giving, prize pool" },
+};
+
+/**
+ * Every card on this screen: one surface, one radius, one shadow, and a quiet
+ * "View →" into the screen that owns the figures (phases/10-dashboard.md
+ * "Layout").
+ *
+ * @param {{
+ *   title: import("react").ReactNode,
+ *   icon?: import("lucide-react").LucideIcon,
+ *   to?: string,
+ *   toLabel?: string,
+ *   aside?: import("react").ReactNode,
+ *   className?: string,
+ *   children: import("react").ReactNode,
+ * }} props
+ */
+function Card({ title, icon: Icon, to, toLabel = "View", aside, className, children }) {
+  return (
+    <section
+      className={cn(
+        "flex flex-col gap-4 rounded-(--radius-card) bg-surface p-5 shadow-(--shadow-card)",
+        className,
+      )}
+    >
+      {/* Wraps rather than truncates: at 320px the aside ("8 orders", the
+          14-day total) is the wide half, and squeezing the card's own name
+          down to "Standing trans…" loses more than dropping to two lines
+          does. */}
+      <header className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+        <h2 className="flex min-w-0 items-center gap-2 text-sm font-semibold text-text">
+          {Icon ? <Icon className="size-4 shrink-0 text-text-subtle" aria-hidden="true" /> : null}
+          <span className="truncate">{title}</span>
+        </h2>
+        <div className="flex shrink-0 items-center gap-2">
+          {aside}
+          {to ? (
+            <Link
+              to={to}
+              data-touch-target
+              className="inline-flex items-center justify-end rounded-(--radius-control) text-xs font-medium text-text-muted transition-colors hover:text-accent-brand focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent)"
+            >
+              {toLabel} <span aria-hidden="true">→</span>
+            </Link>
+          ) : null}
+        </div>
+      </header>
+      {children}
+    </section>
+  );
+}
+
+/**
+ * Which cycle is on screen, what is running, and how to step between them. The
+ * dates come from the engine's `resolveCycle` via the API — this only formats
+ * them (phases/10-dashboard.md "Cycle banner").
+ *
+ * @param {{ data: DashboardData, onMove: (on: string) => void, isToday: boolean, onToday: () => void }} props
+ */
+function CycleBanner({ data, onMove, isToday, onToday }) {
+  const { locale } = useSettings();
+  const { cycle, variant } = data;
+  const hasDiagnostic = variant.diagnostics.length > 0;
+
+  return (
+    <div
+      className={cn(
+        "flex flex-col gap-3 rounded-(--radius-card) p-5 shadow-(--shadow-card) sm:flex-row sm:items-center sm:justify-between",
+        hasDiagnostic ? "bg-warning-soft" : "bg-surface",
+      )}
+    >
+      <div className="min-w-0">
+        <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-base font-semibold text-text">
+          {cycle ? (
+            <span>{formatIsoDateRange(cycle.cycleStart, addDaysIso(cycle.cycleEnd, -1), locale)}</span>
+          ) : (
+            <span className="text-text-muted">No pay cycle yet</span>
+          )}
+          {variant.name ? (
+            <Badge variant="secondary">{variant.name}</Badge>
+          ) : (
+            <Badge variant="outline">no variant in effect</Badge>
+          )}
+          {data.allocation?.hasDraft ? (
+            <Link to="/allocation" data-touch-target className="inline-flex items-center">
+              <Badge variant="outline" className="text-warning">
+                unapplied draft
+              </Badge>
+            </Link>
+          ) : null}
+        </p>
+        <p className="mt-0.5 text-xs text-text-muted">
+          {cycle ? (
+            <>
+              {cycle.daysRemaining === 0
+                ? "Last day of this cycle"
+                : `${cycle.daysRemaining} day${cycle.daysRemaining === 1 ? "" : "s"} to go`}
+              {" · "}
+              {CADENCE_LABELS[cycle.payCadence].toLowerCase()} pay
+              {" · resolved from the schedule on "}
+              {formatIsoDate(data.on, locale)}
+            </>
+          ) : (
+            <>Set a primary pay schedule and the whole screen lines up to your paydays.</>
+          )}
+        </p>
+      </div>
+
+      <div className="flex shrink-0 items-center gap-1">
+        <Button
+          size="icon"
+          variant="ghost"
+          aria-label="Previous cycle"
+          disabled={!cycle}
+          onClick={() => cycle && onMove(cycle.previousOn)}
+        >
+          <ChevronLeftIcon />
+        </Button>
+        <Button size="sm" variant={isToday ? "ghost" : "secondary"} onClick={onToday} disabled={isToday}>
+          Today
+        </Button>
+        <Button
+          size="icon"
+          variant="ghost"
+          aria-label="Next cycle"
+          disabled={!cycle}
+          onClick={() => cycle && onMove(cycle.nextOn)}
+        >
+          <ChevronRightIcon />
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * One sentence each, and a link to where it is fixed. Three at a time, the
+ * rest behind a toggle (phases/10-dashboard.md "Warnings strip").
+ *
+ * @param {{ warnings: DashboardData["warnings"] }} props
+ */
+function WarningsStrip({ warnings }) {
+  const [expanded, setExpanded] = useState(false);
+  if (warnings.length === 0) return null;
+
+  const visible = expanded ? warnings : warnings.slice(0, MAX_VISIBLE_WARNINGS);
+  const hidden = warnings.length - visible.length;
+
+  return (
+    <div className="flex flex-col gap-2 rounded-(--radius-card) bg-warning-soft p-4">
+      {visible.map((warning) => (
+        <p key={warning.code + warning.message} className="flex items-start gap-2 text-sm text-text">
+          <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+          <span className="min-w-0">
+            {warning.message}{" "}
+            <Link to={warning.href} className="font-medium whitespace-nowrap underline underline-offset-2">
+              Fix it <span aria-hidden="true">→</span>
+            </Link>
+          </span>
+        </p>
+      ))}
+      {hidden > 0 || expanded ? (
+        <button
+          type="button"
+          data-touch-target
+          onClick={() => setExpanded(!expanded)}
+          className="flex items-center self-start rounded-(--radius-control) text-xs font-medium text-text-muted underline underline-offset-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent)"
+        >
+          {expanded ? "Show fewer" : `and ${hidden} more`}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * The visual anchor: income for the cycle, then where it goes. Every figure
+ * and every percentage is the engine's, grouped by the API — nothing here
+ * divides anything (phases/10-dashboard.md "Hero").
+ *
+ * @param {{ data: DashboardData }} props
+ */
+function HeroCard({ data }) {
+  const { allocation, cycle, variant } = data;
+  const perPeriod = cycle ? CADENCE_PERIOD_NOUNS[cycle.payCadence][0] : "month";
+  const incomePerPayCents = allocation?.grossPerPayCents ?? variant.totalPerPayCents;
+  const incomePerMonthCents = allocation?.grossPerMonthCents ?? variant.totalPerMonthCents;
+  const planVariantMismatch =
+    allocation !== null && variant.id !== null && allocation.incomeVariantId !== variant.id;
+
+  return (
+    <Card title="Income this cycle" icon={BanknoteIcon} to="/income">
+      {incomePerPayCents === null && incomePerMonthCents === null ? (
+        // Day one, or a date the schedule doesn't cover. A giant em-dash where
+        // the headline figure goes reads as a rendering fault rather than as
+        // "nothing to show", so say it in words instead.
+        <p className="text-sm text-text-muted">
+          No income variant is in effect on this date, so there is nothing to divide yet.{" "}
+          <Link to="/income" className="font-medium underline underline-offset-2">
+            Set up income
+          </Link>
+          .
+        </p>
+      ) : (
+        <div>
+          <p className="text-4xl font-bold tracking-tight text-text tabular-nums sm:text-5xl">
+            {/* Tweened: stepping between pay cycles is the dashboard's
+                one recalculation, and watching the headline travel is how
+                the operator sees that the cycle actually moved. */}
+            <Money value={incomePerPayCents ?? /** @type {Cents} */ (incomePerMonthCents)} tween />
+            <span className="ml-2 text-base font-medium text-text-muted">
+              per {incomePerPayCents !== null ? perPeriod : "month"}
+            </span>
+          </p>
+          <p className="mt-1 text-xs text-text-muted">
+            {allocation ? (
+              <>
+                Divided by the{" "}
+                <Link to="/allocation" className="font-medium underline underline-offset-2">
+                  {allocation.planName}
+                </Link>{" "}
+                plan, v{allocation.version}
+                {incomePerMonthCents !== null ? (
+                  <>
+                    {" · "}
+                    <Money value={incomePerMonthCents} />
+                    /month
+                  </>
+                ) : null}
+              </>
+            ) : (
+              <>No allocation plan is active, so nothing is divided yet.</>
+            )}
+          </p>
+        </div>
+      )}
+
+      {planVariantMismatch ? (
+        <p className="rounded-(--radius-control) bg-warning-soft px-3 py-2 text-xs text-text">
+          The schedule resolves to <strong>{variant.name}</strong> on this date, but the active plan divides a
+          different variant. The figures below are the plan&apos;s own.
+        </p>
+      ) : null}
+
+      {allocation ? (
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {allocation.breakdown.map((group, index) => {
+            const meta = BREAKDOWN_LABELS[group.key] ?? { label: group.key, hint: "" };
+            return (
+              <StatTile
+                key={group.key}
+                className="bg-surface-muted shadow-none"
+                label={meta.label}
+                value={
+                  <span className="text-2xl tabular-nums">
+                    {group.perPayCents !== null ? (
+                      <Money value={group.perPayCents} tween />
+                    ) : (
+                      <Money value={group.perMonthCents} tween />
+                    )}
+                  </span>
+                }
+                sparkline={
+                  <>
+                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-border">
+                      <div
+                        className="h-full rounded-full"
+                        style={{
+                          width: `${Math.max(0, Math.min(100, group.pctOfGross ?? 0))}%`,
+                          backgroundColor: `var(--chart-line-${(index % 5) + 1})`,
+                        }}
+                      />
+                    </div>
+                    <p className="mt-1.5 text-xs text-text-muted">
+                      {group.pctOfGross !== null ? `${group.pctOfGross.toFixed(1)}% of income` : "—"}
+                      <span className="text-text-subtle"> · {meta.hint}</span>
+                    </p>
+                  </>
+                }
+              />
+            );
+          })}
+        </div>
+      ) : incomePerPayCents !== null || incomePerMonthCents !== null ? (
+        <p className="text-sm text-text-muted">
+          Build an allocation to see how this income splits across bills, spending and everything else.
+        </p>
+      ) : null}
+    </Card>
+  );
+}
+
+/**
+ * The standing bank orders, exact to the cent. Not a todo list: these are
+ * orders already set up at the bank, and the app's only job is to say what the
+ * amounts should be (phases/README.md "The one rule").
+ *
+ * @param {{ data: DashboardData, accounts: DashAccount[] }} props
+ */
+function TransfersCard({ data, accounts }) {
+  const { allocation, cycle } = data;
+  const nameOf = (/** @type {string} */ id) => accounts.find((a) => a.id === id)?.name ?? "Unknown account";
+  const cadenceLabel = cycle ? CADENCE_LABELS[cycle.payCadence].toLowerCase() : "month";
+
+  /** @param {Cents} cents */
+  async function copyAmount(cents) {
+    try {
+      await navigator.clipboard.writeText((cents / 100).toFixed(2));
+      toast.success("Amount copied.");
+    } catch {
+      toast.error("Couldn't copy — your browser blocked clipboard access.");
+    }
+  }
+
+  if (!allocation) {
+    return (
+      <Card title="Standing transfers" icon={ArrowLeftRightIcon} to="/allocation">
+        <p className="text-sm text-text-muted">
+          No plan is active yet, so there are no transfer amounts to set up.
+        </p>
+      </Card>
+    );
+  }
+
+  return (
+    <Card
+      title="Standing transfers"
+      icon={ArrowLeftRightIcon}
+      to="/allocation"
+      aside={
+        <span className="text-xs text-text-subtle">
+          {allocation.transfers.length} order{allocation.transfers.length === 1 ? "" : "s"}
+        </span>
+      }
+    >
+      <ul className="flex flex-col divide-y divide-border">
+        {allocation.transfers.map((transfer) => (
+          <li key={transfer.accountId} className="flex items-start justify-between gap-3 py-2">
+            <div className="min-w-0">
+              <p className={cn("truncate text-sm font-medium", transfer.isNoOp ? "text-text-muted" : "text-text")}>
+                {nameOf(transfer.accountId)}
+              </p>
+              {transfer.isNoOp ? <p className="text-xs text-text-subtle">no move required</p> : null}
+            </div>
+            <button
+              type="button"
+              data-touch-target
+              onClick={() => copyAmount(transfer.perPayCents)}
+              aria-label={`Copy the ${nameOf(transfer.accountId)} amount`}
+              title={`Copy ${(transfer.perPayCents / 100).toFixed(2)}`}
+              className={cn(
+                "flex shrink-0 items-center justify-end rounded-(--radius-control) px-1.5 py-0.5 text-right text-sm font-semibold tabular-nums transition-colors hover:bg-surface-muted focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-(--accent)",
+                transfer.isNoOp ? "text-text-muted" : "text-text",
+              )}
+            >
+              <Money value={transfer.perPayCents} tween />
+            </button>
+          </li>
+        ))}
+      </ul>
+      <p className="text-xs text-text-subtle">
+        Per {cadenceLabel}. Tap an amount to copy it exactly as the bank wants it.
+      </p>
+    </Card>
+  );
+}
+
+/**
+ * What lands in the next fortnight, and the five bills after that. Relative
+ * days are measured from the date on screen, not from the wall clock, so a
+ * shared `?on=` link says the same thing to whoever opens it.
+ *
+ * @param {{ data: DashboardData }} props
+ */
+function UpcomingCard({ data }) {
+  const { locale } = useSettings();
+  const { bills, cycle } = data;
+  const cadenceLabel = cycle ? CADENCE_LABELS[cycle.payCadence].toLowerCase() : "month";
+
+  return (
+    <Card
+      title="Upcoming bills"
+      icon={ReceiptIcon}
+      to="/costs/fixed"
+      aside={
+        <span className="text-xs text-text-subtle">
+          next {bills.dueSoonDays} days: <Money value={bills.dueNext14DaysCents} className="font-medium text-text" />
+        </span>
+      }
+    >
+      {bills.upcoming.length === 0 ? (
+        <p className="text-sm text-text-muted">
+          {bills.billCount === 0
+            ? "No bills recorded yet — add them and they show up here as they fall due."
+            : "Nothing falls due in the next three months."}
+        </p>
+      ) : (
+        <ul className="flex flex-col divide-y divide-border">
+          {bills.upcoming.map((instance) => (
+            <li key={`${instance.billId}:${instance.dueDate}`} className="flex items-start justify-between gap-3 py-2">
+              <div className="min-w-0">
+                <p className="truncate text-sm font-medium text-text">{instance.billName}</p>
+                <p className="text-xs text-text-muted">
+                  {relativeDayLabel(daysBetween(data.on, instance.dueDate))}
+                  <span className="text-text-subtle"> · {formatIsoDate(instance.dueDate, locale)}</span>
+                </p>
+              </div>
+              <span className="shrink-0 text-sm font-semibold text-text tabular-nums">
+                <Money value={instance.amountCents} />
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {bills.contributionPerPayCents !== null ? (
+        <p className="text-xs text-text-subtle">
+          Fixed Costs sets aside <Money value={bills.contributionPerPayCents} className="font-medium text-text" /> a{" "}
+          {cadenceLabel} across every bill — the average it takes to always have them covered.
+        </p>
+      ) : null}
+    </Card>
+  );
+}
+
+/**
+ * Household total over twelve months, plus the one write this screen allows.
+ * The chart never interpolates between snapshots: each step is a balance that
+ * was actually recorded (phases/09-goals-projections.md "API").
+ *
+ * @param {{ data: DashboardData, onUpdateBalance: () => void }} props
+ */
+function NetWorthCard({ data, onUpdateBalance }) {
+  const { currency, locale } = useSettings();
+  const { netWorth } = data;
+  const isStale = netWorth.staleDays !== null && netWorth.staleDays > netWorth.staleAfterDays;
+
+  const option = useMemo(
+    () =>
+      /** @param {import("@/components/chart.jsx").ChartTokens} tokens */
+      (tokens) => ({
+        grid: { top: 16, left: 8, right: 12, bottom: 8, containLabel: true },
+        xAxis: { type: "time" },
+        yAxis: { type: "value" },
+        tooltip: {
+          trigger: "axis",
+          /** @param {{ value: [string, number] }[]} params */
+          formatter: (params) =>
+            params
+              .map(
+                (p) =>
+                  `${new Intl.DateTimeFormat(locale, { dateStyle: "medium" }).format(new Date(p.value[0]))}<br/>${new Intl.NumberFormat(locale, { style: "currency", currency }).format(p.value[1])}`,
+              )
+              .join("<br/>"),
+        },
+        series: [
+          {
+            type: "line",
+            name: "Net worth",
+            data: netWorth.series.map((point) => [point.date, point.totalCents / 100]),
+            step: "end",
+            showSymbol: false,
+            lineStyle: { width: 2, color: tokens.series[0] },
+            itemStyle: { color: tokens.series[0] },
+            areaStyle: { color: tokens.accentSoft, opacity: 0.5 },
+          },
+        ],
+      }),
+    [netWorth.series, currency, locale],
+  );
+
+  return (
+    <Card
+      title="Net worth"
+      icon={TrendingUpIcon}
+      to="/accounts"
+      aside={
+        <Button size="sm" variant="ghost" onClick={onUpdateBalance}>
+          <BanknoteIcon />
+          Update balance
+        </Button>
+      }
+    >
+      <div>
+        <p className="text-3xl font-bold tracking-tight text-text tabular-nums">
+          <Money value={netWorth.totalCents} />
+        </p>
+        <p className={cn("mt-0.5 text-xs", isStale ? "text-negative" : "text-text-muted")}>
+          {netWorth.stalestAsAt ? (
+            <>
+              Oldest balance {formatIsoDate(netWorth.stalestAsAt, locale)}
+              {netWorth.staleDays !== null ? ` · ${netWorth.staleDays} days old` : ""}
+              {isStale ? " — worth a refresh" : ""}
+            </>
+          ) : (
+            <>No balances recorded yet.</>
+          )}
+          {netWorth.accountsWithoutBalance > 0 ? (
+            <>
+              {" · "}
+              {netWorth.accountsWithoutBalance} account{netWorth.accountsWithoutBalance === 1 ? "" : "s"} counted as
+              zero
+            </>
+          ) : null}
+        </p>
+      </div>
+      {/* A canvas is opaque to a screen reader, so the label carries the
+          shape of the line and the table carries every figure on it. A
+          chart is never the only way a number is available
+          (phases/11-polish-mobile-import.md, workstream B). */}
+      <Chart
+        option={option}
+        height={200}
+        ariaLabel={`Net worth over time, ${netWorth.series.length} recorded points, currently ${formatMoney(netWorth.totalCents, { currency, locale })}.`}
+        dataTable={{
+          caption: "Net worth at each recorded date",
+          columns: ["Date", "Net worth"],
+          rows: netWorth.series.map((point) => [
+            formatIsoDate(point.date, locale),
+            formatMoney(point.totalCents, { currency, locale }),
+          ]),
+        }}
+        empty={netWorth.series.length < 2}
+        emptyTitle="Not enough history yet"
+        emptyDescription="Record a balance on two different dates and the line starts to draw itself."
+      />
+    </Card>
+  );
+}
+
+/**
+ * How long the household could last, and when the next month of cover lands.
+ * Durations are periods of the pay cadence and approximate months — never
+ * weeks (phases/09-goals-projections.md "/goals").
+ *
+ * @param {{ mojo: NonNullable<DashboardData["mojo"]> }} props
+ */
+function MojoCard({ mojo }) {
+  const { locale } = useSettings();
+  const [singular, plural] = CADENCE_PERIOD_NOUNS[mojo.payCadence];
+  const periods = mojo.periodsToNextThreshold;
+
+  return (
+    <Card title={mojo.name} icon={ShieldIcon} to="/goals">
+      <div>
+        <p className="text-3xl font-bold tracking-tight text-text tabular-nums">
+          {mojo.monthsCovered !== null ? mojo.monthsCovered.toFixed(1) : "—"}
+          <span className="ml-1.5 text-base font-medium text-text-muted">months covered</span>
+        </p>
+        <p className="mt-0.5 text-xs text-text-muted">
+          <Money value={mojo.balanceCents} className="font-medium text-text" /> in {mojo.accountName} · essentials run{" "}
+          <Money value={mojo.burnPerMonthCents} />
+          /month
+        </p>
+      </div>
+      {mojo.nextThresholdMonths !== null ? (
+        <p className="rounded-(--radius-control) bg-surface-muted p-3 text-sm text-text">
+          Next marker is{" "}
+          <strong>
+            {mojo.nextThresholdMonths} month{mojo.nextThresholdMonths === 1 ? "" : "s"} of cover
+          </strong>
+          {periods !== null ? (
+            <>
+              {" — about "}
+              {periods} {periods === 1 ? singular : plural}
+              {mojo.approxMonthsToNextThreshold !== null
+                ? ` (${mojo.approxMonthsToNextThreshold} month${mojo.approxMonthsToNextThreshold === 1 ? "" : "s"})`
+                : ""}
+              {mojo.nextThresholdEta ? `, landing ${formatIsoDate(mojo.nextThresholdEta, locale)}` : ""}.
+            </>
+          ) : (
+            <> — nothing is being contributed to it, so it never arrives.</>
+          )}
+        </p>
+      ) : (
+        <p className="flex items-center gap-2 text-sm text-positive">
+          <CheckCircle2Icon className="size-4 shrink-0" aria-hidden="true" />
+          Every marker is covered.
+        </p>
+      )}
+    </Card>
+  );
+}
+
+/**
+ * @param {{ goals: DashboardData["goals"] }} props
+ */
+function GoalsCard({ goals }) {
+  const { locale } = useSettings();
+
+  return (
+    <Card title="Goals" icon={TargetIcon} to="/goals">
+      {goals.length === 0 ? (
+        <p className="text-sm text-text-muted">
+          No goals yet. Pick a savings account and say what it&apos;s for — you&apos;ll get an ETA at your current
+          contribution.
+        </p>
+      ) : (
+        <ul className="flex flex-col gap-3">
+          {goals.map((goal) => (
+            <li key={goal.id} className="flex flex-col gap-1.5">
+              <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5">
+                <span className="flex min-w-0 items-center gap-2 text-sm font-medium text-text">
+                  <span className="truncate">{goal.name}</span>
+                  {goal.isFunded ? null : <Badge variant="outline">unfunded</Badge>}
+                </span>
+                <span
+                  className={cn("text-xs font-medium tabular-nums", goal.reached ? "text-positive" : "text-text-muted")}
+                >
+                  {goal.progressPct.toFixed(0)}%
+                </span>
+              </div>
+              <div className="h-2 w-full overflow-hidden rounded-full bg-surface-muted">
+                <div
+                  className={cn("h-full rounded-full", goal.reached ? "bg-positive" : "bg-accent-brand")}
+                  style={{ width: `${Math.max(0, Math.min(100, goal.progressPct))}%` }}
+                />
+              </div>
+              <p className="flex flex-wrap items-center gap-x-2 text-xs text-text-subtle">
+                <span>
+                  <Money value={goal.currentBalanceCents} /> of <Money value={goal.targetCents} />
+                </span>
+                {goal.reached ? (
+                  <span className="text-positive">reached</span>
+                ) : goal.etaDate ? (
+                  <span>ETA {formatIsoDate(goal.etaDate, locale)}</span>
+                ) : (
+                  <span>no ETA at this contribution</span>
+                )}
+              </p>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
+  );
+}
+
+/**
+ * The prize pool against the non-essential target, and how variable spending
+ * is actually tracking against its budget.
+ *
+ * @param {{ data: DashboardData }} props
+ */
+function GoodLifeCard({ data }) {
+  const { allocation, variable, cycle } = data;
+  const cadenceLabel = cycle ? CADENCE_LABELS[cycle.payCadence].toLowerCase() : "month";
+
+  return (
+    <Card title="The good life" icon={SparklesIcon} to="/costs/variable">
+      <p className="text-sm text-text">
+        {allocation ? (
+          <GoodLifeFidelity
+            cents={allocation.goodLifeFidelityCents}
+            targetPerMonthCents={variable.nonEssentialPerMonthCents}
+          />
+        ) : (
+          <>
+            Your non-essential target is <Money value={variable.nonEssentialPerMonthCents} /> a month. An active
+            allocation is what says whether you are hitting it.
+          </>
+        )}
+      </p>
+      <dl className="flex flex-col gap-2 text-xs">
+        <div className="flex items-baseline justify-between gap-2">
+          <dt className="text-text-muted">Essentials, per {cadenceLabel}</dt>
+          <dd className="font-medium text-text tabular-nums">
+            {variable.essentialPerPayCents !== null ? (
+              <Money value={variable.essentialPerPayCents} />
+            ) : (
+              <Money value={variable.essentialPerMonthCents} />
+            )}
+          </dd>
+        </div>
+        <div className="flex items-baseline justify-between gap-2">
+          <dt className="text-text-muted">Actually spending, per month</dt>
+          <dd className="flex items-center gap-2">
+            {variable.trailingAveragePerMonthCents !== null ? (
+              <>
+                <span className="font-medium text-text tabular-nums">
+                  <Money value={variable.trailingAveragePerMonthCents} />
+                </span>
+                {variable.varianceCents !== null ? (
+                  <Delta value={variable.varianceCents} kind="cents" invert />
+                ) : null}
+              </>
+            ) : (
+              <span className="text-text-subtle">
+                {variable.cyclesRecorded === 0 ? "no cycles recorded yet" : "not enough history"}
+              </span>
+            )}
+          </dd>
+        </div>
+      </dl>
+    </Card>
+  );
+}
+
+/**
+ * Day one. "No data" would be a poor first impression on the screen the
+ * operator sees before anything else exists, so this says what to do next and
+ * ticks each step off as it lands (phases/10-dashboard.md "Empty state on day
+ * one").
+ *
+ * @param {{ setup: DashboardData["setup"] }} props
+ */
+function SetupPath({ setup }) {
+  const steps = [
+    { done: setup.people, to: "/settings/people", label: "Add the people in your household" },
+    { done: setup.paySchedule, to: "/settings/pay-schedules", label: "Set a primary pay schedule" },
+    { done: setup.accounts, to: "/accounts", label: "Add your accounts, and mark where income lands" },
+    { done: setup.bills, to: "/costs/fixed", label: "Add your bills" },
+    { done: setup.allocation, to: "/allocation", label: "Build an allocation and apply it" },
+  ];
+  const doneCount = steps.filter((s) => s.done).length;
+
+  return (
+    <Card title="Getting set up" icon={CalendarDaysIcon} aside={<span className="text-xs text-text-subtle">{doneCount} of {steps.length}</span>}>
+      <p className="text-sm text-text-muted">
+        This screen answers &ldquo;where are we right now?&rdquo; once it has something to work from. Five steps, in
+        order — each one makes the next one useful.
+      </p>
+      <ol className="flex flex-col gap-1">
+        {steps.map((step, index) => (
+          <li key={step.to}>
+            <Link
+              to={step.to}
+              className="group flex items-center gap-3 rounded-(--radius-control) px-2 py-2 transition-colors hover:bg-surface-muted focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-(--accent)"
+            >
+              {step.done ? (
+                <CheckCircle2Icon className="size-5 shrink-0 text-positive" aria-hidden="true" />
+              ) : (
+                <span
+                  className="flex size-5 shrink-0 items-center justify-center rounded-full bg-surface-muted text-[0.625rem] font-semibold text-text-muted"
+                  aria-hidden="true"
+                >
+                  {index + 1}
+                </span>
+              )}
+              <span className={cn("min-w-0 flex-1 text-sm", step.done ? "text-text-subtle line-through" : "text-text")}>
+                {step.label}
+              </span>
+              {step.done ? null : (
+                <ArrowRightIcon className="size-4 shrink-0 text-text-subtle transition-colors group-hover:text-accent-brand" aria-hidden="true" />
+              )}
+            </Link>
+          </li>
+        ))}
+      </ol>
+    </Card>
+  );
+}
+
+/**
+ * Card-shaped placeholders in the real grid positions, so nothing moves when
+ * the data lands (phases/10-dashboard.md "Skeletons, not spinners").
+ */
+function DashboardSkeleton() {
+  return (
+    <>
+      <Skeleton className="h-22 rounded-(--radius-card)" />
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-6 lg:items-start">
+        <Skeleton className="h-64 rounded-(--radius-card) lg:col-span-4" />
+        <Skeleton className="h-40 rounded-(--radius-card) lg:col-span-2" />
+        <Skeleton className="h-80 rounded-(--radius-card) lg:col-span-4" />
+        <Skeleton className="h-80 rounded-(--radius-card) lg:col-span-2" />
+        <Skeleton className="h-72 rounded-(--radius-card) lg:col-span-4" />
+        <Skeleton className="h-72 rounded-(--radius-card) lg:col-span-2" />
+        <Skeleton className="h-48 rounded-(--radius-card) lg:col-span-2" />
+        <Skeleton className="h-48 rounded-(--radius-card) lg:col-span-2" />
+        <Skeleton className="h-48 rounded-(--radius-card) lg:col-span-2" />
+      </div>
+    </>
+  );
+}
+
+/**
+ * Where are we right now, without opening anything else. Read-only except for
+ * one balance update: every other figure is a link into the screen that owns
+ * it, and nothing on this page computes a financial figure of its own
+ * (phases/10-dashboard.md).
+ *
+ * The card order in the DOM is the MOBILE order — most-checked first — and
+ * `lg:order-*` rearranges it into the desktop grid, so the phone gets the
+ * priority order for free rather than through a second markup tree.
+ */
+export function DashboardPage() {
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  // `strict: false` rather than a route id: the route tree is code-based with
+  // no `Register` augmentation (phases/README.md "no .d.ts files"), so a route
+  // id is not a resolvable type and "/" is not a match id at runtime. The same
+  // call shape /income and /allocation use for their own search params.
+  const search = useSearch({ strict: false });
+  const today = useMemo(todayIso, []);
+  const on = search.on ?? today;
+
+  const [balanceFor, setBalanceFor] = useState(/** @type {{ accountId: string | null } | null} */ (null));
+
+  const dashboardQuery = useQuery({
+    queryKey: ["dashboard", on],
+    queryFn: async () => {
+      const res = await api.dashboard.$get({ query: { on } });
+      if (!res.ok) throw new Error(await readApiError(res));
+      return /** @type {DashboardData} */ (await res.json());
+    },
+  });
+
+  const updateBalance = useMutation({
+    mutationFn: async (
+      /** @type {{ accountId: string, asAt: string, amountCents: number }} */ { accountId, ...data }
+    ) => {
+      const res = await api.accounts[":id"].balances.$post({ param: { id: accountId }, json: data });
+      if (!res.ok) throw new Error(await readApiError(res));
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      queryClient.invalidateQueries({ queryKey: ["account-balances"] });
+      queryClient.invalidateQueries({ queryKey: ["net-worth"] });
+      queryClient.invalidateQueries({ queryKey: ["goals"] });
+      queryClient.invalidateQueries({ queryKey: ["projections"] });
+      toast.success("Balance updated.");
+    },
+  });
+
+  /** @param {string} next */
+  const moveTo = (next) => navigate({ to: "/", search: next === today ? {} : { on: next } });
+
+  const data = dashboardQuery.data ?? null;
+  const cycle = data?.cycle ?? null;
+
+  useEffect(
+    () =>
+      registerCommands([
+        {
+          id: "dashboard:update-balance",
+          group: "Actions",
+          label: "Update balance",
+          icon: BanknoteIcon,
+          run: () => setBalanceFor({ accountId: null }),
+        },
+        {
+          id: "dashboard:previous-cycle",
+          group: "Actions",
+          label: "Previous pay cycle",
+          keywords: "back earlier dashboard",
+          icon: ChevronLeftIcon,
+          run: () => cycle && moveTo(cycle.previousOn),
+        },
+        {
+          id: "dashboard:next-cycle",
+          group: "Actions",
+          label: "Next pay cycle",
+          keywords: "forward later dashboard",
+          icon: ChevronRightIcon,
+          run: () => cycle && moveTo(cycle.nextOn),
+        },
+        {
+          id: "dashboard:today",
+          group: "Actions",
+          label: "Back to today",
+          icon: CalendarDaysIcon,
+          run: () => moveTo(today),
+        },
+      ]),
+    // `moveTo` is recreated every render; the cycle bounds are what actually
+    // change what these commands do.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [cycle?.previousOn, cycle?.nextOn, today],
+  );
+
+  // The engine's `AllocationResult` shape, rebuilt from the payload so the
+  // shared /allocation components (the unallocated indicator, the flow
+  // diagram) take exactly what they take there.
+  const result = useMemo(
+    () =>
+      data?.allocation
+        ? {
+            lines: data.allocation.resolvedLines,
+            stages: data.allocation.stages,
+            transfers: data.allocation.transfers,
+            unallocatedPerMonthCents: data.allocation.unallocatedPerMonthCents,
+            goodLifeFidelityCents: data.allocation.goodLifeFidelityCents,
+          }
+        : null,
+    [data],
+  );
+
+  return (
+    <>
+      <PageHeader
+        title="Overview"
+        description="Where you are right now. Every figure links to the screen that owns it."
+      />
+
+      {dashboardQuery.isLoading ? (
+        <DashboardSkeleton />
+      ) : dashboardQuery.isError ? (
+        <div className="rounded-(--radius-card) bg-negative-soft p-5 text-sm text-negative">
+          {dashboardQuery.error.message}
+        </div>
+      ) : data ? (
+        <>
+          <CycleBanner
+            data={data}
+            onMove={moveTo}
+            isToday={on === today}
+            onToday={() => moveTo(today)}
+          />
+
+          <WarningsStrip warnings={data.warnings} />
+
+          {data.setup.complete ? null : <SetupPath setup={data.setup} />}
+
+          {/* data-stagger fades and lifts each card ~30ms after the last,
+              so the dashboard assembles instead of appearing as one slab.
+              See app.css; the delays live there rather than here because
+              this grid's children are conditional and hand-numbered inline
+              delays would go stale. */}
+          <div data-stagger className="grid grid-cols-1 gap-6 lg:grid-cols-6 lg:items-start">
+            <div className="lg:order-1 lg:col-span-4">
+              <HeroCard data={data} />
+            </div>
+
+            <div className="lg:order-4 lg:col-span-2">
+              <TransfersCard data={data} accounts={data.accounts} />
+            </div>
+
+            {result && cycle ? (
+              <div className="lg:order-2 lg:col-span-2">
+                <UnallocatedIndicator
+                  result={result}
+                  payCadence={cycle.payCadence}
+                  hasPrimaryPaySchedule
+                  footer={
+                    <Link
+                      to="/allocation"
+                      data-touch-target
+                      className="mt-1 inline-flex items-center self-start rounded-(--radius-control) text-xs font-medium text-text-muted underline underline-offset-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent)"
+                    >
+                      Open allocation <span aria-hidden="true">→</span>
+                    </Link>
+                  }
+                />
+              </div>
+            ) : null}
+
+            <div className="lg:order-6 lg:col-span-2">
+              <UpcomingCard data={data} />
+            </div>
+
+            {data.mojo ? (
+              <div className="lg:order-7 lg:col-span-2">
+                <MojoCard mojo={data.mojo} />
+              </div>
+            ) : null}
+
+            <div className="lg:order-5 lg:col-span-4">
+              <NetWorthCard data={data} onUpdateBalance={() => setBalanceFor({ accountId: null })} />
+            </div>
+
+            <div className="lg:order-8 lg:col-span-2">
+              <GoalsCard goals={data.goals} />
+            </div>
+
+            <div className="lg:order-9 lg:col-span-2">
+              <GoodLifeCard data={data} />
+            </div>
+
+            {result && data.allocation ? (
+              <div className="lg:order-3 lg:col-span-4">
+                <Card title="Where the money goes" icon={ArrowLeftRightIcon} to="/allocation">
+                  <AllocationFlow
+                    result={result}
+                    accounts={data.accounts}
+                    lines={data.allocation.lines}
+                    heading={null}
+                  />
+                </Card>
+              </div>
+            ) : null}
+          </div>
+        </>
+      ) : null}
+
+      <QuickBalanceSheet
+        open={balanceFor !== null}
+        onOpenChange={(open) => !open && setBalanceFor(null)}
+        accounts={data?.accounts ?? []}
+        accountId={balanceFor?.accountId ?? null}
+        submitting={updateBalance.isPending}
+        onSubmit={async (accountId, values) => {
+          await updateBalance.mutateAsync({ accountId, ...values });
+        }}
+      />
+    </>
+  );
+}

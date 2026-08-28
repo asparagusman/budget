@@ -42,6 +42,80 @@ Every one of these runs from the repo root and fans out across the workspaces.
 | `pnpm db:generate` | Generate a migration from the Drizzle schema |
 | `pnpm db:migrate` | Apply migrations |
 | `pnpm db:seed` | Idempotent seed (infrastructure rows only, never household data) |
+| `pnpm status` | What's holding :3001/:5173/:5432, what's in docker, what's stale |
+| `pnpm stop` | Kill this repo's dev processes and stop any `api`/`web` container |
+| `pnpm dev:api` / `pnpm dev:web` | One side only |
+| `pnpm api <script>` | Run any `apps/api` script, e.g. `pnpm api auth:invite` |
+| `pnpm web <script>` | Run any `apps/web` script, e.g. `pnpm web build` |
+
+`api`/`web` are `pnpm --filter` prefixes, so anything after them runs scoped to that package's
+directory — you never need to `cd` into a workspace. For a one-off command that isn't a declared
+script, use `exec`: `pnpm api exec node src/scripts/auth-invite.js`.
+
+**Nothing here needs docker rebuilt.** Backend edits included — `pnpm dev` runs the API under
+`node --watch`, so a change to `apps/api` is live on save. Rebuilding images is only for testing a
+prod-like build or deploying.
+
+`pnpm dev` is safe to run over a broken session: it sweeps this repo's leftover dev processes,
+stops any `api`/`web` container holding a port, and makes sure the db container is up with 5432
+published, before starting anything. If it ever refuses, `pnpm status` says why.
+
+<details>
+<summary>Why that sweep exists</summary>
+
+Stopping a dev session on Windows does not reliably kill its descendants. `node --watch` is the
+worst offender: it does *not* exit when the watched script throws — it prints the error and waits
+for a file change. So a crashed API dev server stays resident and re-races for :3001 on your next
+save, while a leaked vite still owns 5173 and pushes the real one to 5174, off the single origin
+`PUBLIC_ORIGIN` and the CORS allowlist accept. A stale `api` container does the same to :3001. All
+three surface in the browser as a wall of CORS/NetworkError noise that points nowhere near the
+cause.
+
+Hence: `apps/api`'s dev script tags itself with a `--budget-dev` marker arg (node ignores anything
+after the entry script) so the sweep can identify its own strays precisely rather than pattern-
+matching every `node --watch` on the machine; vite runs with `strictPort` so it fails loudly
+instead of drifting; and `concurrently` runs with `--kill-others-on-fail` so a dead API takes the
+web server down with it instead of leaving a half-up session that looks like a CORS bug.
+
+</details>
+
+### Docker
+
+The full containerized stack (`infra/docker-compose.yml`) is for testing a prod-like build, not
+day-to-day dev. Everyday work needs only the db container, which `pnpm dev` starts for you.
+
+| Command | Does |
+|---|---|
+| `pnpm docker:up` | Build (never cached — avoids running stale code) + start the full stack, detached |
+| `pnpm docker:down` | Stop and remove the full stack |
+| `pnpm docker <args>` | Prefix for anything else, e.g. `pnpm docker ps`, `pnpm docker logs -f api` |
+| `pnpm docker:db <args>` | Same, with `docker-compose.dev.yml` merged in — e.g. `pnpm docker:db up -d db` runs just Postgres with 5432 published |
+
+The stack is four services, not three: a one-shot `migrate` container runs `dist/migrate.js` on
+the api image and exits, and `api` waits for it to exit **successfully**. That is what makes
+"pull, rebuild, migrate, restart" a single command on a deployed host, and what stops the app ever
+starting against a schema older than its own code. `GET /health` reports the applied migration
+count beside the one the running build expects, and answers **503** when they disagree.
+
+Two traps worth knowing, both of which `pnpm dev` now handles on your behalf:
+
+- `docker compose up` **reuses a cached image** unless you pass `--build`, so it will happily
+  serve code from before your last commit. `pnpm docker:up` always builds.
+- Bringing anything up with the base file *alone* recreates `db` without its published port, which
+  silently breaks `pnpm db:migrate` and local dev's `DATABASE_URL`. Use `pnpm docker:db` for db work.
+
+## Importing the old spreadsheet
+
+**Settings → Import spreadsheet** (or `/import`, or "Import a spreadsheet" in the command palette)
+takes an `.xlsx` export, parses it server-side, and shows every row it found grouped by what it
+will become. Nothing is written until you confirm; every row is individually deselectable; defects
+in the source workbook are flagged with an explanation rather than silently handled. The import is
+additive and idempotent — re-importing the same file matches on natural keys and updates rather
+than duplicating — and allocation plans land as **drafts**, because the app does not get to decide
+what your standing orders are.
+
+Afterwards it prints a reconciliation: every figure the spreadsheet held, beside what the app now
+computes, with the differences explained.
 
 ## Layout
 

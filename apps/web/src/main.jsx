@@ -19,8 +19,13 @@ if (!rootEl) throw new Error("Root element #root not found.");
 createRoot(rootEl).render(
   <StrictMode>
     <ThemeProvider>
-      <SettingsProvider>
-        <QueryClientProvider client={queryClient}>
+      <QueryClientProvider client={queryClient}>
+        {/* SettingsProvider now fetches GET /settings via react-query (see
+            lib/settings.jsx), so it needs QueryClientProvider above it —
+            that's the only reason this swapped places with phase 03's
+            original ThemeProvider > SettingsProvider > QueryClientProvider
+            order. */}
+        <SettingsProvider>
           <AuthProvider>
             <TooltipProvider>
               <RouterProvider router={router} />
@@ -28,8 +33,8 @@ createRoot(rootEl).render(
               <Toaster />
             </TooltipProvider>
           </AuthProvider>
-        </QueryClientProvider>
-      </SettingsProvider>
+        </SettingsProvider>
+      </QueryClientProvider>
     </ThemeProvider>
   </StrictMode>,
 );

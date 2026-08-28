@@ -15,6 +15,55 @@
       "when": 1787565663937,
       "tag": "0001_windy_malcolm_colcord",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1787573607590,
+      "tag": "0002_eminent_rattler",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1787641851147,
+      "tag": "0003_green_red_shift",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1787652695048,
+      "tag": "0004_short_arclight",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1787729679436,
+      "tag": "0005_messy_bloodaxe",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1787733479955,
+      "tag": "0006_hard_ironclad",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1787745418600,
+      "tag": "0007_clear_lady_deathstrike",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1787745586653,
+      "tag": "0008_demonic_spirit",
+      "breakpoints": true
     }
   ]
 }

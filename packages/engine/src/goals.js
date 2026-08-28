@@ -1,5 +1,6 @@
 import { OCCURRENCES_PER_YEAR, equivalent } from "./cadence.js";
 import { addDaysIso, daysBetween } from "./calendar.js";
+import { periodRate } from "./projections.js";
 
 /** @import { Cents } from "./money.js" */
 /** @import { Cadence } from "./cadence.js" */
@@ -31,15 +32,6 @@ export function resolveTargetCents(goal, monthlyEssentialBurnCents) {
     return goal.targetAmountCents ?? 0;
   }
   return Math.round(monthlyEssentialBurnCents * (goal.targetMonths ?? 0));
-}
-
-/**
- * @param {number} annualGrowthRate
- * @param {Cadence} cadence
- */
-function perPeriodRate(annualGrowthRate, cadence) {
-  if (annualGrowthRate === 0) return 0;
-  return Math.pow(1 + annualGrowthRate, 1 / OCCURRENCES_PER_YEAR[cadence]) - 1;
 }
 
 /** @param {Cadence} cadence */
@@ -90,7 +82,7 @@ export function goalEta(args) {
     };
   }
 
-  const rate = perPeriodRate(annualGrowthRate, payCadence);
+  const rate = periodRate(annualGrowthRate, payCadence);
   const daysStep = approxDaysPerPeriod(payCadence);
 
   /** @param {number} r */
@@ -153,7 +145,7 @@ export function goalRequired(args) {
     0,
     Math.round((days / 365.25) * OCCURRENCES_PER_YEAR[args.payCadence]),
   );
-  const r = perPeriodRate(args.annualGrowthRate, args.payCadence);
+  const r = periodRate(args.annualGrowthRate, args.payCadence);
 
   /** @type {Cents} */
   let perPayCents;

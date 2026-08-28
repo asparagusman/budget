@@ -1,126 +1,94 @@
-import { useEffect, useRef, useState } from "react";
-import * as echarts from "echarts/core";
-import { BarChart, HeatmapChart, LineChart, SankeyChart } from "echarts/charts";
-import {
-  CalendarComponent,
-  DatasetComponent,
-  GridComponent,
-  TooltipComponent,
-  VisualMapComponent,
-} from "echarts/components";
-import { CanvasRenderer } from "echarts/renderers";
-import { useResolvedTheme } from "@/lib/theme.jsx";
+import { lazy, Suspense, useId, useState } from "react";
+import { TableIcon, XIcon } from "lucide-react";
 import { cn } from "@/lib/utils.js";
 import { Skeleton } from "@/components/ui/skeleton.jsx";
 import { EmptyState } from "@/components/empty-state.jsx";
+import { Button } from "@/components/ui/button.jsx";
 
-// Only the chart types this phase's demo route (and the phases that follow
-// it) actually use. Add to this list rather than importing all of echarts.
-echarts.use([
-  LineChart,
-  BarChart,
-  SankeyChart,
-  HeatmapChart,
-  GridComponent,
-  TooltipComponent,
-  CalendarComponent,
-  VisualMapComponent,
-  DatasetComponent,
-  CanvasRenderer,
-]);
-
-/** @type {CanvasRenderingContext2D | undefined} */
-let colorCtx;
-
-// ECharts' canvas renderer (zrender) parses colours through its own utility,
-// which only understands hex/rgb/hsl — not oklch(), which is what our
-// tokens are authored in. Anything that needs colour-space MATH (a
-// visualMap gradient, a sankey link fade) silently breaks — renders black —
-// even though a plain fillStyle string (a bar, a line stroke) works fine
-// via the browser's own canvas support for oklch.
+// ECharts is by a wide margin the largest dependency in the app, and most
+// routes render no chart at all. Pulling it in through `React.lazy` means
+// it becomes its own chunk fetched the first time a chart actually paints,
+// rather than a tax on every route's initial load
+// (phases/11-polish-mobile-import.md, workstream B "Performance").
 //
-// Neither getComputedStyle() nor reading fillStyle back helps: modern
-// Chromium preserves oklch() as oklch() through both of those rather than
-// downconverting it. Actually painting a pixel and reading its bytes back
-// via getImageData() can't preserve the color space — it's forced to
-// concrete sRGB numbers — so that's what this does instead of any string
-// round-trip.
-/** @param {string} cssColor */
-function toCanvasColor(cssColor) {
-  if (!cssColor) return cssColor;
-  if (!colorCtx) {
-    const ctx = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
-    if (!ctx) return cssColor;
-    ctx.canvas.width = 1;
-    ctx.canvas.height = 1;
-    colorCtx = ctx;
-  }
-  colorCtx.clearRect(0, 0, 1, 1);
-  colorCtx.fillStyle = cssColor;
-  colorCtx.fillRect(0, 0, 1, 1);
-  const [r, g, b, a] = colorCtx.getImageData(0, 0, 1, 1).data;
-  return a === 255 ? `rgb(${r}, ${g}, ${b})` : `rgba(${r}, ${g}, ${b}, ${(a ?? 255) / 255})`;
-}
+// Import `<Chart>` from here; never import chart-canvas.jsx (or `echarts`)
+// directly, or the split quietly stops working.
+const ChartCanvas = lazy(() => import("@/components/chart-canvas.jsx"));
 
-/** @param {string} name */
-function readToken(name) {
-  const raw = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-  return toCanvasColor(raw);
-}
+/** @typedef {import("@/components/chart-canvas.jsx").ChartTokens} ChartTokens */
 
-function readChartTokens() {
-  return {
-    axisLabel: readToken("--chart-axis-label"),
-    grid: readToken("--chart-grid"),
-    series: [1, 2, 3, 4, 5].map((n) => readToken(`--chart-line-${n}`)),
-    surface: readToken("--surface"),
-    text: readToken("--text"),
-    border: readToken("--border"),
-    accentSoft: readToken("--accent-soft"),
-  };
-}
+/**
+ * The accessible alternative to a chart: the same figures as a real table.
+ * "A chart is not the only way a figure is available"
+ * (phases/11-polish-mobile-import.md, workstream B "Accessibility").
+ *
+ * @typedef {{
+ *   columns: string[],
+ *   rows: (string | number)[][],
+ *   caption?: string,
+ * }} ChartDataTable
+ */
 
-/** @typedef {ReturnType<typeof readChartTokens>} ChartTokens */
-
-/** @param {ReturnType<typeof readChartTokens>} tokens */
-function baseOption(tokens) {
-  return {
-    color: tokens.series,
-    textStyle: { fontFamily: "inherit", color: tokens.axisLabel },
-    grid: { left: 8, right: 8, top: 28, bottom: 8, containLabel: true },
-    tooltip: {
-      backgroundColor: tokens.surface,
-      borderColor: tokens.border,
-      borderWidth: 1,
-      textStyle: { color: tokens.text },
-      extraCssText: "border-radius: 0.625rem; box-shadow: var(--shadow-raised); padding: 8px 12px;",
-    },
-    xAxis: {
-      axisLine: { lineStyle: { color: tokens.border } },
-      axisTick: { show: false },
-      axisLabel: { color: tokens.axisLabel },
-      splitLine: { show: false },
-    },
-    yAxis: {
-      axisLine: { show: false },
-      axisTick: { show: false },
-      axisLabel: { color: tokens.axisLabel },
-      splitLine: { lineStyle: { color: tokens.grid } },
-    },
-  };
+/** @param {{ table: ChartDataTable, id: string }} props */
+function DataTableView({ table, id }) {
+  return (
+    <div className="overflow-x-auto rounded-(--radius-control) border border-border" id={id}>
+      <table className="w-full text-sm">
+        {table.caption ? <caption className="sr-only">{table.caption}</caption> : null}
+        <thead>
+          <tr className="border-b border-border">
+            {table.columns.map((column, i) => (
+              <th
+                key={column}
+                scope="col"
+                className={cn(
+                  "px-3 py-2 text-xs font-medium tracking-wide text-text-subtle uppercase",
+                  i === 0 ? "text-left" : "text-right",
+                )}
+              >
+                {column}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {table.rows.map((row) => (
+            <tr key={String(row[0])} className="border-b border-border last:border-b-0">
+              {row.map((cell, i) => (
+                <td
+                  key={table.columns[i] ?? i}
+                  className={cn(
+                    "px-3 py-2 tabular-nums",
+                    i === 0 ? "text-left text-text" : "text-right text-text-muted",
+                  )}
+                >
+                  {cell}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 /**
- * The one place `echarts` gets imported. Reads colour tokens live and
- * re-reads them on theme change with no reload, applies a shared minimal
- * base option (no gridlines but a faint horizontal set, sparse muted axis
- * labels, a token-styled tooltip card), is responsive to its container
- * rather than the window, and renders its own skeleton/empty state.
+ * A chart, its skeleton, its empty state and its text alternative.
+ *
+ * `ariaLabel` is not optional in spirit even though it is in the type: a
+ * canvas is opaque to a screen reader, so a chart with no label is a chart
+ * that does not exist for some of its readers. Pass `dataTable` as well
+ * wherever the chart is the only place a figure appears — the operator gets
+ * a "Table" toggle and the same numbers as rows.
+ *
  * Rounded bar caps aren't in the base option — they're a per-series
- * `itemStyle.borderRadius`, so the caller sets it (see the bar demo).
+ * `itemStyle.borderRadius`, so the caller sets it.
  *
  * @param {{
  *   option: object | ((tokens: ChartTokens) => object),
+ *   ariaLabel?: string,
+ *   dataTable?: ChartDataTable | null,
  *   loading?: boolean,
  *   empty?: boolean,
  *   emptyTitle?: string,
@@ -131,6 +99,8 @@ function baseOption(tokens) {
  */
 export function Chart({
   option,
+  ariaLabel,
+  dataTable = null,
   loading = false,
   empty = false,
   emptyTitle = "Nothing to show yet",
@@ -138,65 +108,50 @@ export function Chart({
   height = 320,
   className,
 }) {
-  const containerRef = useRef(/** @type {HTMLDivElement | null} */ (null));
-  const chartRef = useRef(/** @type {echarts.ECharts | null} */ (null));
-  const resolved = useResolvedTheme();
-  const [tokens, setTokens] = useState(readChartTokens);
-
-  // Deferred to the next frame: an explicit light/dark toggle sets the
-  // data-theme attribute in a *sibling* effect (ThemeProvider's), and effect
-  // order across components isn't something to depend on. By the next
-  // frame the attribute (or the OS media query, for "system") has already
-  // taken effect either way.
-  useEffect(() => {
-    const raf = requestAnimationFrame(() => setTokens(readChartTokens()));
-    return () => cancelAnimationFrame(raf);
-  }, [resolved]);
-
-  useEffect(() => {
-    if (!containerRef.current || loading || empty) return undefined;
-
-    const instance = echarts.init(containerRef.current);
-    chartRef.current = instance;
-
-    const observer = new ResizeObserver(() => instance.resize());
-    observer.observe(containerRef.current);
-
-    return () => {
-      observer.disconnect();
-      instance.dispose();
-      chartRef.current = null;
-    };
-  }, [loading, empty]);
-
-  useEffect(() => {
-    const instance = chartRef.current;
-    if (!instance) return;
-    // ECharts deep-merges each setOption call onto its internal state, so
-    // re-applying the base every time tokens change and the caller's option
-    // every time it changes composes correctly without us hand-rolling a
-    // merge for nested keys like xAxis/tooltip.
-    instance.setOption(baseOption(tokens), false);
-    instance.setOption(typeof option === "function" ? option(tokens) : option, false);
-  }, [option, tokens]);
+  const [showTable, setShowTable] = useState(false);
+  const tableId = useId();
 
   if (loading) {
-    return (
-      <Skeleton className={cn("w-full", className)} style={{ height }} />
-    );
+    return <Skeleton className={cn("w-full", className)} style={{ height }} />;
   }
 
   if (empty) {
-    return (
-      <EmptyState
-        title={emptyTitle}
-        description={emptyDescription}
-        className={className}
-      />
-    );
+    return <EmptyState title={emptyTitle} description={emptyDescription} className={className} />;
   }
 
+  const canvas = (
+    <div
+      role="img"
+      aria-label={ariaLabel}
+      // A canvas has no accessible content of its own; the label above is
+      // the whole of what a screen reader gets, so the subtree must not
+      // also be walked into.
+      className={cn("w-full", className)}
+    >
+      <Suspense fallback={<Skeleton className="w-full" style={{ height }} />}>
+        <ChartCanvas option={option} height={height} />
+      </Suspense>
+    </div>
+  );
+
+  if (!dataTable) return canvas;
+
   return (
-    <div ref={containerRef} className={cn("w-full", className)} style={{ height }} />
+    <div className="flex flex-col gap-2">
+      <div className="flex justify-end">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={() => setShowTable((open) => !open)}
+          aria-expanded={showTable}
+          aria-controls={tableId}
+        >
+          {showTable ? <XIcon aria-hidden="true" /> : <TableIcon aria-hidden="true" />}
+          {showTable ? "Hide table" : "Table"}
+        </Button>
+      </div>
+      {showTable ? <DataTableView table={dataTable} id={tableId} /> : canvas}
+    </div>
   );
 }

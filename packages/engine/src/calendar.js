@@ -4,6 +4,7 @@ import {
   differenceInCalendarDays,
   differenceInCalendarMonths,
 } from "date-fns";
+import { OCCURRENCES_PER_YEAR } from "./cadence.js";
 import { mustAt } from "./invariant.js";
 
 /** @import { Cadence } from "./cadence.js" */
@@ -187,6 +188,28 @@ export function daysBetween(from, to) {
   return differenceInCalendarDays(parseIsoDate(to), parseIsoDate(from));
 }
 
+/** How many whole periods of `cadence` fit between two dates — 39 fortnights,
+ * about 18 months.
+ *
+ * Exists so a duration is never expressed in a unit nobody used: the source
+ * spreadsheet labelled a column of fortnights "Weeks to save" and understated
+ * every emergency-fund timeline by half (phases/09-goals-projections.md
+ * "/goals"). Callers ask for periods of a named cadence and label the answer
+ * with that cadence's own name, so the two can't drift apart.
+ *
+ * Uses the conventional average period length (365.25 / occurrences per year)
+ * rather than walking a real schedule — this answers "how long", not "which
+ * dates"; `projectPaydays` is the one that lands on actual days.
+ *
+ * @param {IsoDate} from
+ * @param {IsoDate} to
+ * @param {Cadence} cadence
+ */
+export function periodsBetween(from, to, cadence) {
+  const days = daysBetween(from, to);
+  return Math.round(days / (365.25 / OCCURRENCES_PER_YEAR[cadence]));
+}
+
 /** The pay cycle (payday-to-payday window) that `on` falls inside. If `on`
  * lands exactly on a payday, that payday is the cycle start.
  *
@@ -254,8 +277,13 @@ export function resolveCycle(primary, on) {
  * fed back into a calculation, so an unbounded side collapsing to the query
  * date is an acceptable, clearly-flagged approximation.
  *
+ * The `@returns` is load-bearing: without it every `kind: "overlap"` literal
+ * below widens to `string`, and callers that switch on it (the dashboard's
+ * warnings strip) lose the discriminated union.
+ *
  * @param {VariantScheduleEntry[]} entries
  * @param {IsoDate} on
+ * @returns {VariantResolution}
  */
 export function resolveVariant(entries, on) {
   const onDate = parseIsoDate(on);

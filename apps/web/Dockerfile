@@ -14,7 +14,6 @@ COPY apps/web/package.json apps/web/package.json
 
 RUN pnpm install --frozen-lockfile
 
-COPY tsconfig.base.json ./
 COPY packages/engine packages/engine
 COPY packages/schema packages/schema
 COPY apps/api apps/api

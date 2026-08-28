@@ -1,0 +1,1 @@
+ALTER TABLE "accounts" ALTER COLUMN "annual_growth_rate" SET DATA TYPE numeric(9, 6);

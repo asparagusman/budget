@@ -21,6 +21,7 @@ export {
   windowLengthDays,
   addDaysIso,
   daysBetween,
+  periodsBetween,
 } from "./calendar.js";
 /** @typedef {import("./calendar.js").IsoDate} IsoDate */
 /** @typedef {import("./calendar.js").DateWindow} DateWindow */
@@ -39,6 +40,9 @@ export {
 /** @typedef {import("./bills.js").BillInstance} BillInstance */
 /** @typedef {import("./bills.js").BalancePoint} BalancePoint */
 
+export { resolveVariableBudget, trailingAverageCents } from "./variable-costs.js";
+/** @typedef {import("./variable-costs.js").VariableBudgetRow} VariableBudgetRow */
+
 export { computeAllocation, diffAllocations } from "./allocation.js";
 /** @typedef {import("./allocation.js").Basis} Basis */
 /** @typedef {import("./allocation.js").AllocationLine} AllocationLine */
@@ -53,7 +57,7 @@ export { resolveTargetCents, goalEta, goalRequired } from "./goals.js";
 /** @typedef {import("./goals.js").TargetMode} TargetMode */
 /** @typedef {import("./goals.js").Goal} Goal */
 
-export { futureValueCents } from "./projections.js";
+export { futureValueCents, periodRate } from "./projections.js";
 
 // Assertion helpers — used across the workspace wherever TypeScript would
 // have reached for a `!`. See invariant.js for why they throw.

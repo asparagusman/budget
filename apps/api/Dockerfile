@@ -14,7 +14,6 @@ COPY apps/web/package.json apps/web/package.json
 
 RUN pnpm install --frozen-lockfile
 
-COPY tsconfig.base.json ./
 COPY packages/engine packages/engine
 COPY packages/schema packages/schema
 COPY apps/api apps/api
@@ -33,9 +32,19 @@ FROM node:22-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 
+# Stamped by docker-compose from the repo's own APP_VERSION (see
+# infra/README.md); surfaced by GET /health so the operator can tell which
+# build is actually running without shelling into the container.
+ARG APP_VERSION=dev
+ENV APP_VERSION=${APP_VERSION}
+
 COPY --from=build /tmp/deploy/node_modules ./node_modules
 COPY --from=build /repo/apps/api/dist ./dist
 COPY --from=build /repo/apps/api/package.json ./package.json
+# The raw .sql files dist/migrate.js applies. drizzle-kit itself is a
+# devDependency and is deliberately absent from this image — the runtime
+# migrator only needs the SQL and the journal.
+COPY --from=build /repo/packages/schema/migrations ./migrations
 
 EXPOSE 3001
 CMD ["node", "dist/index.js"]

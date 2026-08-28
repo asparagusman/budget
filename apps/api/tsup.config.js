@@ -1,7 +1,9 @@
 import { defineConfig } from "tsup";
 
 export default defineConfig({
-  entry: ["src/index.js"],
+  // Two entries: the server, and the one-shot migrator the compose
+  // `migrate` service runs before the API starts (see apps/api/src/migrate.js).
+  entry: ["src/index.js", "src/migrate.js"],
   format: ["esm"],
   target: "node22",
   outDir: "dist",

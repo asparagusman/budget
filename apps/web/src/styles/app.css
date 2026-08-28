@@ -33,4 +33,259 @@
     overflow-x: hidden;
     max-width: 100%;
   }
+
+  /* ---- touch targets -------------------------------------------------
+     44px minimum on anything driven by a finger
+     (phases/11-polish-mobile-import.md, workstream B). Gated on
+     `pointer: coarse` rather than a width breakpoint, because the
+     constraint is the finger, not the viewport — a touchscreen laptop at
+     1440px needs it and a mouse-driven 375px window does not.
+
+     In @layer base so a utility class still wins: `size-6` on an icon
+     button stays 24px on a mouse and grows on a touchscreen, and an
+     explicit `min-h-*` from a caller overrides this outright.
+
+     `link` is exempt: it renders as inline text inside a sentence, where a
+     44px-tall run of text would break the line box it sits in. Those get
+     spacing from their surroundings instead. */
+  @media (pointer: coarse) {
+    /* Standalone controls: a button, a select, a tab, a field. All of them
+       are things a finger aims at deliberately. */
+    [data-slot="button"]:not([data-variant="link"]),
+    [data-slot="input"],
+    [data-slot="input-group"],
+    [data-slot="input-group-control"],
+    [data-slot="select-trigger"],
+    [data-slot="tabs-trigger"],
+    [data-slot="textarea"],
+    [data-touch-target] {
+      min-height: 2.75rem;
+    }
+
+    [data-slot="button"][data-size^="icon"],
+    [data-touch-target] {
+      min-width: 2.75rem;
+    }
+
+    /* `align-self: stretch` is not enough on its own: the control carries
+       its own `h-8`, and an explicit height beats stretch. The min-height
+       above is what actually grows it; this keeps it filling the group when
+       the group is taller still. */
+    [data-slot="input-group"] > [data-slot="input-group-control"] {
+      align-self: stretch;
+    }
+
+    /* Radix's tab triggers are sized off their list's height, so the list
+       has to grow too. */
+    [data-slot="tabs-list"] {
+      min-height: 2.75rem;
+    }
+
+    /* NOT exempt by accident: a link inside running text ("Fix it →" in a
+       warning sentence) keeps its natural line-height. Forcing 44px onto it
+       would break the paragraph it sits in and put an invisible 44px hit
+       area over the words either side of it. WCAG 2.2's own target-size
+       criterion carves out inline links for exactly this reason; standalone
+       link-shaped controls get `data-touch-target` instead. */
+  }
+
+  /* ---- focus ---------------------------------------------------------
+     Every interactive element keeps a visible ring. Declared once here
+     rather than trusted to each component, so a control that forgets its
+     own `focus-visible:` classes still shows focus rather than silently
+     becoming keyboard-invisible. Components that style their own focus
+     (Button, Input) override this through their utilities. */
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Motion (phases/11-polish-mobile-import.md, workstream A).
+
+   Every keyframe here earns its place by showing the operator something they
+   would otherwise have to work out. The reduced-motion block at the bottom
+   REDUCES each one to opacity — it never removes the feedback, because a
+   card that never appears and a row that never acknowledges a change are
+   both worse than a fast one.
+   --------------------------------------------------------------------------- */
+@theme {
+  /* Named so no component has to re-type a duration. Nothing exceeds 300ms
+     except the deliberate chart entrance, which echarts owns. */
+  --animate-card-enter: card-enter 260ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-route-enter: route-enter 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-row-flash: row-flash 600ms ease-out both;
+}
+
+/* Staggered card entry. Applied by marking the CONTAINER with
+   `data-stagger` rather than by threading an inline `animation-delay` into
+   every child — the dashboard grid has nine of them, several conditional,
+   and hand-numbered delays go stale the first time one is added.
+
+   The delays cascade: `nth-child(n+3)` matches everything from the third
+   card on, and the last matching rule wins, so card 3 lands on 60ms and
+   card 9 on 240ms. Capped there deliberately — past ~240ms the last card
+   reads as late rather than as sequenced.
+
+   First paint only, because these elements stay mounted across refetches.
+   A settled query re-renders them; it does not remount them, so nothing
+   replays under the operator. */
+[data-stagger] > * {
+  animation: var(--animate-card-enter);
+}
+[data-stagger] > *:nth-child(n + 2) {
+  animation-delay: 30ms;
+}
+[data-stagger] > *:nth-child(n + 3) {
+  animation-delay: 60ms;
+}
+[data-stagger] > *:nth-child(n + 4) {
+  animation-delay: 90ms;
+}
+[data-stagger] > *:nth-child(n + 5) {
+  animation-delay: 120ms;
+}
+[data-stagger] > *:nth-child(n + 6) {
+  animation-delay: 150ms;
+}
+[data-stagger] > *:nth-child(n + 7) {
+  animation-delay: 180ms;
+}
+[data-stagger] > *:nth-child(n + 8) {
+  animation-delay: 210ms;
+}
+[data-stagger] > *:nth-child(n + 9) {
+  animation-delay: 240ms;
+}
+
+@keyframes card-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes route-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Draws the eye to the rows that actually changed, then gets out of the way.
+
+   An inset box-shadow rather than `background-color`, deliberately: the
+   changed rows in the transfer list ALREADY carry a persistent tint, and a
+   background-colour keyframe with `fill-mode: both` would end by pinning
+   that row to transparent and quietly deleting it. An inset shadow washes
+   over the row's own background and leaves it intact underneath. It also
+   paints below the text, so nothing becomes unreadable mid-flash. */
+@keyframes row-flash {
+  0% {
+    box-shadow: inset 0 0 0 100vmax var(--flash-tint, var(--accent-soft));
+  }
+  55% {
+    box-shadow: inset 0 0 0 100vmax var(--flash-tint, var(--accent-soft));
+  }
+  100% {
+    box-shadow: inset 0 0 0 100vmax transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Opacity only: the card still arrives, the row still acknowledges, but
+     nothing travels. Note this deliberately does NOT set
+     `animation: none` — that would silently delete the feedback along with
+     the motion. */
+  /* Staggered card entry. Applied by marking the CONTAINER with
+   `data-stagger` rather than by threading an inline `animation-delay` into
+   every child — the dashboard grid has nine of them, several conditional,
+   and hand-numbered delays go stale the first time one is added.
+
+   The delays cascade: `nth-child(n+3)` matches everything from the third
+   card on, and the last matching rule wins, so card 3 lands on 60ms and
+   card 9 on 240ms. Capped there deliberately — past ~240ms the last card
+   reads as late rather than as sequenced.
+
+   First paint only, because these elements stay mounted across refetches.
+   A settled query re-renders them; it does not remount them, so nothing
+   replays under the operator. */
+[data-stagger] > * {
+  animation: var(--animate-card-enter);
+}
+[data-stagger] > *:nth-child(n + 2) {
+  animation-delay: 30ms;
+}
+[data-stagger] > *:nth-child(n + 3) {
+  animation-delay: 60ms;
+}
+[data-stagger] > *:nth-child(n + 4) {
+  animation-delay: 90ms;
+}
+[data-stagger] > *:nth-child(n + 5) {
+  animation-delay: 120ms;
+}
+[data-stagger] > *:nth-child(n + 6) {
+  animation-delay: 150ms;
+}
+[data-stagger] > *:nth-child(n + 7) {
+  animation-delay: 180ms;
+}
+[data-stagger] > *:nth-child(n + 8) {
+  animation-delay: 210ms;
+}
+[data-stagger] > *:nth-child(n + 9) {
+  animation-delay: 240ms;
+}
+
+@keyframes card-enter {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  @keyframes route-enter {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  /* Radix's own open/close animations (tw-animate-css) and any transition a
+     component sets inline — sheets sliding, the sidebar's width, a chart
+     canvas — collapse to instant. Fades survive because a fade is opacity. */
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* …except the two above, which are re-declared as opacity-only rather than
+     crushed to nothing, so the arrival is still visible. */
+  [data-motion="route-enter"],
+  [data-stagger] > * {
+    animation-duration: 160ms !important;
+  }
+
+  /* The stagger itself goes: nine cards arriving 30ms apart is motion even
+     when each one only fades. They all fade together instead. */
+  [data-stagger] > * {
+    animation-delay: 0ms !important;
+  }
 }

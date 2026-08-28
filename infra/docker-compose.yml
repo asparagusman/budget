@@ -17,14 +17,37 @@ services:
     # this compose network. Do not add one for convenience; use
     # docker-compose.dev.yml instead.
 
+  # One-shot: applies pending migrations and exits. `api` waits on it
+  # completing successfully, so "migrate before restart" is enforced by the
+  # stack rather than by the operator remembering the order
+  # (phases/11-polish-mobile-import.md, "Update procedure"). Same image as
+  # `api` — the build is shared, not repeated.
+  migrate:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+      args:
+        APP_VERSION: ${APP_VERSION:-dev}
+    restart: "no"
+    command: ["node", "dist/migrate.js"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+
   api:
     build:
       context: ..
       dockerfile: apps/api/Dockerfile
+      args:
+        APP_VERSION: ${APP_VERSION:-dev}
     restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
       # Constructed from the same Postgres vars, using the compose network's
       # `db` hostname — independent of whatever DATABASE_URL a developer has
@@ -34,6 +57,7 @@ services:
       PORT: ${PORT}
       SESSION_SECRET: ${SESSION_SECRET}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN}
+      APP_VERSION: ${APP_VERSION:-dev}
     ports:
       - "${PORT}:${PORT}"
     healthcheck:

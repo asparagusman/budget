@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api.js";
 
 /** @typedef {{ id: string, displayName: string, email: string | null }} AuthUser */
@@ -38,13 +39,19 @@ const AuthContext = createContext(/** @type {AuthContextValue | null} */ (null))
 export function AuthProvider({ children }) {
   const [state, setState] = useState(/** @type {AuthState | null} */ (null));
   const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
 
   const refresh = useCallback(async () => {
     invalidateAuthState();
     const next = await ensureAuthState();
     setState(next);
+    // GET /settings sits behind the same auth guard as everything else, so
+    // it 401s (and settles into DEFAULT_SETTINGS) whenever this fires
+    // signed-out — refetch for real now that login/bootstrap/logout just
+    // changed whether there's a session (see settings.jsx).
+    queryClient.invalidateQueries({ queryKey: ["settings"] });
     return next;
-  }, []);
+  }, [queryClient]);
 
   useEffect(() => {
     let cancelled = false;

@@ -36,10 +36,22 @@ function writeCollapsed(collapsed) {
   }
 }
 
+// Collapsing animates two things at once: the aside's width, and each
+// label's own width and opacity. Labels are kept MOUNTED at zero width
+// rather than conditionally rendered — a conditional render pops, and it
+// would also strip the accessible name off every collapsed nav link, since
+// the icon is aria-hidden and the text is all a screen reader has.
+const LABEL = "overflow-hidden whitespace-nowrap transition-[opacity,max-width] duration-150";
+/** @param {boolean} collapsed */
+function labelClass(collapsed) {
+  return collapsed ? "max-w-0 opacity-0" : "max-w-48 opacity-100";
+}
+
 /**
  * Desktop-only (`md:` and up) fixed left sidebar: brand, search/command
  * trigger, nav with the active item as a soft tinted pill, then a user block
- * and the theme control pinned to the bottom. Collapsible to icon-only.
+ * and the theme control pinned to the bottom. Collapsible to icon-only,
+ * with the labels fading as the width transitions.
  */
 export function Sidebar() {
   const [collapsed, setCollapsed] = useState(readCollapsed);
@@ -65,33 +77,31 @@ export function Sidebar() {
         collapsed ? "w-[4.5rem]" : "w-64",
       )}
     >
-      <div className="flex h-16 shrink-0 items-center gap-2 px-4">
+      {/* gap collapses along with the labels — a surviving gap next to a
+          zero-width label pushes every icon a few pixels off centre. */}
+      <div className={cn("flex h-16 shrink-0 items-center px-4", collapsed ? "justify-center gap-0 px-0" : "gap-2")}>
         <div className="flex size-8 shrink-0 items-center justify-center rounded-(--radius-control) bg-accent-brand text-sm font-bold text-accent-brand-fg">
           B
         </div>
-        {!collapsed && (
-          <span className="truncate text-sm font-semibold text-text">
-            Budget
-          </span>
-        )}
+        <span className={cn(LABEL, labelClass(collapsed), "text-sm font-semibold text-text")}>
+          Budget
+        </span>
       </div>
 
       <button
         type="button"
         onClick={toggleCommandPalette}
         className={cn(
-          "mx-3 flex items-center gap-2 rounded-(--radius-control) bg-surface-muted px-3 py-2 text-sm text-text-muted transition-colors hover:text-text",
-          collapsed && "justify-center",
+          "mx-3 flex items-center rounded-(--radius-control) bg-surface-muted px-3 py-2 text-sm text-text-muted transition-colors hover:text-text",
+          collapsed ? "justify-center gap-0" : "gap-2",
         )}
       >
         <Search className="size-4 shrink-0" aria-hidden="true" />
+        <span className={cn(LABEL, labelClass(collapsed), "flex-1 text-left")}>Search…</span>
         {!collapsed && (
-          <>
-            <span className="flex-1 truncate text-left">Search…</span>
-            <kbd className="rounded bg-surface px-1.5 py-0.5 text-[10px] text-text-subtle [@media(pointer:coarse)]:hidden">
-              ⌘K
-            </kbd>
-          </>
+          <kbd className="rounded bg-surface px-1.5 py-0.5 text-[10px] text-text-subtle [@media(pointer:coarse)]:hidden">
+            ⌘K
+          </kbd>
         )}
       </button>
 
@@ -104,7 +114,8 @@ export function Sidebar() {
               to={item.to}
               title={collapsed ? item.label : undefined}
               className={cn(
-                "flex items-center gap-3 rounded-full px-3 py-2 text-sm font-medium transition-colors",
+                "flex items-center rounded-full px-3 py-2 text-sm font-medium transition-colors",
+                collapsed ? "justify-center gap-0" : "gap-3",
                 "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent)",
                 active
                   ? "bg-accent-brand-soft text-accent-brand"
@@ -112,27 +123,25 @@ export function Sidebar() {
               )}
             >
               <item.icon className="size-4 shrink-0" aria-hidden="true" />
-              {!collapsed && <span className="truncate">{item.label}</span>}
+              <span className={cn(LABEL, labelClass(collapsed))}>{item.label}</span>
             </Link>
           );
         })}
       </nav>
 
       <div className="flex flex-col gap-3 border-t border-border p-3">
-        <div className="flex items-center gap-2">
+        <div className={cn("flex items-center", collapsed ? "justify-center gap-0" : "gap-2")}>
           <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent-brand-soft text-xs font-medium text-accent-brand">
             {user ? initials(user.displayName) : "?"}
           </div>
-          {!collapsed && (
-            <div className="min-w-0 flex-1">
-              <p className="truncate text-sm font-medium text-text">
-                {user?.displayName ?? "Not signed in"}
-              </p>
-              <p className="truncate text-xs text-text-subtle">
-                {user?.email ?? ""}
-              </p>
-            </div>
-          )}
+          <div className={cn(LABEL, labelClass(collapsed), "min-w-0 flex-1")}>
+            <p className="truncate text-sm font-medium text-text">
+              {user?.displayName ?? "Not signed in"}
+            </p>
+            <p className="truncate text-xs text-text-subtle">
+              {user?.email ?? ""}
+            </p>
+          </div>
           {!collapsed && user && (
             <button
               type="button"

@@ -167,16 +167,16 @@ export function DevChartsPage() {
       />
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         <ChartCard title="Line">
-          <Chart option={line} height={280} />
+          <Chart option={line} height={280} ariaLabel="Demo line chart with fabricated data." />
         </ChartCard>
         <ChartCard title="Bar">
-          <Chart option={bar} height={280} />
+          <Chart option={bar} height={280} ariaLabel="Demo bar chart with fabricated data." />
         </ChartCard>
         <ChartCard title="Sankey">
-          <Chart option={buildSankeyOption} height={320} />
+          <Chart option={buildSankeyOption} height={320} ariaLabel="Demo sankey diagram with fabricated data." />
         </ChartCard>
         <ChartCard title="Calendar heatmap">
-          <Chart option={buildCalendarOption} height={220} />
+          <Chart option={buildCalendarOption} height={220} ariaLabel="Demo calendar heatmap with fabricated data." />
         </ChartCard>
       </div>
     </>

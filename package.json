@@ -7,14 +7,24 @@
   },
   "packageManager": "pnpm@10.34.5",
   "scripts": {
-    "dev": "concurrently -n api,web -c blue,green \"pnpm -F @budget/api dev\" \"pnpm -F @budget/web dev\"",
+    "dev": "node scripts/dev.mjs",
+    "dev:api": "node scripts/dev.mjs api",
+    "dev:web": "node scripts/dev.mjs web",
+    "stop": "node scripts/dev.mjs stop",
+    "status": "node scripts/dev.mjs status",
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
     "db:migrate": "pnpm -F @budget/schema migrate",
     "db:generate": "pnpm -F @budget/schema generate",
     "db:seed": "pnpm -F @budget/schema seed",
-    "auth:invite": "pnpm -F @budget/api auth:invite"
+    "auth:invite": "pnpm -F @budget/api auth:invite",
+    "api": "pnpm -F @budget/api",
+    "web": "pnpm -F @budget/web",
+    "docker": "docker compose --env-file .env -f infra/docker-compose.yml",
+    "docker:up": "docker compose --env-file .env -f infra/docker-compose.yml up -d --build",
+    "docker:down": "docker compose --env-file .env -f infra/docker-compose.yml down",
+    "docker:db": "docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compose.dev.yml"
   },
   "devDependencies": {
     "concurrently": "^9.0.0",

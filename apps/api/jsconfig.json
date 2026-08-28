@@ -8,7 +8,7 @@
     // checkJs typechecks dependencies' own .js sources (chai, via vitest).
     "maxNodeModuleJsDepth": 0
   },
-  "include": ["src", "tsup.config.js"],
+  "include": ["src", "tsup.config.js", "vitest.config.js"],
   // `checkJs` would otherwise happily typecheck the tsup bundle in dist/.
   "exclude": ["dist"]
 }

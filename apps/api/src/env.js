@@ -10,6 +10,11 @@ const envSchema = z.object({
     .string()
     .min(32, "SESSION_SECRET must be at least 32 characters"),
   PUBLIC_ORIGIN: z.string().min(1, "PUBLIC_ORIGIN is required"),
+  // Stamped at image build time (see apps/api/Dockerfile's APP_VERSION build
+  // arg) so /health can say which build is running. Optional on purpose —
+  // a `pnpm dev` API has no build to name, and refusing to start over a
+  // missing version string would be absurd.
+  APP_VERSION: z.string().min(1).default("dev"),
 });
 
 /** @typedef {z.infer<typeof envSchema>} Env */

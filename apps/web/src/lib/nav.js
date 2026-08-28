@@ -32,11 +32,32 @@ export const NAV_ITEMS = [
   { to: "/projections", label: "Projections", icon: TrendingUp, phase: "09", chord: "p" },
   { to: "/calendar", label: "Calendar", icon: CalendarDays, phase: "06", chord: "c" },
   { to: "/accounts", label: "Accounts", icon: Landmark, phase: "04", chord: "a" },
-  // Phase 03 only builds the users/devices/sessions/invites surface — a
-  // later phase may grow a general /settings landing page with this as one
-  // tab among others; until then this nav entry points straight at it.
+  // /settings/users is one of six tabs on the same Settings page (phase 03's
+  // Users/Devices/Sessions/Invites, phase 04's People and Pay schedules) —
+  // this nav entry just points at the first one; see settings-page.jsx.
   { to: "/settings/users", label: "Settings", icon: SettingsIcon, phase: "03", chord: "s" },
 ];
+
+// Routes that are deliberately NOT in NAV_ITEMS but still need a name in the
+// mobile top bar: a one-time tool and a drill-down. Without these the bar
+// falls back to "Budget" and the operator loses their place.
+/** @type {[string, string][]} */
+const EXTRA_TITLES = [
+  ["/import", "Import"],
+  ["/costs/fixed/", "Bill history"],
+  ["/dev/charts", "Charts"],
+];
+
+/**
+ * The name of the screen at `pathname`, for the mobile top bar.
+ *
+ * @param {string} pathname
+ */
+export function pageTitle(pathname) {
+  const navItem = NAV_ITEMS.find((item) => item.to === pathname);
+  if (navItem) return navItem.label;
+  return EXTRA_TITLES.find(([prefix]) => pathname.startsWith(prefix))?.[1] ?? "Budget";
+}
 
 // The five destinations that get a permanent slot in the mobile bottom nav.
 // Everything else in NAV_ITEMS surfaces through the "More" sheet.

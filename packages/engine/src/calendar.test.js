@@ -7,6 +7,7 @@ import {
   resolveCycle,
   resolveVariant,
   windowLengthDays,
+  periodsBetween,
 } from "./calendar.js";
 
 /** @import { PaySchedule } from "./calendar.js" */
@@ -171,5 +172,40 @@ describe("windowLengthDays / daysBetween / addDaysIso", () => {
   it("shifts a date forward and backward", () => {
     expect(addDaysIso("2026-01-01", 31)).toBe("2026-02-01");
     expect(addDaysIso("2026-02-01", -31)).toBe("2026-01-01");
+  });
+});
+
+describe("periodsBetween", () => {
+  it("counts fortnights, and never calls them weeks", () => {
+    // One year is 26 fortnights by the conventional divisor, not 52 of
+    // anything — the spreadsheet's own mislabelling, made impossible here.
+    expect(periodsBetween("2026-01-01", "2027-01-01", "fortnightly")).toBe(26);
+    expect(periodsBetween("2026-01-01", "2027-01-01", "weekly")).toBe(52);
+  });
+
+  it("expresses the same span in whichever cadence is asked for", () => {
+    expect(periodsBetween("2026-01-01", "2027-01-01", "monthly")).toBe(12);
+    expect(periodsBetween("2026-01-01", "2027-01-01", "quarterly")).toBe(4);
+    expect(periodsBetween("2026-01-01", "2027-01-01", "yearly")).toBe(1);
+  });
+
+  it("rounds to the nearest whole period", () => {
+    // The conventional fortnight is 365.25/26 = 14.05 days, so 7 days is a
+    // shade under half of one and rounds down; 8 rounds up.
+    expect(periodsBetween("2026-01-01", "2026-01-08", "fortnightly")).toBe(0);
+    expect(periodsBetween("2026-01-01", "2026-01-09", "fortnightly")).toBe(1);
+  });
+
+  it("is zero for the same date and negative going backwards", () => {
+    expect(periodsBetween("2026-01-01", "2026-01-01", "monthly")).toBe(0);
+    expect(periodsBetween("2027-01-01", "2026-01-01", "monthly")).toBe(-12);
+  });
+
+  it("reproduces the Mojo duration the phase doc states in fortnights", () => {
+    // 39 fortnights is about 18 months — the doc's own worked example
+    // (phases/09-goals-projections.md "/goals").
+    const eta = addDaysIso("2026-01-01", 39 * 14);
+    expect(periodsBetween("2026-01-01", eta, "fortnightly")).toBe(39);
+    expect(periodsBetween("2026-01-01", eta, "monthly")).toBe(18);
   });
 });

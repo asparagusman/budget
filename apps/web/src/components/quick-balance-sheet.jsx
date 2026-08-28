@@ -1,0 +1,135 @@
+import { useEffect, useState } from "react";
+import { toCents } from "@budget/engine";
+import { Button } from "@/components/ui/button.jsx";
+import { Input } from "@/components/ui/input.jsx";
+import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/components/ui/input-group.jsx";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select.jsx";
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet.jsx";
+import { FieldRow } from "@/components/field-row.jsx";
+import { todayIso } from "@/lib/dates.js";
+
+/** @typedef {{ id: string, name: string, type: string, latestBalance: { amountCents: number, asAt: string } | null }} BalanceAccount */
+
+/**
+ * The primary, most-frequent write in the app — one field, one confirm
+ * (phases/04-accounts-people.md "/accounts"). `accountId === null` means it
+ * was opened from the command palette rather than a specific row, so it shows
+ * an account picker first; opened from a row, the account is fixed.
+ *
+ * Shared rather than per-screen: /accounts and /goals both need it, and a goal
+ * whose balance is months old reports a progress figure that is quietly wrong
+ * (phases/09-goals-projections.md "Palette registers ... Update balance").
+ *
+ * @param {{
+ *   open: boolean,
+ *   onOpenChange: (open: boolean) => void,
+ *   accounts: BalanceAccount[],
+ *   accountId: string | null,
+ *   submitting: boolean,
+ *   onSubmit: (accountId: string, data: { asAt: string, amountCents: number }) => Promise<void>,
+ * }} props
+ */
+export function QuickBalanceSheet({ open, onOpenChange, accounts, accountId, submitting, onSubmit }) {
+  const pickable = accounts.filter((a) => a.type !== "external");
+  const [selectedId, setSelectedId] = useState(/** @type {string | null} */ (null));
+  const [amount, setAmount] = useState("");
+  const [asAt, setAsAt] = useState(todayIso());
+  const [error, setError] = useState(/** @type {string | null} */ (null));
+
+  useEffect(() => {
+    if (!open) return;
+    const initialId = accountId ?? pickable[0]?.id ?? null;
+    const initialAccount = pickable.find((a) => a.id === initialId) ?? null;
+    setSelectedId(initialId);
+    setAmount(initialAccount?.latestBalance ? String(initialAccount.latestBalance.amountCents / 100) : "");
+    setAsAt(todayIso());
+    setError(null);
+    // Re-running this when `pickable` changes would blow away whatever the
+    // operator has already typed — it only needs to run when the sheet
+    // opens or targets a different account.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, accountId]);
+
+  const selected = pickable.find((a) => a.id === selectedId) ?? null;
+
+  /** @param {import("react").FormEvent} e */
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setError(null);
+    if (!selectedId) {
+      setError("Choose an account.");
+      return;
+    }
+    if (amount.trim() === "") {
+      setError("Enter a balance.");
+      return;
+    }
+    try {
+      await onSubmit(selectedId, { asAt, amountCents: toCents(Number(amount)) });
+      onOpenChange(false);
+    } catch (err) {
+      setError(/** @type {Error} */ (err).message);
+    }
+  }
+
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent side="bottom" className="mx-auto w-full sm:max-w-sm">
+        <SheetHeader>
+          <SheetTitle>Update balance</SheetTitle>
+          <SheetDescription>
+            {selected ? selected.name : "Pick an account, then enter its current balance."}
+          </SheetDescription>
+        </SheetHeader>
+        <form onSubmit={handleSubmit} className="flex flex-col gap-4 px-4 pb-6">
+          {!accountId ? (
+            <FieldRow label="Account" htmlFor="balance-account">
+              <Select
+                value={selectedId ?? undefined}
+                onValueChange={(value) => {
+                  setSelectedId(value);
+                  const acc = pickable.find((a) => a.id === value);
+                  setAmount(acc?.latestBalance ? String(acc.latestBalance.amountCents / 100) : "");
+                }}
+              >
+                <SelectTrigger id="balance-account" className="w-full">
+                  <SelectValue placeholder="Choose an account" />
+                </SelectTrigger>
+                <SelectContent>
+                  {pickable.map((a) => (
+                    <SelectItem key={a.id} value={a.id}>
+                      {a.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </FieldRow>
+          ) : null}
+          <FieldRow label="Balance" htmlFor="balance-amount" required>
+            <InputGroup>
+              <InputGroupAddon>
+                <InputGroupText>$</InputGroupText>
+              </InputGroupAddon>
+              <InputGroupInput
+                id="balance-amount"
+                type="number"
+                step="0.01"
+                inputMode="decimal"
+                autoFocus
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+              />
+            </InputGroup>
+          </FieldRow>
+          <FieldRow label="As at" htmlFor="balance-as-at">
+            <Input id="balance-as-at" type="date" value={asAt} onChange={(e) => setAsAt(e.target.value)} />
+          </FieldRow>
+          {error ? <p className="text-sm text-negative">{error}</p> : null}
+          <Button type="submit" disabled={submitting}>
+            {submitting ? "Saving…" : "Update balance"}
+          </Button>
+        </form>
+      </SheetContent>
+    </Sheet>
+  );
+}
