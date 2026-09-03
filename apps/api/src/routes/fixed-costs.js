@@ -3,7 +3,14 @@ import { balanceCurveQuerySchema, fixedCostsSummaryQuerySchema } from "@budget/s
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { getPrimaryPaySchedule } from "../lib/income.js";
-import { computeContribution, getBillsBufferCents, projectActiveBills } from "../lib/bills.js";
+import {
+  billFigures,
+  computeContribution,
+  getBillsBufferCents,
+  projectActiveBills,
+  resolveOpeningBalance,
+  sumBillFigures,
+} from "../lib/bills.js";
 import { handleValidation } from "../lib/validation.js";
 
 /**
@@ -25,7 +32,7 @@ export function createFixedCostsRoutes({ db }) {
           andCol(isNullCol(cat.archivedAt), eqCol(cat.kind, "fixed")),
         orderBy: (cat, { asc }) => [asc(cat.sortOrder), asc(cat.name)],
       });
-      const { bills, instancesByCategory, allInstances, warnings } = await projectActiveBills(db, window);
+      const { bills, instancesByBill, allInstances, warnings } = await projectActiveBills(db, window);
 
       if (!paySchedule) {
         warnings.push({
@@ -34,24 +41,37 @@ export function createFixedCostsRoutes({ db }) {
         });
       }
 
-      // Each category's subtotal is `computeContribution` run over just that
-      // category's instances — derived from bill membership, never a stored
-      // range (phases/06-fixed-costs.md "Category subtotals are derived").
+      // Every figure on /costs/fixed resolves through one bill's projected
+      // instances — the amount its row prints, the subtotal above it, and the
+      // annual equivalent beside it. The screen used to derive rows itself
+      // from `baseAmountCents * occurrences`, which silently disagreed with
+      // these subtotals for any bill whose amount model actually did
+      // something (see `billFigures`).
+      const byBill = bills.map((bill) =>
+        billFigures(bill, instancesByBill.get(bill.id) ?? [], window, paySchedule),
+      );
+
+      // Each category's subtotal is derived from bill membership, never a
+      // stored range (phases/06-fixed-costs.md "Category subtotals are
+      // derived") — and specifically it is the sum of the rows printed under
+      // it, so the two can never disagree.
       const byCategory = categories.map((cat) => {
-        const contribution = computeContribution(instancesByCategory.get(cat.id) ?? [], window, paySchedule);
+        const rows = byBill.filter((b) => b.categoryId === cat.id);
+        const totals = sumBillFigures(rows, paySchedule);
         return {
           categoryId: cat.id,
           name: cat.name,
-          perYearCents: contribution.perYearCents,
-          perMonthCents: contribution.perMonthCents,
-          perPayCents: contribution.perPayCents,
-          billCount: bills.filter((b) => b.categoryId === cat.id).length,
+          perYearCents: totals.perYearCents,
+          perMonthCents: totals.perMonthCents,
+          perPayCents: totals.perPayCents,
+          billCount: rows.length,
         };
       });
 
       return c.json({
         window,
         contribution: computeContribution(allInstances, window, paySchedule),
+        byBill,
         byCategory,
         billCount: bills.length,
         warnings,
@@ -73,6 +93,15 @@ export function createFixedCostsRoutes({ db }) {
         );
       }
 
+      // With no `opening` in the query the curve starts from the saved
+      // figure — an override if one is set, otherwise the income-landing
+      // account's own latest balance. A supplied `opening` is an unsaved
+      // what-if: it drives the curve, but `savedOpeningBalance` still reports
+      // what the screen would fall back to, and where it came from, so no
+      // assumed figure is ever presented as fact.
+      const savedOpeningBalance = await resolveOpeningBalance(db);
+      const openingBalanceCents = opening ?? savedOpeningBalance.openingBalanceCents;
+
       const { allInstances } = await projectActiveBills(db, window);
       // `paySchedule` is confirmed non-null above, so this — unlike
       // `computeContribution` — always returns a real `perPayCents`; no
@@ -83,9 +112,11 @@ export function createFixedCostsRoutes({ db }) {
 
       return c.json({
         window,
-        points: simulateBalance(allInstances, perPayCents, paydays, opening),
+        points: simulateBalance(allInstances, perPayCents, paydays, openingBalanceCents),
         contributionPerPayCents: perPayCents,
         requiredOpeningBalanceCents: requiredOpeningBalanceCents(allInstances, perPayCents, paydays, bufferCents),
+        openingBalanceCents,
+        savedOpeningBalance,
       });
     });
 }

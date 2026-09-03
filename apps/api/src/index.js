@@ -151,6 +151,16 @@ const routes = app
 // still pulls types only — never this file's runtime code.
 /** @typedef {typeof routes} ApiRoutes */
 
+// POST /import/commit carries its selection as JSON inside a multipart string
+// field, so — unlike every other body in the app — it is validated inside the
+// handler and does not appear in `ApiRoutes`. Re-exported here because it is
+// still part of this API's request contract, and because apps/web deliberately
+// does not depend on @budget/schema (see apps/web/src/lib/constants.js): this
+// module is already its one source of cross-package API types.
+/** @typedef {import("@budget/schema").ImportCommitInput} ImportCommitSelection */
+/** @typedef {import("@budget/schema").ImportDestinationInput} ImportDestination */
+/** @typedef {import("@budget/schema").SessionAuthMethod} SessionAuthMethod */
+
 serve({ fetch: app.fetch, port: env.PORT }, (info) => {
   console.log(`API listening on http://localhost:${info.port}`);
 });

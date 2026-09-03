@@ -32,7 +32,76 @@ import { mustAt, mustGet } from "./invariant.js";
  *   accountId: string
  * }} AllocationLine
  *
- * - `stage` — 1..N, evaluated in ascending order
+ * - `stage` — 1..N, evaluated in ascending order. It is also the section the
+ *   line belongs to: the sheet's "Category" column is a section heading, not
+ *   a per-row field, so stages 1/2/3 ARE Bills & Essentials / Save, Invest &
+ *   Give / Leftover. A per-line `category` existed here briefly and was the
+ *   wrong altitude — it put the sheet's own structure in a side panel and left
+ *   the rows reading as an unlabelled list.
+ * - `label` — the sheet's "Division": the area of the section this line is.
+ */
+
+/**
+ * The three sections, which are stages 1/2/3 named.
+ *
+ * The spreadsheet's "Category" column is a section heading — three of them,
+ * broken up by its Subtotal/Remaining rows — and its "Division" column is the
+ * line. That structure is the whole reason the sheet reads fluently:
+ * **what we must pay → what we choose to set aside → what's left**.
+ *
+ * It lives here rather than in the web app because two screens name these
+ * groups (`/allocation`'s sections and the dashboard's breakdown tiles), and
+ * two independent lists would drift — the dashboard already had to invent
+ * "Allocated out" for the group it could not name (todo.md `[P10-2]`).
+ *
+ * Arithmetic still belongs entirely to `stage`: these are labels on the
+ * evaluation order, and nothing here changes what a line resolves to.
+ *
+ * @type {{ stage: number, key: string, letter: string, name: string, blurb: string }[]}
+ */
+export const ALLOCATION_SECTIONS = [
+  {
+    stage: 1,
+    key: "needs",
+    letter: "A",
+    name: "Bills & Essentials",
+    blurb: "Fixed bills and essential variable costs, taken straight from their own screens.",
+  },
+  {
+    stage: 2,
+    key: "saving",
+    letter: "B",
+    name: "Save, Invest & Give",
+    blurb: "Portions of income set aside — savings, investing, giving, and the emergency buffer.",
+  },
+  {
+    stage: 3,
+    key: "leftover",
+    letter: "C",
+    name: "Leftover",
+    // Wording matters here: this section is a gauge, not an instruction. The
+    // operator was explicit that its splits are "less about allocating, more
+    // about gauging how much is theoretically left for each at that point".
+    blurb: "What's left once needs and goals are met — and a read on what it's notionally for.",
+  },
+];
+
+/** @param {number} stage */
+export function sectionForStage(stage) {
+  return ALLOCATION_SECTIONS.find((s) => s.stage === stage) ?? null;
+}
+
+/**
+ * A goal on a whole section, which no per-line goal can express.
+ *
+ * The sheet carries Goal % on section A's Subtotal row (50%) and on section
+ * B's Remaining row (10%). Neither is the sum of any line's goal — A's lines
+ * are injected totals carrying no goal at all, and B's lines sum to 40%
+ * against a section actual of 31%. Section C's lines sweep everything B
+ * leaves, so C's subtotal IS that remaining and a goal here covers the sheet's
+ * second figure without a second concept.
+ *
+ * @typedef {{ stage: number, goalPct: number }} StageGoal
  */
 
 /**
@@ -43,11 +112,14 @@ import { mustAt, mustGet } from "./invariant.js";
  *   variableEssentialsPerMonthCents: Cents,
  *   variableNonEssentialPerMonthCents: Cents,
  *   incomeLandingAccountId: string,
- *   lines: AllocationLine[]
+ *   lines: AllocationLine[],
+ *   stageGoals?: StageGoal[]
  * }} AllocationInput
  *
  * - `payCadence` — cadence transfers are expressed in
  * - `variableNonEssentialPerMonthCents` — benchmark only — NEVER deducted
+ * - `stageGoals` — optional; a section with no row here falls back to the sum
+ *   of its own lines' goals
  */
 
 /**
@@ -57,22 +129,46 @@ import { mustAt, mustGet } from "./invariant.js";
  *   perPayCents: Cents,
  *   perWeekCents: Cents,
  *   actualPct: number | null,
+ *   goalPerMonthCents: Cents | null,
+ *   goalPerPayCents: Cents | null,
  *   fidelity: number | null
  * }} ResolvedLine
  *
  * - `actualPct` — of gross
+ * - `goalPerMonthCents` — what `goalPct` of gross actually is, in money.
+ *   A percentage is not a figure anyone recognises against their own pay;
+ *   "you're at $520, your 10% goal is $860" is the sentence the operator
+ *   can act on. Null when the line carries no goal — never 0, which would
+ *   read as a goal of nothing.
  * - `fidelity` — (actualPct - goalPct) / goalPct
  */
 
 /**
  * @typedef {{
  *   stage: number,
+ *   goalPerMonthCents: Cents | null,
+ *   goalPerPayCents: Cents | null,
  *   subtotalPerMonthCents: Cents,
+ *   subtotalPerPayCents: Cents,
+ *   subtotalPerWeekCents: Cents,
  *   remainingPerMonthCents: Cents,
+ *   remainingPerPayCents: Cents,
+ *   remainingPerWeekCents: Cents,
  *   goalPct: number | null,
+ *   goalSource: "stage" | "lines" | null,
  *   actualPct: number | null,
  *   fidelity: number | null
  * }} StageResult
+ *
+ * - subtotal/remaining carry all three cadences for the same reason
+ *   `ResolvedLine` does: the screen's primary interval is the pay period, and
+ *   converting in a component would put allocation arithmetic outside the engine.
+ * - `goalSource` — where `goalPct` came from: `"stage"` when the operator set a
+ *   goal on the section itself, `"lines"` when it is the sum of the section's
+ *   own lines' goals, `null` when there is no goal either way. The UI needs the
+ *   distinction: presenting a derived sum as a figure someone typed invites
+ *   editing it where it can't be edited, and 40% summed from five lines is a
+ *   different claim from 40% set on the section.
  */
 
 /**
@@ -96,6 +192,10 @@ import { mustAt, mustGet } from "./invariant.js";
  *   goodLifeFidelityCents: Cents
  * }} AllocationResult
  *
+ * - `stages` is the ONE grouping of the resolved lines. A parallel `categories`
+ *   grouping (by a per-line heading) lived here and was removed: it was the
+ *   same figures a second time, which on screen meant a side panel restating
+ *   the section subtotals the sections were already showing.
  * - `goodLifeFidelityCents` — nonEssential − final remaining; positive = short of aspiration
  */
 
@@ -210,8 +310,18 @@ function fidelityOf(actualPct, goalPct) {
  */
 export function computeAllocation(input) {
   const gross = input.grossPerMonthCents;
+  const stageGoalByStage = new Map(
+    (input.stageGoals ?? []).map((g) => [g.stage, g.goalPct]),
+  );
+  // Every stage that has lines, plus every stage that has only a goal. A
+  // section whose goal is set before its first line is entered still has to
+  // appear — it is 0% of gross against a target, which is a real and readable
+  // state, not an absent one.
   const stageNumbers = Array.from(
-    new Set(input.lines.map((l) => l.stage)),
+    new Set([
+      ...input.lines.map((l) => l.stage),
+      ...stageGoalByStage.keys(),
+    ]),
   ).sort((a, b) => a - b);
 
   let remaining = gross;
@@ -238,33 +348,59 @@ export function computeAllocation(input) {
       subtotal = subtotal + perMonthCents;
 
       const actualPct = pctOfGross(perMonthCents, gross);
+      const goalPerMonthCents = line.goalPct === null ? null : pctOfCents(gross, line.goalPct);
       resolvedByLineId.set(line.id, {
         lineId: line.id,
         perMonthCents,
         perPayCents: equivalent(perMonthCents, "monthly", input.payCadence),
         perWeekCents: equivalent(perMonthCents, "monthly", "weekly"),
         actualPct,
+        goalPerMonthCents,
+        goalPerPayCents:
+          goalPerMonthCents === null ? null : equivalent(goalPerMonthCents, "monthly", input.payCadence),
         fidelity: fidelityOf(actualPct, line.goalPct),
       });
     }
 
     remaining = remaining - subtotal;
 
-    // Stage-level goal is the sum of its lines' own goals — null when none
-    // of the stage's lines carry one, rather than fabricating a target the
-    // operator never entered.
+    // A goal set on the SECTION wins outright; otherwise fall back to the sum
+    // of its lines' own goals; otherwise null, rather than fabricating a
+    // target the operator never entered.
+    //
+    // The precedence is not a tie-break, it is the point: the sheet's "bills
+    // and essentials should be half our income" is a statement about the
+    // section, and section A's lines are injected totals that carry no goal to
+    // sum in the first place. Where both exist, the one typed on the section is
+    // the one the operator can see and edit.
+    const explicitStageGoal = stageGoalByStage.get(stageNum) ?? null;
     const goalValues = stageLines
       .map((l) => l.goalPct)
       .filter((g) => g !== null);
-    const stageGoalPct =
+    const summedLineGoals =
       goalValues.length > 0 ? goalValues.reduce((a, b) => a + b, 0) : null;
+    const stageGoalPct = explicitStageGoal ?? summedLineGoals;
+    /** @type {StageResult["goalSource"]} */
+    const goalSource =
+      explicitStageGoal !== null ? "stage" : summedLineGoals !== null ? "lines" : null;
     const stageActualPct = pctOfGross(subtotal, gross);
+    const stageGoalPerMonthCents = stageGoalPct === null ? null : pctOfCents(gross, stageGoalPct);
 
     stages.push({
       stage: stageNum,
+      goalPerMonthCents: stageGoalPerMonthCents,
+      goalPerPayCents:
+        stageGoalPerMonthCents === null
+          ? null
+          : equivalent(stageGoalPerMonthCents, "monthly", input.payCadence),
       subtotalPerMonthCents: subtotal,
+      subtotalPerPayCents: equivalent(subtotal, "monthly", input.payCadence),
+      subtotalPerWeekCents: equivalent(subtotal, "monthly", "weekly"),
       remainingPerMonthCents: remaining,
+      remainingPerPayCents: equivalent(remaining, "monthly", input.payCadence),
+      remainingPerWeekCents: equivalent(remaining, "monthly", "weekly"),
       goalPct: stageGoalPct,
+      goalSource,
       actualPct: stageActualPct,
       fidelity: fidelityOf(stageActualPct, stageGoalPct),
     });

@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
 
-/** @typedef {{ currency: string, locale: string, billsBufferCents: number, historyLookbackDefault: number }} Settings */
+/** @typedef {{ currency: string, locale: string, billsBufferCents: number, historyLookbackDefault: number, billsOpeningBalanceCents: number | null }} Settings */
 
 /** @type {Settings} */
 const DEFAULT_SETTINGS = {
@@ -11,6 +11,7 @@ const DEFAULT_SETTINGS = {
   locale: "en-AU",
   billsBufferCents: 0,
   historyLookbackDefault: 6,
+  billsOpeningBalanceCents: null,
 };
 
 /** @type {import("react").Context<Settings>} */

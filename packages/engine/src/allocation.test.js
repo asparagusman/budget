@@ -57,6 +57,37 @@ describe("computeAllocation", () => {
     });
   });
 
+  it("renders a goal in money, not only as a percentage", () => {
+    const result = computeAllocation(baseInput());
+    const save = mustFind(result.lines, (l) => l.lineId === "save");
+    const invest = mustFind(result.lines, (l) => l.lineId === "invest");
+
+    // 10% of $10,000 gross.
+    expect(save.goalPerMonthCents).toBe(toCents(1000));
+    // No goal set — null, not zero. A zero would read as "your goal is
+    // nothing", which is a different claim from "you haven't set one".
+    expect(invest.goalPerMonthCents).toBeNull();
+    expect(invest.goalPerPayCents).toBeNull();
+
+    // The stage's goal is the sum of its lines' goals, in money too.
+    expect(mustAt(result.stages, 1).goalPerMonthCents).toBe(toCents(1000));
+    expect(mustAt(result.stages, 0).goalPerMonthCents).toBeNull();
+  });
+
+  it("carries every cadence on a stage subtotal, matching its own lines", () => {
+    const result = computeAllocation(baseInput({ payCadence: "fortnightly" }));
+    const stage2 = mustAt(result.stages, 1);
+    const save = mustFind(result.lines, (l) => l.lineId === "save");
+    const invest = mustFind(result.lines, (l) => l.lineId === "invest");
+
+    // The screen renders lines and their subtotal side by side; the subtotal
+    // must not be in a different unit from the rows above it.
+    expect(stage2.subtotalPerPayCents).toBe(save.perPayCents + invest.perPayCents);
+    expect(stage2.subtotalPerWeekCents).toBe(save.perWeekCents + invest.perWeekCents);
+    expect(stage2.remainingPerPayCents).toBeGreaterThan(0);
+    expect(stage2.remainingPerPayCents).toBeLessThan(stage2.remainingPerMonthCents);
+  });
+
   it("resolves per-line actual% and fidelity against each line's own goal", () => {
     const result = computeAllocation(baseInput());
     const save = mustFind(result.lines, (l) => l.lineId === "save");
@@ -147,6 +178,95 @@ describe("computeAllocation", () => {
     expect(mustFind(resultA.lines, (l) => l.lineId === "b").perMonthCents).toBe(
       mustFind(resultB.lines, (l) => l.lineId === "b").perMonthCents,
     );
+  });
+});
+
+describe("computeAllocation section goals", () => {
+  it("prefers a goal set on the section over the sum of its lines' goals", () => {
+    // Stage 2's lines carry 10% between them. A goal on the section itself is
+    // a different claim — "a quarter of our income should be going here" — and
+    // it is the one the operator can see and edit, so it wins.
+    const result = computeAllocation(baseInput({ stageGoals: [{ stage: 2, goalPct: 25 }] }));
+    const stage2 = mustFind(result.stages, (s) => s.stage === 2);
+
+    expect(stage2.goalPct).toBe(25);
+    expect(stage2.goalSource).toBe("stage");
+    expect(stage2.goalPerMonthCents).toBe(toCents(2500));
+    expect(stage2.actualPct).toBe(15);
+    // Relative to the goal, not in percentage points: 10 points under a goal
+    // of 25 is 40% short of what was intended.
+    expect(stage2.fidelity).toBeCloseTo(-0.4, 10);
+  });
+
+  it("falls back to the summed line goals, and says which it did", () => {
+    const stages = computeAllocation(baseInput()).stages;
+
+    // Stage 1's lines are the two injected totals and carry no goal at all —
+    // "you haven't set one" is a different claim from "your goal is nothing",
+    // so it stays null rather than becoming 0.
+    expect(mustFind(stages, (s) => s.stage === 1)).toMatchObject({
+      goalPct: null,
+      goalSource: null,
+      fidelity: null,
+    });
+    expect(mustFind(stages, (s) => s.stage === 2)).toMatchObject({
+      goalPct: 10,
+      goalSource: "lines",
+    });
+  });
+
+  it("reads a 60% actual against a 50% section target as 20% over", () => {
+    // The worked example the fidelity model was settled on, and the sheet's
+    // own section A row. Kept as its own test because it is the sentence the
+    // screen has to be able to say.
+    const result = computeAllocation(
+      baseInput({
+        lines: [
+          { id: "bills", stage: 1, label: "Bills", basis: "pct_of_gross", value: 60, goalPct: null, accountId: "bills" },
+        ],
+        stageGoals: [{ stage: 1, goalPct: 50 }],
+      }),
+    );
+    const stage1 = mustAt(result.stages, 0);
+
+    expect(stage1.actualPct).toBe(60);
+    expect(stage1.goalPct).toBe(50);
+    expect(stage1.fidelity).toBeCloseTo(0.2, 10);
+  });
+
+  it("moves no money — a goal is a marker, never an instruction", () => {
+    // The whole reason goals are safe to carry: nothing in the engine ever
+    // writes an allocation to meet one. If this fails, a goal has leaked into
+    // the arithmetic.
+    const before = computeAllocation(baseInput());
+    const after = computeAllocation(
+      baseInput({ stageGoals: [{ stage: 1, goalPct: 50 }, { stage: 2, goalPct: 99 }] }),
+    );
+
+    expect(after.lines).toEqual(before.lines);
+    expect(after.transfers).toEqual(before.transfers);
+    expect(after.unallocatedPerMonthCents).toBe(before.unallocatedPerMonthCents);
+    expect(after.stages.map((s) => s.subtotalPerMonthCents)).toEqual(
+      before.stages.map((s) => s.subtotalPerMonthCents),
+    );
+  });
+
+  it("shows a section that has a goal but no lines yet", () => {
+    // Setting the target before entering the lines is a normal way to work.
+    // 0% against a goal is a real and readable state; dropping the section
+    // until it has a line would hide the target that was just typed.
+    const result = computeAllocation(
+      baseInput({
+        lines: [{ id: "fixed", stage: 1, label: "Fixed", basis: "from_fixed_costs", value: null, goalPct: null, accountId: "bills" }],
+        stageGoals: [{ stage: 2, goalPct: 20 }],
+      }),
+    );
+    const stage2 = mustFind(result.stages, (s) => s.stage === 2);
+
+    expect(stage2.subtotalPerMonthCents).toBe(0);
+    expect(stage2.actualPct).toBe(0);
+    expect(stage2.goalPct).toBe(20);
+    expect(stage2.fidelity).toBeCloseTo(-1, 10);
   });
 });
 

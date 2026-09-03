@@ -1,9 +1,24 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
-import { ChevronsLeft, ChevronsRight, LogOut, Search } from "lucide-react";
+import {
+  ChevronsLeft,
+  ChevronsRight,
+  ChevronsUpDown,
+  LogOut,
+  Search,
+  Settings as SettingsIcon,
+} from "lucide-react";
 import { cn } from "@/lib/utils.js";
 import { NAV_ITEMS } from "@/lib/nav.js";
-import { ThemeToggle } from "@/components/theme-toggle.jsx";
+import { ThemeMenuItems } from "@/components/theme-toggle.jsx";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu.jsx";
 import { toggleCommandPalette } from "@/lib/commands.js";
 import { api } from "@/lib/api.js";
 import { useAuth } from "@/lib/auth.jsx";
@@ -47,11 +62,25 @@ function labelClass(collapsed) {
   return collapsed ? "max-w-0 opacity-0" : "max-w-48 opacity-100";
 }
 
+// The bottom cluster's three rows (Settings, collapse, account) borrow the
+// nav pill's shape so the whole column reads as one list rather than as a
+// nav plus a footer of loose controls.
+/** @param {boolean} collapsed */
+function rowClass(collapsed) {
+  return cn(
+    "flex items-center rounded-full px-3 py-2 text-sm font-medium text-text-muted transition-colors",
+    "hover:bg-surface-muted hover:text-text",
+    "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent)",
+    collapsed ? "justify-center gap-0" : "gap-3",
+  );
+}
+
 /**
  * Desktop-only (`md:` and up) fixed left sidebar: brand, search/command
- * trigger, nav with the active item as a soft tinted pill, then a user block
- * and the theme control pinned to the bottom. Collapsible to icon-only,
- * with the labels fading as the width transitions.
+ * trigger, nav with the active item as a soft tinted pill, then a bottom
+ * cluster of Settings (a menu carrying the theme preference), the collapse
+ * toggle, and the account — which is a menu too, and holds Sign out.
+ * Collapsible to icon-only, with the labels fading as the width transitions.
  */
 export function Sidebar() {
   const [collapsed, setCollapsed] = useState(readCollapsed);
@@ -73,7 +102,10 @@ export function Sidebar() {
   return (
     <aside
       className={cn(
-        "sticky top-0 hidden h-screen shrink-0 flex-col border-r border-border bg-surface transition-[width] duration-150 md:flex",
+        // `h-full` inside a frame that is already exactly one viewport tall,
+        // not `sticky h-screen`: the shell no longer scrolls, so there is
+        // nothing to stick to and nothing to scroll away from.
+        "hidden h-full shrink-0 flex-col overflow-y-auto border-r border-border bg-surface transition-[width] duration-150 md:flex",
         collapsed ? "w-[4.5rem]" : "w-64",
       )}
     >
@@ -129,51 +161,99 @@ export function Sidebar() {
         })}
       </nav>
 
-      <div className="flex flex-col gap-3 border-t border-border p-3">
-        <div className={cn("flex items-center", collapsed ? "justify-center gap-0" : "gap-2")}>
-          <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent-brand-soft text-xs font-medium text-accent-brand">
-            {user ? initials(user.displayName) : "?"}
-          </div>
-          <div className={cn(LABEL, labelClass(collapsed), "min-w-0 flex-1")}>
-            <p className="truncate text-sm font-medium text-text">
-              {user?.displayName ?? "Not signed in"}
-            </p>
-            <p className="truncate text-xs text-text-subtle">
-              {user?.email ?? ""}
-            </p>
-          </div>
-          {!collapsed && user && (
+      {/* Settings, then collapse, then the account — controls first and
+          identity last, with the account pinned to the very bottom. */}
+      <div className="flex flex-col gap-0.5 border-t border-border p-3">
+        {/* Settings is a menu, not a destination. The only thing in it is a
+            preference, and a route that exists to hold one radio group is a
+            route the operator has to leave the screen they were reading to
+            reach. Everything that IS a destination — users, devices,
+            sessions, invites, people — is the Admin item in the nav above. */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
             <button
               type="button"
-              onClick={signOut}
-              title="Sign out"
-              aria-label="Sign out"
-              className="flex size-8 shrink-0 items-center justify-center rounded-full text-text-muted transition-colors hover:bg-surface-muted hover:text-text"
+              title={collapsed ? "Settings" : undefined}
+              className={rowClass(collapsed)}
             >
-              <LogOut className="size-4" aria-hidden="true" />
+              <SettingsIcon className="size-4 shrink-0" aria-hidden="true" />
+              <span className={cn(LABEL, labelClass(collapsed))}>Settings</span>
             </button>
-          )}
-        </div>
-        <div
-          className={cn(
-            "flex items-center",
-            collapsed ? "justify-center" : "justify-between",
-          )}
+          </DropdownMenuTrigger>
+          {/* Flies out to the right rather than up: at the bottom of a
+              full-height column there is nothing above the trigger to open
+              into. Explicit width because the shared content class sizes
+              itself from the trigger, which is 4.5rem wide when collapsed. */}
+          <DropdownMenuContent side="right" align="end" className="w-48">
+            <DropdownMenuLabel>Theme</DropdownMenuLabel>
+            <ThemeMenuItems />
+          </DropdownMenuContent>
+        </DropdownMenu>
+
+        <button
+          type="button"
+          onClick={() => setCollapsed((value) => !value)}
+          title={collapsed ? "Expand sidebar" : undefined}
+          className={rowClass(collapsed)}
         >
-          {!collapsed && <ThemeToggle />}
-          <button
-            type="button"
-            onClick={() => setCollapsed((value) => !value)}
-            className="flex size-8 shrink-0 items-center justify-center rounded-full text-text-muted transition-colors hover:bg-surface-muted hover:text-text"
-            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          >
-            {collapsed ? (
-              <ChevronsRight className="size-4" aria-hidden="true" />
-            ) : (
-              <ChevronsLeft className="size-4" aria-hidden="true" />
-            )}
-          </button>
-        </div>
+          {collapsed ? (
+            <ChevronsRight className="size-4 shrink-0" aria-hidden="true" />
+          ) : (
+            <ChevronsLeft className="size-4 shrink-0" aria-hidden="true" />
+          )}
+          {/* Kept mounted at zero width like every other label, so the
+              collapsed button still has an accessible name. */}
+          <span className={cn(LABEL, labelClass(collapsed))}>
+            {collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          </span>
+        </button>
+
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              title={collapsed ? (user?.displayName ?? "Account") : undefined}
+              className={cn(
+                "mt-1 flex items-center rounded-full py-1.5 transition-colors hover:bg-surface-muted",
+                "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent)",
+                // No horizontal padding when collapsed: the avatar is 2rem
+                // and the column's inner width is 3rem, so padding either
+                // side would not fit.
+                collapsed ? "justify-center gap-0 px-0" : "gap-2 px-2",
+              )}
+            >
+              <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent-brand-soft text-xs font-medium text-accent-brand">
+                {user ? initials(user.displayName) : "?"}
+              </div>
+              <div className={cn(LABEL, labelClass(collapsed), "min-w-0 flex-1 text-left")}>
+                <p className="truncate text-sm font-medium text-text">
+                  {user?.displayName ?? "Not signed in"}
+                </p>
+                <p className="truncate text-xs text-text-subtle">
+                  {user?.email ?? ""}
+                </p>
+              </div>
+              {!collapsed && (
+                <ChevronsUpDown className="size-4 shrink-0 text-text-subtle" aria-hidden="true" />
+              )}
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent side="right" align="end" className="w-56">
+            {/* Guarded on the email itself, not on `user`: an account with
+                no email address rendered an empty label and a separator
+                above nothing. */}
+            {user?.email ? (
+              <>
+                <DropdownMenuLabel className="truncate">{user.email}</DropdownMenuLabel>
+                <DropdownMenuSeparator />
+              </>
+            ) : null}
+            <DropdownMenuItem disabled={!user} onSelect={() => void signOut()}>
+              <LogOut aria-hidden="true" />
+              Sign out
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
     </aside>
   );

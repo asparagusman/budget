@@ -85,6 +85,19 @@ export const allocationLines = pgTable("allocation_lines", {
   // 1..N, evaluated in ascending order by the engine. Every line in a stage
   // resolves against the same snapshot of remaining taken at stage entry.
   stage: integer("stage").notNull(),
+  // SUPERSEDED by the three fixed sections (`ALLOCATION_SECTIONS` in
+  // apps/web/src/lib/constants.js), which name stages 1/2/3 as Bills &
+  // Essentials / Save, Invest & Give / Leftover. A per-line heading turned out
+  // to be the wrong altitude: the spreadsheet's "Category" column IS the
+  // section, and repeating it on every row put the sheet's own structure into
+  // a side panel while the rows themselves read as an unlabelled list
+  // (.claude/plans/allocation-fix.md).
+  //
+  // Kept, not dropped: the imported plans in the dev database hold real
+  // category names here, and dropping the column to save nothing is a one-way
+  // door. Nothing reads or writes it — the API no longer accepts it and the
+  // engine no longer groups by it.
+  category: text("category"),
   label: text("label").notNull(),
   basis: allocationBasis("basis").notNull(),
   // What `value` means depends on `basis` — a percentage for the two `pct_*`
@@ -103,3 +116,37 @@ export const allocationLines = pgTable("allocation_lines", {
     .references(() => accounts.id),
   sortOrder: integer("sort_order").notNull().default(0),
 });
+
+// A goal on a whole SECTION, which the per-line `goalPct` cannot express.
+// The spreadsheet carries Goal % in two places the app previously had no room
+// for: on section A's Subtotal row (50% — "bills and essentials should be half
+// our income") and on section B's Remaining row (10% — "a tenth should still
+// be left afterwards"). Neither is the sum of any line's goal; A's lines are
+// injected totals with no goal at all, and B's lines sum to 40% against a
+// section actual of 31%.
+//
+// Keyed on `stage`, exactly like `allocation_lines`, because stage is what the
+// engine evaluates and the section names are a 1:1 label on stages 1/2/3. And
+// section B's "remaining" goal needs no separate concept: section C's lines
+// sweep everything B leaves, so C's own subtotal IS that remaining, and a
+// section goal on C is the sheet's 10%.
+//
+// Versioned alongside the lines and copied into a new draft with them — a
+// draft that silently lost its section goals would be the same class of bug as
+// one that lost its lines. Immutable on a non-draft version for the same
+// reason `allocation_lines` is.
+export const allocationStageGoals = pgTable(
+  "allocation_stage_goals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    versionId: uuid("version_id")
+      .notNull()
+      .references(() => allocationVersions.id, { onDelete: "cascade" }),
+    stage: integer("stage").notNull(),
+    // `notNull` where the line's own `goalPct` is nullable: a line exists
+    // whether or not it carries a goal, but a row here IS the goal — "no goal
+    // on this section" is the absence of the row, not a row holding null.
+    goalPct: numeric("goal_pct", { precision: 6, scale: 2, mode: "number" }).notNull(),
+  },
+  (table) => [uniqueIndex("allocation_stage_goals_version_stage_unique").on(table.versionId, table.stage)],
+);

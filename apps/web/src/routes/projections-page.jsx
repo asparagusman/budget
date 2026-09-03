@@ -8,9 +8,24 @@ import { Input } from "@/components/ui/input.jsx";
 import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/components/ui/input-group.jsx";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select.jsx";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip.jsx";
-import { Chart } from "@/components/chart.jsx";
+import { Area, AreaChart, CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
+import {
+  AXIS,
+  Chart,
+  ChartLegend,
+  ChartLegendContent,
+  ChartTooltip,
+  MoneyTooltip,
+  SERIES,
+  TIME_AXIS,
+  isoToMs,
+  useChartMotion,
+  useMoneyTick,
+  useTimeAxis,
+} from "@/components/chart.jsx";
 import { DataList, DataListRow } from "@/components/data-list.jsx";
 import { EmptyState } from "@/components/empty-state.jsx";
+import { PanelSkeleton } from "@/components/loading.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
 import { Money } from "@/components/money.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
@@ -268,6 +283,8 @@ function ProjectionCards({ projections, horizon, onHorizonChange, savingId, onSa
  */
 function NetWorthPanel({ netWorth, loading, onUpdateBalance }) {
   const { currency, locale } = useSettings();
+  const moneyTick = useMoneyTick();
+  const motion = useChartMotion();
 
   // Before the first recorded balance every total is a zero that means
   // "unknown"; drawing it would put a cliff in the chart that never happened.
@@ -279,51 +296,19 @@ function NetWorthPanel({ netWorth, loading, onUpdateBalance }) {
     .flatMap((a) => (a.points[a.points.length - 1]?.asAt ? [/** @type {string} */ (a.points[a.points.length - 1]?.asAt)] : []))
     .sort()[0];
 
-  const option = useMemo(
+  // A real time axis rather than one tick per recorded date: these dates are
+  // whenever somebody happened to record a balance, so counting them evenly
+  // draws a month-long gap the same width as a day-long one.
+  const rows = useMemo(
     () =>
-      /** @param {import("@/components/chart.jsx").ChartTokens} tokens */
-      (tokens) => ({
-        grid: { top: 16, left: 8, right: 12, bottom: 8, containLabel: true },
-        xAxis: {
-          type: "category",
-          data: points.map((p) => p.date),
-          axisLabel: {
-            color: tokens.axisLabel,
-            /** @param {string} value */
-            formatter: (value) => formatIsoDate(value, locale),
-          },
-        },
-        yAxis: { type: "value" },
-        tooltip: {
-          trigger: "axis",
-          /** @param {{ axisValue: string, value: number }[]} params */
-          formatter: (params) => {
-            const first = params[0];
-            if (!first) return "";
-            return `${formatIsoDate(first.axisValue, locale)}<br/>${formatMoney(Math.round(first.value * 100), {
-              currency,
-              locale,
-            })}`;
-          },
-        },
-        series: [
-          {
-            type: "line",
-            name: "Net worth",
-            data: points.map((p) => p.totalCents / 100),
-            // A step, never a slope: between two snapshots the balance is the
-            // older one carried forward, and a diagonal would draw a hundred
-            // days of movement nobody recorded.
-            step: "end",
-            showSymbol: points.length < 40,
-            lineStyle: { width: 2, color: tokens.series[0] },
-            itemStyle: { color: tokens.series[0] },
-            areaStyle: { color: tokens.accentSoft, opacity: 0.5 },
-          },
-        ],
-      }),
-    [points, currency, locale],
+      points.map((point) => ({
+        t: isoToMs(point.date),
+        label: formatIsoDate(point.date, locale),
+        netWorth: point.totalCents / 100,
+      })),
+    [points, locale],
   );
+  const timeAxis = useTimeAxis(rows[0]?.t ?? 0, rows[rows.length - 1]?.t ?? 0);
 
   return (
     <section className="flex flex-col gap-4">
@@ -368,7 +353,6 @@ function NetWorthPanel({ netWorth, loading, onUpdateBalance }) {
 
       <div className="rounded-(--radius-card) bg-surface p-5 shadow-(--shadow-card)">
         <Chart
-          option={option}
           loading={loading}
           empty={points.length < 2}
           height={220}
@@ -383,7 +367,28 @@ function NetWorthPanel({ netWorth, loading, onUpdateBalance }) {
           }}
           emptyTitle="Not enough history yet"
           emptyDescription="Record a balance on two different dates to see net worth move."
-        />
+          config={{ netWorth: { label: "Net worth", color: SERIES[0] } }}
+        >
+          <AreaChart data={rows} margin={{ top: 16, right: 12, bottom: 0, left: 0 }}>
+            <CartesianGrid vertical={false} />
+            <XAxis dataKey="t" {...AXIS} {...TIME_AXIS} {...timeAxis} minTickGap={32} />
+            <YAxis {...AXIS} width={56} tickFormatter={moneyTick} />
+            <ChartTooltip content={<MoneyTooltip />} />
+            {/* A step, never a slope: between two snapshots the balance is
+                the older one carried forward, and a diagonal would draw a
+                hundred days of movement nobody recorded. */}
+            <Area
+              dataKey="netWorth"
+              type="stepAfter"
+              stroke="var(--color-netWorth)"
+              fill="var(--color-netWorth)"
+              fillOpacity={0.15}
+              strokeWidth={2}
+              dot={points.length < 40}
+              {...motion}
+            />
+          </AreaChart>
+        </Chart>
       </div>
     </section>
   );
@@ -398,6 +403,8 @@ function NetWorthPanel({ netWorth, loading, onUpdateBalance }) {
 export function ProjectionsPage() {
   const queryClient = useQueryClient();
   const { currency, locale } = useSettings();
+  const moneyTick = useMoneyTick();
+  const motion = useChartMotion();
   const today = useMemo(todayIso, []);
   const [months, setMonths] = useState(/** @type {(typeof HORIZON_OPTIONS)[number]} */ ("60"));
   const [mobileHorizon, setMobileHorizon] = useState(12);
@@ -483,57 +490,36 @@ export function ProjectionsPage() {
   const netWorth = netWorthQuery.data ?? null;
   const accounts = accountsQuery.data ?? [];
 
-  const chartOption = useMemo(
-    () =>
-      /** @param {import("@/components/chart.jsx").ChartTokens} tokens */
-      (tokens) => ({
-        legend: { top: 0, type: "scroll", textStyle: { color: tokens.axisLabel }, pageIconColor: tokens.axisLabel },
-        grid: { top: 48, left: 8, right: 12, bottom: 8, containLabel: true },
-        xAxis: {
-          type: "category",
-          data: (projections?.totalSeries ?? []).map((p) => p.month),
-          axisLabel: {
-            color: tokens.axisLabel,
-            /** @param {string} value */
-            formatter: (value) => (value === "0" ? "now" : `${value}mo`),
-          },
-        },
-        yAxis: { type: "value" },
-        tooltip: {
-          trigger: "axis",
-          /** @param {{ seriesName: string, value: number, axisValue: string }[]} params */
-          formatter: (params) => {
-            const head = params[0];
-            const when = head?.axisValue === "0" ? "Now" : `In ${head?.axisValue} months`;
-            return [
-              when,
-              ...params.map((p) => `${p.seriesName}: ${formatMoney(Math.round(p.value * 100), { currency, locale })}`),
-            ].join("<br/>");
-          },
-        },
-        series: [
-          ...(projections?.accounts ?? []).map((account, i) => ({
-            type: "line",
-            name: account.name,
-            data: account.series.map((p) => p.projectedCents / 100),
-            smooth: true,
-            showSymbol: false,
-            lineStyle: { width: 2, color: tokens.series[i % tokens.series.length] },
-            itemStyle: { color: tokens.series[i % tokens.series.length] },
-          })),
-          {
-            type: "line",
-            name: "Household total",
-            data: (projections?.totalSeries ?? []).map((p) => p.projectedCents / 100),
-            smooth: true,
-            showSymbol: false,
-            lineStyle: { width: 3, type: "dashed", color: tokens.text },
-            itemStyle: { color: tokens.text },
-          },
-        ],
-      }),
-    [projections, currency, locale],
-  );
+  // Every series draws from one row array, so each account becomes a COLUMN
+  // on the row for its month. Keyed `account0`, `account1`, … rather than by
+  // name: an account may be called "Total", or share a name with another,
+  // and a data key has to be unique. The display name lives in the config.
+  const { chartConfig, chartRows } = useMemo(() => {
+    const accountSeries = projections?.accounts ?? [];
+    const totals = projections?.totalSeries ?? [];
+
+    /** @type {import("@/components/ui/chart.jsx").ChartConfig} */
+    const config = { total: { label: "Household total", color: "var(--text)" } };
+    accountSeries.forEach((account, i) => {
+      config[`account${i}`] = { label: account.name, color: SERIES[i % SERIES.length] };
+    });
+
+    const rows = totals.map((point, index) => {
+      /** @type {Record<string, number | string>} */
+      const row = {
+        label: point.month === 0 ? "now" : `In ${point.month} months`,
+        month: point.month === 0 ? "now" : `${point.month}mo`,
+        total: point.projectedCents / 100,
+      };
+      accountSeries.forEach((account, i) => {
+        const at = account.series[index];
+        if (at) row[`account${i}`] = at.projectedCents / 100;
+      });
+      return row;
+    });
+
+    return { chartConfig: config, chartRows: rows };
+  }, [projections]);
 
   return (
     <>
@@ -599,7 +585,9 @@ export function ProjectionsPage() {
           </p>
         </div>
 
-        {projectionsQuery.isLoading ? null : !projections || projections.accounts.length === 0 ? (
+        {projectionsQuery.isLoading ? (
+          <PanelSkeleton height={320} label="Loading projections" />
+        ) : !projections || projections.accounts.length === 0 ? (
           <EmptyState
             icon={TrendingUpIcon}
             title="Nothing to project yet"
@@ -630,7 +618,6 @@ export function ProjectionsPage() {
                 the combined total. */}
             <div className="rounded-(--radius-card) bg-surface p-5 shadow-(--shadow-card)">
               <Chart
-                option={chartOption}
                 height={320}
                 ariaLabel={`Projected balance per account and in total, over ${projections?.totalSeries.length ?? 0} monthly steps.`}
                 dataTable={{
@@ -641,7 +628,40 @@ export function ProjectionsPage() {
                     formatMoney(point.projectedCents, { currency, locale }),
                   ]),
                 }}
-              />
+                config={chartConfig}
+              >
+                <LineChart data={chartRows} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
+                  <CartesianGrid vertical={false} />
+                  <XAxis dataKey="month" {...AXIS} minTickGap={24} />
+                  <YAxis {...AXIS} width={56} tickFormatter={moneyTick} />
+                  <ChartTooltip content={<MoneyTooltip />} />
+                  <ChartLegend content={<ChartLegendContent />} />
+                  {(projections?.accounts ?? []).map((account, i) => (
+                    <Line
+                      key={account.id}
+                      dataKey={`account${i}`}
+                      type="monotone"
+                      stroke={`var(--color-account${i})`}
+                      strokeWidth={2}
+                      dot={false}
+                      {...motion}
+                    />
+                  ))}
+                  {/* The household total is the sum of the lines above it, so
+                      it is drawn in the text colour and dashed rather than
+                      taking a sixth series colour that would read as a
+                      seventh account. */}
+                  <Line
+                    dataKey="total"
+                    type="monotone"
+                    stroke="var(--color-total)"
+                    strokeWidth={3}
+                    strokeDasharray="6 4"
+                    dot={false}
+                    {...motion}
+                  />
+                </LineChart>
+              </Chart>
             </div>
 
             <p className="text-xs text-text-subtle">

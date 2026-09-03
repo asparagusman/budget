@@ -14,8 +14,8 @@ import {
   createDraftVersion,
   findNewestVersion,
   findVersionByStatus,
-  linesForVersion,
   serializeVersion,
+  serializeVersionById,
   versionsForPlan,
 } from "../lib/allocation.js";
 import { getUserId } from "../lib/app-env.js";
@@ -205,7 +205,7 @@ export function createAllocationPlansRoutes({ db }) {
       const withLines = [];
       for (const version of versions) {
         withLines.push(
-          serializeVersion(version, await linesForVersion(db, version.id), {
+          await serializeVersionById(db, version, {
             createdByName: version.createdBy ? nameById.get(version.createdBy) ?? null : null,
           }),
         );
@@ -226,7 +226,7 @@ export function createAllocationPlansRoutes({ db }) {
 
       const existing = await findVersionByStatus(db, id, "draft");
       if (existing) {
-        return c.json({ draft: serializeVersion(existing, await linesForVersion(db, existing.id)), created: false });
+        return c.json({ draft: await serializeVersionById(db, existing), created: false });
       }
 
       // Copy from the active version, or — for a plan whose active version
@@ -243,7 +243,7 @@ export function createAllocationPlansRoutes({ db }) {
         metadata: { planId: id, basedOnVersionId: source?.id ?? null },
       });
 
-      return c.json({ draft: serializeVersion(draft, await linesForVersion(db, draft.id)), created: true }, 201);
+      return c.json({ draft: await serializeVersionById(db, draft), created: true }, 201);
     })
 
     // Discard. A hard delete, unlike almost everything else here: a draft
@@ -291,6 +291,6 @@ export function createAllocationPlansRoutes({ db }) {
         metadata: { planId: id, version: applied.version, archivedVersionId: active?.id ?? null },
       });
 
-      return c.json({ version: serializeVersion(applied, await linesForVersion(db, applied.id)) });
+      return c.json({ version: await serializeVersionById(db, applied) });
     });
 }

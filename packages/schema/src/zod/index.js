@@ -4,6 +4,7 @@ export * from "./auth.js";
 export * from "./users.js";
 export * from "./invites.js";
 export * from "./credentials.js";
+export * from "./reorder.js";
 export * from "./people.js";
 export * from "./accounts.js";
 export * from "./balance-snapshots.js";

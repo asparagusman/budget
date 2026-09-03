@@ -1,4 +1,5 @@
-import { importCommitSchema } from "@budget/schema";
+import { importCommitFormSchema, importCommitSchema, importPreviewFormSchema } from "@budget/schema";
+import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { getUserId } from "../lib/app-env.js";
 import { writeAuditLog } from "../lib/audit.js";
@@ -6,6 +7,7 @@ import { loadAllocationContext } from "../lib/allocation.js";
 import { todayIso } from "../lib/dates.js";
 import { applyImport, ImportSelectionError, importNextSteps, reconcileImport } from "../lib/import/apply.js";
 import { parseImport } from "../lib/import/parse.js";
+import { handleValidation } from "../lib/validation.js";
 
 // The one-time migration path off the spreadsheet.
 //
@@ -16,42 +18,35 @@ import { parseImport } from "../lib/import/parse.js";
 // spreadsheet says", and that claim is worthless if the numbers took a round
 // trip through a form the client could have altered. It also means the server
 // holds no import session — nothing to expire, nothing to leak.
+//
+// Both take their multipart body through a zValidator, like every other route
+// here. That is not decoration: `hc` types a call from its route's validator,
+// so a route without one cannot be reached through the typed client at all,
+// and apps/web had to hand-write both the request and the response shape for
+// these two (todo.md `[P11-14]`). The size and emptiness checks that used to
+// live in `readUpload` are the schema's now.
 
-// The source workbook is ~40kB. Ten megabytes is far more headroom than any
-// household spreadsheet needs and still small enough to parse in memory
-// without thinking about it.
-const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
-
-const NO_FILE = {
-  error: { code: "invalid_request", message: "Attach a .xlsx file to import." },
+const UNREADABLE = {
+  error: {
+    code: "unreadable_workbook",
+    message: "That file could not be read as an .xlsx workbook.",
+  },
 };
 
 /**
- * Pulls the uploaded workbook out of a multipart body.
+ * The uploaded workbook as bytes.
  *
- * @param {import("hono").Context} c
- * @returns {Promise<{ buffer: Buffer, fileName: string } | { error: { code: string, message: string } }>}
+ * `Buffer.alloc` + `set` rather than `Buffer.from(arrayBuffer)`: the copy is
+ * trivial at this size and the result is a Buffer over a plain ArrayBuffer,
+ * which is what exceljs's reader wants without any casting.
+ *
+ * @param {File} file
  */
-async function readUpload(c) {
-  const body = await c.req.parseBody();
-  const file = body.file;
-  if (!(file instanceof File)) return NO_FILE;
-  if (file.size === 0) return NO_FILE;
-  if (file.size > MAX_UPLOAD_BYTES) {
-    return {
-      error: {
-        code: "file_too_large",
-        message: `That file is ${(file.size / 1024 / 1024).toFixed(1)}MB. The limit is ${MAX_UPLOAD_BYTES / 1024 / 1024}MB.`,
-      },
-    };
-  }
+async function toBuffer(file) {
   const bytes = new Uint8Array(await file.arrayBuffer());
-  // Buffer.alloc + set rather than Buffer.from(arrayBuffer): the copy is
-  // trivial at this size and the result is a Buffer over a plain ArrayBuffer,
-  // which is what exceljs's reader wants without any casting.
   const buffer = Buffer.alloc(bytes.byteLength);
   buffer.set(bytes);
-  return { buffer, fileName: file.name || "workbook.xlsx" };
+  return buffer;
 }
 
 /**
@@ -76,19 +71,19 @@ function resolveLandingAccountId(flagged, plan, accountIdByDestination) {
 export function createImportRoutes({ db }) {
   const app = new Hono();
 
+  /** @param {import("@budget/schema").Db} database */
+  const activeAccounts = (database) =>
+    database.query.accounts.findMany({ where: (a, { isNull }) => isNull(a.archivedAt) });
+
   return app
     // Parse and describe. Writes nothing.
-    .post("/preview", async (c) => {
-      const upload = await readUpload(c);
-      if ("error" in upload) return c.json(upload, 400);
-
-      const accounts = await db.query.accounts.findMany({
-        where: (a, { isNull }) => isNull(a.archivedAt),
-      });
+    .post("/preview", zValidator("form", importPreviewFormSchema, handleValidation), async (c) => {
+      const { file } = c.req.valid("form");
+      const accounts = await activeAccounts(db);
 
       try {
-        const preview = await parseImport(upload.buffer, {
-          fileName: upload.fileName,
+        const preview = await parseImport(await toBuffer(file), {
+          fileName: file.name || "workbook.xlsx",
           accounts: accounts.map((a) => ({ id: a.id, name: a.name })),
         });
         return c.json({
@@ -101,41 +96,26 @@ export function createImportRoutes({ db }) {
         });
       } catch (err) {
         console.error("Import preview failed:", err);
-        return c.json(
-          {
-            error: {
-              code: "unreadable_workbook",
-              message: "That file could not be read as an .xlsx workbook.",
-            },
-          },
-          400,
-        );
+        return c.json(UNREADABLE, 400);
       }
     })
 
     // Re-parse, apply the operator's selection, and report what landed beside
     // what the spreadsheet said.
-    .post("/commit", async (c) => {
-      const upload = await readUpload(c);
-      if ("error" in upload) return c.json(upload, 400);
-
-      const body = await c.req.parseBody();
-      const raw = body.selection;
-      if (typeof raw !== "string") {
-        return c.json(
-          { error: { code: "invalid_request", message: "Missing the import selection." } },
-          400,
-        );
-      }
+    .post("/commit", zValidator("form", importCommitFormSchema, handleValidation), async (c) => {
+      const form = c.req.valid("form");
 
       /** @type {unknown} */
       let json;
       try {
-        json = JSON.parse(raw);
+        json = JSON.parse(form.selection);
       } catch {
         return c.json({ error: { code: "invalid_request", message: "Import selection is not valid JSON." } }, 400);
       }
 
+      // Validated here rather than in the form schema: a multipart part is a
+      // string, so the JSON inside it is a second, nested body with its own
+      // failure modes and its own message.
       const parsedSelection = importCommitSchema.safeParse(json);
       if (!parsedSelection.success) {
         return c.json(
@@ -151,23 +131,18 @@ export function createImportRoutes({ db }) {
       }
       const selection = parsedSelection.data;
 
-      const accounts = await db.query.accounts.findMany({
-        where: (a, { isNull }) => isNull(a.archivedAt),
-      });
+      const accounts = await activeAccounts(db);
 
       /** @type {import("../lib/import/parse.js").ImportPlan} */
       let plan;
       try {
-        plan = await parseImport(upload.buffer, {
-          fileName: upload.fileName,
+        plan = await parseImport(await toBuffer(form.file), {
+          fileName: form.file.name || "workbook.xlsx",
           accounts: accounts.map((a) => ({ id: a.id, name: a.name })),
         });
       } catch (err) {
         console.error("Import commit parse failed:", err);
-        return c.json(
-          { error: { code: "unreadable_workbook", message: "That file could not be read as an .xlsx workbook." } },
-          400,
-        );
+        return c.json(UNREADABLE, 400);
       }
 
       let applied;

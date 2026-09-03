@@ -1,0 +1,2 @@
+CREATE TYPE "public"."invite_purpose" AS ENUM('new_user', 'new_device');--> statement-breakpoint
+ALTER TABLE "invites" ALTER COLUMN "purpose" SET DATA TYPE "public"."invite_purpose" USING "purpose"::"public"."invite_purpose";

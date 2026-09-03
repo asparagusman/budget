@@ -23,6 +23,9 @@ export function ShortcutsDialog({ open, onOpenChange }) {
         </DialogHeader>
         <dl className="flex flex-col gap-2 text-sm">
           <Shortcut keys={["Ctrl/⌘", "K"]} label="Open command palette" />
+          <Shortcut keys={["↑", "↓"]} label="Move through the palette's results" />
+          <Shortcut keys={["Home", "End"]} label="Jump to the first or last result" />
+          <Shortcut keys={["↵"]} label="Run the selected result" />
           <Shortcut keys={["?"]} label="Open this cheatsheet" />
           <Shortcut keys={["Esc"]} label="Close a dialog or sheet" />
           <div className="my-1 h-px bg-border" />

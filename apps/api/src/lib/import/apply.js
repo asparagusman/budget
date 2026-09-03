@@ -550,6 +550,10 @@ export function reconcileImport({ plan, selection, accountIdByDestination, incom
     const engineLines = lines.map((line) => ({
       id: line.key,
       stage: line.stage,
+      // The workbook's own Subtotal/Remaining rows are what the stages come
+      // from, and stages 1/2/3 are the three named sections — so an import
+      // lands in Bills & Essentials, Save Invest & Give and Leftover with no
+      // heading to invent (`ALLOCATION_SECTIONS` in packages/engine).
       label: line.label,
       basis: /** @type {AllocationLine["basis"]} */ (line.basis),
       value: line.basis === "from_fixed_costs" || line.basis === "from_variable_essentials" ? null : line.value,

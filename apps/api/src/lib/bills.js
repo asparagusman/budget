@@ -1,6 +1,10 @@
-import { billsContribution, projectInstances } from "@budget/engine";
+import { billWindowFigures, billsContribution, projectInstances, sumWindowFigures } from "@budget/engine";
 
 /** @import { Bill, BillInstance, Cadence, Cents, DateWindow, PaySchedule } from "@budget/engine" */
+
+/** @typedef {(typeof import("@budget/schema").billSeasonalFactors)["$inferSelect"]} SeasonalFactorRow */
+/** @typedef {(typeof import("@budget/schema").billStepChanges)["$inferSelect"]} StepChangeRow */
+/** @typedef {(typeof import("@budget/schema").billInstances)["$inferSelect"]} BillInstanceRow */
 
 /**
  * @typedef {{
@@ -137,7 +141,14 @@ function groupBy(rows, keyFn) {
  */
 export async function loadBillModifiers(db, billIds, { withHistory = true } = {}) {
   if (billIds.length === 0) {
-    return { factorsByBill: new Map(), stepChangesByBill: new Map(), historyByBill: new Map() };
+    // Spelled out rather than left as bare `new Map()`s: an untyped empty map
+    // unions with the populated return below into `Map<any, any>`, and every
+    // caller that iterates the result then silently loses its row types.
+    return {
+      factorsByBill: /** @type {Map<string, SeasonalFactorRow[]>} */ (new Map()),
+      stepChangesByBill: /** @type {Map<string, StepChangeRow[]>} */ (new Map()),
+      historyByBill: /** @type {Map<string, BillInstanceRow[]>} */ (new Map()),
+    };
   }
   const [factorRows, stepChangeRows, historyRows] = await Promise.all([
     db.query.billSeasonalFactors.findMany({ where: (f, { inArray }) => inArray(f.billId, billIds) }),
@@ -251,8 +262,11 @@ export async function projectActiveBills(db, window) {
 
   /** @type {{ code: string, message: string, billId?: string }[]} */
   const warnings = [];
+  // Keyed by bill, not by category: a category subtotal is now the sum of the
+  // per-bill figures printed beneath it, so grouping straight to categories
+  // here would throw away the level the screen actually reads.
   /** @type {Map<string, BillInstance[]>} */
-  const instancesByCategory = new Map();
+  const instancesByBill = new Map();
   /** @type {BillInstance[]} */
   const allInstances = [];
 
@@ -264,9 +278,7 @@ export async function projectActiveBills(db, window) {
     const { instances, orphans } = projectBillInWindow(engineBill, historyRows, window);
 
     allInstances.push(...instances);
-    const categoryList = instancesByCategory.get(bill.categoryId) ?? [];
-    categoryList.push(...instances);
-    instancesByCategory.set(bill.categoryId, categoryList);
+    instancesByBill.set(bill.id, instances);
 
     if (orphans.length > 0) {
       warnings.push({
@@ -284,7 +296,74 @@ export async function projectActiveBills(db, window) {
     }
   }
 
-  return { bills, instancesByCategory, allInstances, warnings };
+  return { bills, instancesByBill, allInstances, warnings };
+}
+
+/**
+ * @typedef {{
+ *   billId: string,
+ *   categoryId: string,
+ *   perPayCents: Cents | null,
+ *   perMonthCents: Cents,
+ *   perYearCents: Cents,
+ *   windowTotalCents: Cents,
+ *   instanceCount: number,
+ *   nextDueDate: string | null,
+ *   nextAmountCents: Cents | null,
+ *   averageAmountCents: Cents | null,
+ *   minAmountCents: Cents | null,
+ *   maxAmountCents: Cents | null,
+ *   variesInWindow: boolean,
+ * }} BillFigures
+ */
+
+/**
+ * What one bill actually costs across `window`, resolved through its amount
+ * model and its entered history — the row-level counterpart to
+ * `/fixed-costs/summary`'s category subtotals.
+ *
+ * The arithmetic is the engine's `billWindowFigures`, which the fixed-costs
+ * screen also calls for its own live preview while a bill is being edited;
+ * this wrapper only attaches the two identifiers the screen groups by and
+ * applies the repo's "no primary pay schedule -> per-pay is null" convention
+ * (same as `computeContribution` above).
+ *
+ * @param {{ id: string, categoryId: string }} bill
+ * @param {BillInstance[]} instances
+ * @param {DateWindow} window
+ * @param {PaySchedule | null} paySchedule
+ * @returns {BillFigures}
+ */
+export function billFigures(bill, instances, window, paySchedule) {
+  const figures = billWindowFigures(
+    instances,
+    window,
+    paySchedule ?? { anchorDate: window.from, cadence: "monthly" },
+  );
+  return {
+    ...figures,
+    billId: bill.id,
+    categoryId: bill.categoryId,
+    perPayCents: paySchedule ? figures.perPayCents : null,
+  };
+}
+
+/**
+ * Adds up a set of `billFigures` into the subtotal shown above them — the
+ * engine's `sumWindowFigures` (which documents why a subtotal is a sum of its
+ * rows rather than a second pooled computation), with the same per-pay null
+ * convention applied.
+ *
+ * The headline `contribution` is left as a single `computeContribution` call
+ * over every instance — it is the figure the allocation deducts and the
+ * dashboard repeats, and those must not drift by rounding either.
+ *
+ * @param {BillFigures[]} rows
+ * @param {PaySchedule | null} paySchedule
+ */
+export function sumBillFigures(rows, paySchedule) {
+  const totals = sumWindowFigures(rows.map((r) => ({ ...r, perPayCents: r.perPayCents ?? 0 })));
+  return { ...totals, perPayCents: paySchedule ? totals.perPayCents : null };
 }
 
 /**
@@ -294,4 +373,75 @@ export async function projectActiveBills(db, window) {
 export async function getBillsBufferCents(db) {
   const row = await db.query.settings.findFirst({ where: (s, { eq: eqCol }) => eqCol(s.key, "billsBufferCents") });
   return typeof row?.value === "number" ? row.value : 0;
+}
+
+/**
+ * @typedef {{
+ *   openingBalanceCents: Cents,
+ *   source: "override" | "account" | "none",
+ *   accountId: string | null,
+ *   accountName: string | null,
+ *   asAt: string | null,
+ * }} OpeningBalance
+ */
+
+/**
+ * Where the balance curve starts from, and — just as importantly — where that
+ * figure came from.
+ *
+ * The bills account is the income-landing account: one account, both jobs
+ * (see `tables/accounts.js`). So the honest default for "what's in the bills
+ * account today" is that account's own latest snapshot, not zero. A saved
+ * override wins over it, for the case where the operator knows the snapshot
+ * is stale or wants to hold a different assumption.
+ *
+ * `source` is returned so the screen can say which of the three it is,
+ * rather than presenting any of them as bare fact.
+ *
+ * @param {import("@budget/schema").Db} db
+ * @returns {Promise<OpeningBalance>}
+ */
+export async function resolveOpeningBalance(db) {
+  const [overrideRow, account] = await Promise.all([
+    db.query.settings.findFirst({
+      where: (s, { eq: eqCol }) => eqCol(s.key, "billsOpeningBalanceCents"),
+    }),
+    db.query.accounts.findFirst({
+      where: (a, { and: andCol, eq: eqCol, isNull: isNullCol }) =>
+        andCol(eqCol(a.isIncomeLanding, true), isNullCol(a.archivedAt)),
+    }),
+  ]);
+
+  const snapshot = account
+    ? await db.query.balanceSnapshots.findFirst({
+        where: (b, { eq: eqCol }) => eqCol(b.accountId, account.id),
+        // `asAt` is unique per account, so it alone is a total order.
+        orderBy: (b, { desc }) => [desc(b.asAt)],
+      })
+    : null;
+
+  const accountId = account?.id ?? null;
+  const accountName = account?.name ?? null;
+
+  if (typeof overrideRow?.value === "number") {
+    return {
+      openingBalanceCents: overrideRow.value,
+      source: "override",
+      accountId,
+      accountName,
+      asAt: snapshot?.asAt ?? null,
+    };
+  }
+
+  if (snapshot) {
+    return {
+      openingBalanceCents: snapshot.amountCents,
+      source: "account",
+      accountId,
+      accountName,
+      asAt: snapshot.asAt,
+    };
+  }
+
+  return { openingBalanceCents: 0, source: "none", accountId, accountName, asAt: null };
 }

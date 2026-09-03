@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { createConnection } from "node:net";
 import { fileURLToPath } from "node:url";
 
 // Makes local dev idempotent, instead of the same breakage being
@@ -28,6 +29,15 @@ const WEB_PORT = 5173;
 // The same PORT the compose file and apps/api/src/env.js read — taken from
 // .env rather than kept as a second hardcoded copy that can drift.
 const API_PORT = readApiPort();
+// Published only by infra/docker-compose.dev.yml, and only for host-side
+// tooling. The api reaches the db over this port in dev; in compose it uses
+// the `db` hostname instead.
+const DB_PORT = 5432;
+
+// Docker Desktop from cold is slow — well past a minute on a laptop that has
+// just booted. Postgres, once the engine is up, is quick.
+const ENGINE_TIMEOUT_MS = 120_000;
+const DB_TIMEOUT_MS = 45_000;
 
 const COMPOSE = ["compose", "--env-file", ".env", "-f", "infra/docker-compose.yml"];
 const COMPOSE_DEV = [...COMPOSE, "-f", "infra/docker-compose.dev.yml"];
@@ -208,6 +218,110 @@ function sweepProcesses() {
   return leftovers.length;
 }
 
+/** @param {number} ms */
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Can we talk to the docker daemon at all? */
+function engineReachable() {
+  const res = spawnSync("docker", ["info", "--format", "{{.ServerVersion}}"], {
+    stdio: "ignore",
+  });
+  return res.status === 0;
+}
+
+// Docker Desktop is not on PATH and is not where its own docs say it is:
+// on this machine the installer put it under LOCALAPPDATA, not Program
+// Files. Check both rather than assuming either.
+/** @returns {string | null} */
+function dockerDesktopExe() {
+  /** @type {string[]} */
+  const candidates = [];
+  if (IS_WINDOWS) {
+    const local = process.env.LOCALAPPDATA;
+    const programFiles = process.env.ProgramFiles;
+    if (local) candidates.push(`${local}\\Programs\\DockerDesktop\\Docker Desktop.exe`);
+    if (programFiles) candidates.push(`${programFiles}\\Docker\\Docker\\Docker Desktop.exe`);
+  } else if (process.platform === "darwin") {
+    candidates.push("/Applications/Docker.app");
+  }
+  return candidates.find((p) => existsSync(p)) ?? null;
+}
+
+/**
+ * Starts Docker Desktop and waits for the daemon to answer. The engine takes
+ * upwards of half a minute from cold, which is why this waits rather than
+ * starting it and hoping.
+ * @returns {Promise<boolean>}
+ */
+async function startEngine() {
+  const exe = dockerDesktopExe();
+
+  // `docker desktop start` is the supported way in and works on every
+  // platform, but it is a CLI plugin — an older Docker Desktop, or a plain
+  // docker CLI, does not have it. Launching the app directly is the fallback,
+  // and on this machine the installer put it under LOCALAPPDATA rather than
+  // Program Files, which is why dockerDesktopExe() checks both.
+  log("docker is not running — starting Docker Desktop");
+  const viaCli = spawnSync("docker", ["desktop", "start"], {
+    stdio: "ignore",
+    timeout: ENGINE_TIMEOUT_MS,
+  });
+  if (viaCli.status !== 0) {
+    if (!exe) return false;
+    if (process.platform === "darwin") {
+      spawnSync("open", ["-a", exe], { stdio: "ignore" });
+    } else {
+      // Detached: Docker Desktop outlives this script, and a child handle
+      // would otherwise keep `pnpm dev` from ever exiting cleanly.
+      spawn(exe, { detached: true, stdio: "ignore" }).unref();
+    }
+  }
+
+  for (let waited = 0; waited < ENGINE_TIMEOUT_MS; waited += 2000) {
+    if (engineReachable()) {
+      log("docker engine ready");
+      return true;
+    }
+    await sleep(2000);
+  }
+  return false;
+}
+
+/**
+ * A TCP connect to the *published* port, which is the thing host-side code
+ * actually depends on. Compose's own healthcheck runs `pg_isready` inside
+ * the container, so it passes even when the port publish is missing — which
+ * is exactly the failure `docker compose up` without the dev overlay
+ * produces. Checking from out here is the only check that proves the path
+ * the api will use.
+ * @param {number} port
+ * @returns {Promise<boolean>}
+ */
+function tcpReachable(port) {
+  return new Promise((resolve) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    const settle = (/** @type {boolean} */ ok) => {
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.setTimeout(1000);
+    socket.once("connect", () => settle(true));
+    socket.once("timeout", () => settle(false));
+    socket.once("error", () => settle(false));
+  });
+}
+
+/** @returns {Promise<boolean>} */
+async function waitForDb() {
+  for (let waited = 0; waited < DB_TIMEOUT_MS; waited += 500) {
+    if (await tcpReachable(DB_PORT)) return true;
+    await sleep(500);
+  }
+  return false;
+}
+
 /** @returns {string[] | null} running service names, or null if docker is unreachable */
 function runningServices() {
   const res = spawnSync("docker", [...COMPOSE, "ps", "--services", "--status", "running"], {
@@ -250,17 +364,41 @@ function stopConflicting(services) {
 // infra/docker-compose.dev.yml. A running `api` container holds the API port,
 // and an `api` image is only ever as fresh as its last --build, so leaving it
 // up means editing code that nothing is serving.
-function prepareDocker() {
+/**
+ * Brings the db up and proves it is actually reachable, or explains why not.
+ *
+ * This used to log "docker unreachable — skipping db" and carry on starting
+ * the api and web anyway. That is the bug behind every "I start the app and
+ * get a wall of CORS errors" report: with the daemon off, `pnpm dev` came up
+ * looking healthy, every request 500'd or failed to connect, and the single
+ * grey line saying why had already scrolled past under vite's banner. A dev
+ * stack with no database is not a degraded dev stack, it is a broken one, so
+ * this now starts the engine itself and refuses to continue without it.
+ *
+ * @returns {Promise<{ ok: true } | { ok: false, reason: string, hint: string }>}
+ */
+async function prepareDocker() {
+  if (!engineReachable() && !(await startEngine())) {
+    return dockerDesktopExe()
+      ? {
+          ok: false,
+          reason: `Docker Desktop did not come up within ${ENGINE_TIMEOUT_MS / 1000}s.`,
+          hint: "Start it by hand, wait for the whale icon to settle, then retry.",
+        }
+      : {
+          ok: false,
+          reason: "Docker is not running and Docker Desktop was not found.",
+          hint: "Install Docker Desktop, or start your docker daemon, then retry.",
+        };
+  }
+
   const services = runningServices();
   if (services === null) {
-    log("docker unreachable — skipping db (the api will report db:false)");
-    // Unreachable is ambiguous: docker may be off, or it may be *starting*,
-    // which is the one case that bites. A daemon mid-boot cannot be asked to
-    // stop anything yet, but it is about to autostart every `unless-stopped`
-    // container — including `api` on :${API_PORT}. That lands after the port
-    // check below has already passed, so warn rather than imply all-clear.
-    log(`if docker is still starting, its api container may take :${API_PORT} — \`pnpm stop\` then retry`);
-    return;
+    return {
+      ok: false,
+      reason: "The docker daemon answered, but `docker compose ps` failed.",
+      hint: "Run `pnpm docker:db config` to see what compose is unhappy about.",
+    };
   }
 
   const stopped = stopConflicting(services);
@@ -274,7 +412,69 @@ function prepareDocker() {
   // reaches it over localhost. Compose is declarative, so this is a no-op
   // when the container already matches — and a recreate when it doesn't.
   if (!services.includes("db")) log("starting db");
-  spawnSync("docker", [...COMPOSE_DEV, "up", "-d", "db"], { cwd: REPO_ROOT, stdio: "ignore" });
+  // --wait blocks on the healthcheck in infra/docker-compose.yml, so this
+  // returns when Postgres is accepting connections rather than when the
+  // container has merely been created. Without it the api wins the race on a
+  // cold volume and its first queries fail.
+  const up = spawnSync(
+    "docker",
+    [...COMPOSE_DEV, "up", "-d", "--wait", "--wait-timeout", String(DB_TIMEOUT_MS / 1000), "db"],
+    { cwd: REPO_ROOT, encoding: "utf8" },
+  );
+  if (up.status !== 0) {
+    return {
+      ok: false,
+      reason: `The db container did not become healthy (${short(up.stderr ?? "")}).`,
+      hint: "`pnpm docker:db logs db` has the reason.",
+    };
+  }
+
+  if (!(await waitForDb())) {
+    return {
+      ok: false,
+      reason: `Postgres is not answering on localhost:${DB_PORT}.`,
+      hint: "The container is healthy, so this is the port publish — `pnpm docker:db up -d db` re-applies it.",
+    };
+  }
+
+  log(`db ready on :${DB_PORT}`);
+
+  // The deployed stack already refuses to run code against a schema older
+  // than itself: compose's one-shot `migrate` service applies migrations and
+  // `api` waits for it to exit 0 (see infra/docker-compose.yml). Local dev
+  // had no equivalent, so pulling a branch that adds a column produced an api
+  // that started cleanly and then 500'd every request with a Postgres
+  // "column ... does not exist" buried in a Drizzle stack trace. Same failure
+  // class as a missing database, so it gets the same treatment here rather
+  // than relying on remembering to run `pnpm db:migrate`.
+  const migrated = runMigrations();
+  if (migrated !== null) {
+    return {
+      ok: false,
+      reason: `Migrations failed to apply: ${migrated}`,
+      hint: "Run `pnpm db:migrate` to see the whole error.",
+    };
+  }
+
+  return { ok: true };
+}
+
+/**
+ * drizzle-kit only applies what is pending, so this is a fast no-op on an
+ * up-to-date database and needs no separate "is anything pending" probe.
+ * @returns {string | null} an error summary, or null on success
+ */
+function runMigrations() {
+  const res = spawnSync("pnpm db:migrate", {
+    cwd: REPO_ROOT,
+    shell: true,
+    encoding: "utf8",
+  });
+  if (res.status === 0) {
+    log("migrations up to date");
+    return null;
+  }
+  return short(`${res.stdout ?? ""} ${res.stderr ?? ""}`);
 }
 
 /** @param {number[]} ports */
@@ -294,7 +494,7 @@ function run(command) {
   child.on("exit", (code) => process.exit(code ?? 0));
 }
 
-function status() {
+async function status() {
   const procs = listNodeProcesses();
   const mine = ownChain(procs);
   const ours = procs.filter((p) => !mine.has(p.pid) && isOurs(p.cmd));
@@ -304,17 +504,22 @@ function status() {
   const watched = [
     ["api", API_PORT],
     ["web", WEB_PORT],
-    ["db", 5432],
+    ["db", DB_PORT],
   ];
   for (const [label, port] of watched) {
     const holder = portHolder(port);
     console.log(`  :${port} ${label.padEnd(4)} ${holder === null ? "free" : `held by pid ${holder}`}`);
   }
 
+  // A held port only proves something is bound to it. The db is the one that
+  // has repeatedly been bound-but-useless, so probe it for real.
+  const dbUp = await tcpReachable(DB_PORT);
+  console.log(`\ndatabase\n  localhost:${DB_PORT} ${dbUp ? "accepting connections" : "NOT reachable"}`);
+
   const services = runningServices();
   console.log("\ndocker");
   if (services === null) {
-    console.log("  unreachable");
+    console.log("  unreachable — Docker Desktop is not running");
   } else if (services.length === 0) {
     console.log("  nothing running");
   } else {
@@ -335,7 +540,7 @@ function status() {
 const mode = process.argv[2] ?? "up";
 
 if (mode === "status") {
-  status();
+  await status();
 } else if (mode === "stop") {
   const killed = sweepProcesses();
   const services = runningServices();
@@ -345,7 +550,33 @@ if (mode === "status") {
 } else if (mode === "up" || mode === "api" || mode === "web") {
   const killed = sweepProcesses();
   if (killed > 0) log(`swept ${killed} leftover process(es)`);
-  prepareDocker();
+
+  // `web` alone genuinely doesn't need a database, and --no-db is the escape
+  // hatch for deliberately working on the frontend against a dead api. Every
+  // other path treats the db as a hard precondition.
+  const skipDb = mode === "web" || process.argv.includes("--no-db");
+  if (skipDb) {
+    log("skipping the db check");
+    // Still clear the containers that publish :${API_PORT} — skipping the
+    // database is not a reason to walk into a port conflict. Silent when the
+    // daemon is off, which is the likely reason we are on this path at all.
+    const services = runningServices();
+    if (services !== null) {
+      const stopped = stopConflicting(services);
+      if (stopped.length > 0) log(`stopped container(s) ${stopped.join(", ")}`);
+    }
+  } else {
+    const db = await prepareDocker();
+    if (!db.ok) {
+      console.error(`\ndev: cannot start — ${db.reason}`);
+      console.error(`dev: ${db.hint}`);
+      // Exit rather than start. A dev stack without a database looks like it
+      // works right up until the browser, where the symptom (CORS errors,
+      // NetworkError, a blank page) names nothing that leads back to here.
+      console.error("dev: `pnpm dev --no-db` starts anyway if that is what you want.\n");
+      process.exit(1);
+    }
+  }
 
   const ports = mode === "api" ? [API_PORT] : mode === "web" ? [WEB_PORT] : [API_PORT, WEB_PORT];
   const blocked = verifyPorts(ports);

@@ -32,9 +32,13 @@ function Command({
 }
 
 /**
+ * `loop` is forwarded to cmdk's <Command> — it is a keyboard-behaviour prop
+ * (arrow keys wrap at the ends of the list), and CommandDialog is the only
+ * way a caller can reach the <Command> it renders internally.
+ *
  * @param {import("react").ComponentProps<typeof Dialog> &
  *   import("react").ComponentProps<typeof DialogContent> &
- *   { title?: string, description?: string }} props
+ *   { title?: string, description?: string, loop?: boolean }} props
  */
 function CommandDialog({
   title = "Command Palette",
@@ -42,6 +46,7 @@ function CommandDialog({
   children,
   className,
   showCloseButton = false,
+  loop = false,
   ...props
 }) {
   return (
@@ -53,7 +58,9 @@ function CommandDialog({
       <DialogContent
         className={cn("top-1/3 translate-y-0 overflow-hidden rounded-xl! p-0", className)}
         showCloseButton={showCloseButton}>
-        <Command className="**:[[cmdk-group-heading]]:px-2 **:[[cmdk-group-heading]]:text-muted-foreground **:data-[slot=command-input-wrapper]:h-auto">
+        <Command
+          loop={loop}
+          className="**:[[cmdk-group-heading]]:px-2 **:[[cmdk-group-heading]]:text-muted-foreground **:data-[slot=command-input-wrapper]:h-auto">
           {children}
         </Command>
       </DialogContent>

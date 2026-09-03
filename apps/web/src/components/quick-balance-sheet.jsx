@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import { toCents } from "@budget/engine";
 import { Button } from "@/components/ui/button.jsx";
-import { Input } from "@/components/ui/input.jsx";
 import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/components/ui/input-group.jsx";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select.jsx";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet.jsx";
+import { DatePicker } from "@/components/date-picker.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
 import { todayIso } from "@/lib/dates.js";
 
@@ -122,7 +122,7 @@ export function QuickBalanceSheet({ open, onOpenChange, accounts, accountId, sub
             </InputGroup>
           </FieldRow>
           <FieldRow label="As at" htmlFor="balance-as-at">
-            <Input id="balance-as-at" type="date" value={asAt} onChange={(e) => setAsAt(e.target.value)} />
+            <DatePicker id="balance-as-at" value={asAt} onChange={setAsAt} />
           </FieldRow>
           {error ? <p className="text-sm text-negative">{error}</p> : null}
           <Button type="submit" disabled={submitting}>

@@ -1,4 +1,4 @@
-import { allocationLines, replaceAllocationLinesSchema } from "@budget/schema";
+import { allocationLines, allocationStageGoals, replaceAllocationLinesSchema } from "@budget/schema";
 import { zValidator } from "@hono/zod-validator";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
@@ -8,8 +8,9 @@ import {
   duplicateInjectedBasisError,
   findVersionByStatus,
   isInjectedBasis,
-  linesForVersion,
   serializeVersion,
+  serializeVersionById,
+  stageGoalsForVersion,
 } from "../lib/allocation.js";
 import { getUserId } from "../lib/app-env.js";
 import { writeAuditLog } from "../lib/audit.js";
@@ -37,7 +38,7 @@ export function createAllocationVersionsRoutes({ db }) {
     // makes the history trustworthy (phases/08-allocation.md "Constraints").
     .put("/:id/lines", zValidator("json", replaceAllocationLinesSchema, handleValidation), async (c) => {
       const id = c.req.param("id");
-      const { lines } = c.req.valid("json");
+      const { lines, stageGoals } = c.req.valid("json");
 
       const version = await findVersion(db, id);
       if (!version) {
@@ -80,6 +81,19 @@ export function createAllocationVersionsRoutes({ db }) {
       // being saved, and a reorder or a stage move has no meaningful
       // half-applied state (phases/08-allocation.md "PUT .../lines").
       const saved = await db.transaction(async (tx) => {
+        // Section goals go in the same transaction as the lines for the same
+        // reason the lines go in one statement: the whole draft is the unit
+        // being saved. `undefined` means the caller didn't mention them, so
+        // they are left alone; an empty array is an instruction to clear them.
+        if (stageGoals !== undefined) {
+          await tx.delete(allocationStageGoals).where(eq(allocationStageGoals.versionId, id));
+          if (stageGoals.length > 0) {
+            await tx
+              .insert(allocationStageGoals)
+              .values(stageGoals.map((goal) => ({ versionId: id, stage: goal.stage, goalPct: goal.goalPct })));
+          }
+        }
+
         await tx.delete(allocationLines).where(eq(allocationLines.versionId, id));
         if (lines.length === 0) return [];
         return tx
@@ -108,10 +122,12 @@ export function createAllocationVersionsRoutes({ db }) {
         action: "allocation_version.lines_replace",
         entityType: "allocation_version",
         entityId: id,
-        metadata: { planId: version.planId, lineCount: saved.length },
+        metadata: { planId: version.planId, lineCount: saved.length, stageGoalCount: stageGoals?.length ?? null },
       });
 
-      return c.json({ version: serializeVersion(version, saved) });
+      return c.json({
+        version: serializeVersion(version, saved, { stageGoalRows: await stageGoalsForVersion(db, id) }),
+      });
     })
 
     // Revert seeds a NEW draft from an old version — it never mutates
@@ -153,6 +169,6 @@ export function createAllocationVersionsRoutes({ db }) {
         metadata: { planId: source.planId, revertedFromVersionId: source.id, revertedFrom: source.version },
       });
 
-      return c.json({ draft: serializeVersion(draft, await linesForVersion(db, draft.id)) }, 201);
+      return c.json({ draft: await serializeVersionById(db, draft) }, 201);
     });
 }

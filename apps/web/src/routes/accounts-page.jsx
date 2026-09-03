@@ -18,17 +18,30 @@ import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select.jsx";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet.jsx";
 import { Switch } from "@/components/ui/switch.jsx";
-import { Chart } from "@/components/chart.jsx";
+import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts";
+import {
+  AXIS,
+  Chart,
+  ChartTooltip,
+  MoneyTooltip,
+  SERIES,
+  useChartMotion,
+  useMoneyTick,
+} from "@/components/chart.jsx";
 import { QuickBalanceSheet } from "@/components/quick-balance-sheet.jsx";
 import { DataList, DataListRow } from "@/components/data-list.jsx";
+import { ListSkeleton } from "@/components/loading.jsx";
 import { EmptyState } from "@/components/empty-state.jsx";
+import { ReorderControls } from "@/components/reorder-controls.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
 import { Money } from "@/components/money.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
+import { useConfirm } from "@/components/confirm-dialog.jsx";
 import { StatTile } from "@/components/stat-tile.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
 import { registerCommands } from "@/lib/commands.js";
+import { moveWithinGroup } from "@/lib/reorder.js";
 import { ACCOUNT_TYPE_LABELS, ACCOUNT_TYPES, CADENCE_PERIOD_NOUNS } from "@/lib/constants.js";
 import { daysSinceIso, formatIsoDate } from "@/lib/dates.js";
 import { formatMoney } from "@/lib/format-money.js";
@@ -264,6 +277,8 @@ function AccountGoalsPanel({ accountId }) {
  */
 function AccountProjectionPanel({ accountId, accountType }) {
   const { currency, locale } = useSettings();
+  const moneyTick = useMoneyTick();
+  const motion = useChartMotion();
   const projectionsQuery = useQuery({
     queryKey: ["projections", "60"],
     queryFn: async () => {
@@ -285,6 +300,15 @@ function AccountProjectionPanel({ accountId, accountType }) {
   }
 
   const projected = (projectionsQuery.data?.accounts ?? []).find((a) => a.id === accountId) ?? null;
+
+  // One row per point, with the x-axis label precomputed as a STRING. The
+  // tooltip's title is the category value it is given, so a numeric x leaves
+  // it with nothing to show; a string label is both the axis tick and the
+  // tooltip heading, with no formatter at either end.
+  const projectionRows = (projected?.series ?? []).map((point) => ({
+    label: point.month === 0 ? "now" : `${point.month}mo`,
+    projected: point.projectedCents / 100,
+  }));
 
   return (
     <div className="flex flex-col gap-2">
@@ -323,30 +347,25 @@ function AccountProjectionPanel({ accountId, accountType }) {
               }
             : null
         }
-        option={(tokens) => ({
-          xAxis: {
-            type: "category",
-            data: (projected?.series ?? []).map((p) => p.month),
-            axisLabel: {
-              color: tokens.axisLabel,
-              /** @param {string} value */
-              formatter: (value) => (value === "0" ? "now" : `${value}mo`),
-            },
-          },
-          yAxis: { type: "value" },
-          series: [
-            {
-              type: "line",
-              data: (projected?.series ?? []).map((p) => p.projectedCents / 100),
-              smooth: true,
-              showSymbol: false,
-              lineStyle: { width: 2, color: tokens.series[1] },
-              itemStyle: { color: tokens.series[1] },
-              areaStyle: { color: tokens.accentSoft, opacity: 0.4 },
-            },
-          ],
-        })}
-      />
+        config={{ projected: { label: "Projected", color: SERIES[1] } }}
+      >
+        <AreaChart data={projectionRows} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+          <CartesianGrid vertical={false} />
+          <XAxis dataKey="label" {...AXIS} minTickGap={24} />
+          <YAxis {...AXIS} width={56} tickFormatter={moneyTick} />
+          <ChartTooltip content={<MoneyTooltip />} />
+          <Area
+            dataKey="projected"
+            type="monotone"
+            stroke="var(--color-projected)"
+            fill="var(--color-projected)"
+            fillOpacity={0.15}
+            strokeWidth={2}
+            dot={false}
+            {...motion}
+          />
+        </AreaChart>
+      </Chart>
     </div>
   );
 }
@@ -358,8 +377,11 @@ function AccountProjectionPanel({ accountId, accountType }) {
  * @param {{ account: Account | null, onOpenChange: (open: boolean) => void, onQuickUpdate: () => void }} props
  */
 function AccountDetailSheet({ account, onOpenChange, onQuickUpdate }) {
-  const { locale } = useSettings();
+  const { currency, locale } = useSettings();
+  const moneyTick = useMoneyTick();
+  const motion = useChartMotion();
   const queryClient = useQueryClient();
+  const confirm = useConfirm();
 
   const balancesQuery = useQuery({
     queryKey: ["account-balances", account?.id],
@@ -386,6 +408,10 @@ function AccountDetailSheet({ account, onOpenChange, onQuickUpdate }) {
 
   const balances = balancesQuery.data ?? [];
   const ascending = [...balances].reverse();
+  const balanceRows = ascending.map((b) => ({
+    label: formatIsoDate(b.asAt, locale),
+    balance: b.amountCents / 100,
+  }));
 
   return (
     <Sheet open={account !== null} onOpenChange={onOpenChange}>
@@ -410,21 +436,25 @@ function AccountDetailSheet({ account, onOpenChange, onQuickUpdate }) {
             emptyDescription="Add the first balance to start tracking this account over time."
             height={220}
             ariaLabel={`Balance over time for ${account?.name ?? "this account"}, ${ascending.length} recorded points. Every figure is listed in the balance history below.`}
-            option={(tokens) => ({
-              xAxis: { type: "category", data: ascending.map((b) => b.asAt) },
-              yAxis: { type: "value" },
-              series: [
-                {
-                  type: "line",
-                  data: ascending.map((b) => b.amountCents / 100),
-                  smooth: true,
-                  showSymbol: ascending.length < 30,
-                  itemStyle: { color: tokens.series[0] },
-                  areaStyle: { color: tokens.accentSoft },
-                },
-              ],
-            })}
-          />
+            config={{ balance: { label: "Balance", color: SERIES[0] } }}
+          >
+            <AreaChart data={balanceRows} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+              <CartesianGrid vertical={false} />
+              <XAxis dataKey="label" {...AXIS} minTickGap={24} />
+              <YAxis {...AXIS} width={56} tickFormatter={moneyTick} />
+              <ChartTooltip content={<MoneyTooltip />} />
+              <Area
+                dataKey="balance"
+                type="monotone"
+                stroke="var(--color-balance)"
+                fill="var(--color-balance)"
+                fillOpacity={0.15}
+                strokeWidth={2}
+                dot={ascending.length < 30}
+                {...motion}
+              />
+            </AreaChart>
+          </Chart>
 
           {account ? <AccountGoalsPanel accountId={account.id} /> : null}
           {account ? <AccountProjectionPanel accountId={account.id} accountType={account.type} /> : null}
@@ -441,7 +471,14 @@ function AccountDetailSheet({ account, onOpenChange, onQuickUpdate }) {
                       size="icon-sm"
                       variant="ghost"
                       className="text-negative"
-                      onClick={() => deleteMutation.mutate(b.id)}
+                      onClick={async () => {
+                        const ok = await confirm({
+                          title: "Delete this balance?",
+                          description: `${formatMoney(b.amountCents, { currency, locale })} recorded ${formatIsoDate(b.asAt, locale)}. Deleting it changes every projection computed from this account's history.`,
+                          confirmLabel: "Delete",
+                        });
+                        if (ok) deleteMutation.mutate(b.id);
+                      }}
                       aria-label="Delete balance"
                     >
                       <Trash2Icon />
@@ -466,6 +503,7 @@ function AccountDetailSheet({ account, onOpenChange, onQuickUpdate }) {
 export function AccountsPage() {
   const { locale } = useSettings();
   const queryClient = useQueryClient();
+  const confirm = useConfirm();
 
   const [formOpen, setFormOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState(/** @type {Account | null} */ (null));
@@ -519,6 +557,31 @@ export function AccountsPage() {
     },
     onError: (err) => toast.error(err.message),
   });
+
+  // Accounts have been ordered by `sortOrder` since phase 04 with no way to
+  // set it (todo.md `[P04-12]`), so every row sat at the column default and
+  // the list was in insertion order. The move is made within the group the
+  // operator can see; `moveWithinGroup` turns that into the whole list's new
+  // order, which is what the endpoint renumbers from.
+  const reorderMutation = useMutation({
+    mutationFn: async (/** @type {string[]} */ ids) => {
+      const res = await api.accounts.reorder.$post({ json: { ids } });
+      if (!res.ok) throw new Error(await readApiError(res));
+      return res.json();
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["accounts"] }),
+    onError: (err) => toast.error(err.message),
+  });
+
+  /**
+   * @param {Account[]} groupItems
+   * @param {number} index
+   * @param {-1 | 1} direction
+   */
+  function moveAccount(groupItems, index, direction) {
+    const next = moveWithinGroup(accounts, groupItems, index, direction);
+    if (next) reorderMutation.mutate(next.map((a) => a.id));
+  }
 
   const upsertBalanceMutation = useMutation({
     mutationFn: async (/** @type {{ accountId: string, data: { asAt: string, amountCents: number } }} */ { accountId, data }) => {
@@ -599,7 +662,9 @@ export function AccountsPage() {
         </div>
       ) : null}
 
-      {accountsQuery.isLoading ? null : accounts.length === 0 ? (
+      {accountsQuery.isLoading ? (
+        <ListSkeleton rows={5} label="Loading accounts" />
+      ) : accounts.length === 0 ? (
         <EmptyState
           icon={LandmarkIcon}
           title="No accounts yet"
@@ -629,7 +694,7 @@ export function AccountsPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
-                  {group.items.map((account) => (
+                  {group.items.map((account, index) => (
                     <tr key={account.id}>
                       <td className="px-4 py-3 text-text">
                         <button
@@ -667,6 +732,13 @@ export function AccountsPage() {
                       </td>
                       <td className="px-4 py-3 text-right">
                         <div className="flex justify-end gap-1">
+                          <ReorderControls
+                            index={index}
+                            count={group.items.length}
+                            label={account.name}
+                            disabled={reorderMutation.isPending}
+                            onMove={(direction) => moveAccount(group.items, index, direction)}
+                          />
                           <Button size="sm" variant="outline" onClick={() => setQuickUpdate({ accountId: account.id })}>
                             Update balance
                           </Button>
@@ -686,7 +758,15 @@ export function AccountsPage() {
                             variant="ghost"
                             className="text-negative"
                             aria-label="Archive account"
-                            onClick={() => archiveMutation.mutate(account.id)}
+                            onClick={async () => {
+                              const ok = await confirm({
+                                title: `Archive ${account.name}?`,
+                                description:
+                                  "It stops appearing in lists and allocation destinations. Its balance history is kept.",
+                                confirmLabel: "Archive",
+                              });
+                              if (ok) archiveMutation.mutate(account.id);
+                            }}
                           >
                             <Trash2Icon />
                           </Button>
@@ -699,7 +779,7 @@ export function AccountsPage() {
             </div>
 
             <DataList className="md:hidden">
-              {group.items.map((account) => (
+              {group.items.map((account, index) => (
                 <DataListRow
                   key={account.id}
                   primary={
@@ -721,9 +801,18 @@ export function AccountsPage() {
                       : (account.institution ?? "No balance yet")
                   }
                   trailing={
-                    <Button size="sm" variant="outline" onClick={() => setQuickUpdate({ accountId: account.id })}>
-                      Update
-                    </Button>
+                    <div className="flex items-center gap-1">
+                      <ReorderControls
+                        index={index}
+                        count={group.items.length}
+                        label={account.name}
+                        disabled={reorderMutation.isPending}
+                        onMove={(direction) => moveAccount(group.items, index, direction)}
+                      />
+                      <Button size="sm" variant="outline" onClick={() => setQuickUpdate({ accountId: account.id })}>
+                        Update
+                      </Button>
+                    </div>
                   }
                 />
               ))}

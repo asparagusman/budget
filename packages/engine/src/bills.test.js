@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  billWindowFigures,
   billsContribution,
   projectInstances,
   requiredOpeningBalanceCents,
   simulateBalance,
+  sumWindowFigures,
 } from "./bills.js";
 import { toCents } from "./money.js";
 import { mustAt } from "./invariant.js";
@@ -198,6 +200,181 @@ describe("billsContribution", () => {
     const narrowWindow = { from: "2026-01-01", to: "2026-06-01" };
     const result = billsContribution(instances, narrowWindow, noPaySchedule);
     expect(result.perPayCents).toBe(0);
+  });
+});
+
+describe("billWindowFigures", () => {
+  /** @type {PaySchedule} */
+  const paySchedule = { anchorDate: "2026-01-01", cadence: "fortnightly" };
+  const window = { from: "2026-09-01", to: "2027-09-01" };
+
+  it("restates a rolling-average bill at the average of its actuals, not its base", () => {
+    // The defect this function exists to make impossible: the screen used to
+    // print `baseAmountCents` for this bill and annualise it to $1050.00,
+    // while the contribution it feeds was built from $176.97 an instance.
+    /** @type {Bill} */
+    const gas = {
+      id: "gas",
+      baseAmountCents: toCents(175),
+      frequency: "every_2_months",
+      anchorDate: "2026-01-15",
+      amountModel: "rolling_average",
+      rollingWindow: 6,
+    };
+    /** @type {BillInstance[]} */
+    const history = [
+      ["2025-09-10", 17925],
+      ["2025-11-10", 15842],
+      ["2026-01-10", 16803],
+      ["2026-03-10", 16853],
+      ["2026-05-10", 18928],
+      ["2026-07-10", 19832],
+    ].map(([dueDate, actualCents]) => ({
+      billId: "gas",
+      dueDate: /** @type {string} */ (dueDate),
+      expectedCents: 0,
+      actualCents: /** @type {number} */ (actualCents),
+      isOverride: false,
+    }));
+
+    const figures = billWindowFigures(projectInstances(gas, window, history), window, paySchedule);
+
+    expect(figures.instanceCount).toBe(6);
+    expect(figures.nextAmountCents).toBe(17697); // mean of the six actuals
+    expect(figures.averageAmountCents).toBe(17697);
+    expect(figures.nextDueDate).toBe("2026-09-15");
+    expect(figures.windowTotalCents).toBe(17697 * 6);
+    // The rolling average is one steady forecast figure, so the *forecast*
+    // does not vary even though the history it came from does.
+    expect(figures.variesInWindow).toBe(false);
+  });
+
+  it("reports the spread of a seasonal bill rather than one instance times a year", () => {
+    /** @type {Bill} */
+    const electricity = {
+      id: "electricity",
+      baseAmountCents: toCents(320),
+      frequency: "quarterly",
+      anchorDate: "2026-10-15",
+      amountModel: "seasonal",
+      seasonalFactors: { 1: 1.4, 4: 0.9, 7: 0.7, 10: 1.0 },
+    };
+    const figures = billWindowFigures(projectInstances(electricity, window), window, paySchedule);
+
+    expect(figures.instanceCount).toBe(4);
+    expect(figures.minAmountCents).toBe(toCents(224)); // July, factor 0.7
+    expect(figures.maxAmountCents).toBe(toCents(448)); // January, factor 1.4
+    expect(figures.variesInWindow).toBe(true);
+    // 320 * (1.0 + 1.4 + 0.9 + 0.7) — annualising the next instance alone
+    // would have claimed 4 * $320 = $1280.
+    expect(figures.windowTotalCents).toBe(toCents(1280));
+    expect(figures.averageAmountCents).toBe(toCents(320));
+  });
+
+  it("prefers an entered actual over the projection, as billsContribution does", () => {
+    /** @type {Bill} */
+    const bill = {
+      id: "b",
+      baseAmountCents: toCents(100),
+      frequency: "monthly",
+      anchorDate: "2026-09-15",
+      amountModel: "flat",
+    };
+    const instances = projectInstances(bill, window);
+    mustAt(instances, 0).actualCents = toCents(130);
+    const figures = billWindowFigures(instances, window, paySchedule);
+
+    expect(figures.nextAmountCents).toBe(toCents(130));
+    expect(figures.windowTotalCents).toBe(toCents(100) * 11 + toCents(130));
+    expect(figures.variesInWindow).toBe(true);
+  });
+
+  it("reports an empty window without dividing by zero", () => {
+    // A yearly bill and a window shorter than its cadence: no occurrence
+    // lands inside, so every per-instance figure has nothing to average.
+    /** @type {Bill} */
+    const bill = {
+      id: "b",
+      baseAmountCents: toCents(100),
+      frequency: "yearly",
+      anchorDate: "2026-02-01",
+      amountModel: "flat",
+    };
+    const narrowWindow = { from: "2026-09-01", to: "2026-12-01" };
+    const figures = billWindowFigures(projectInstances(bill, narrowWindow), narrowWindow, paySchedule);
+
+    expect(figures.instanceCount).toBe(0);
+    expect(figures.nextDueDate).toBe(null);
+    expect(figures.nextAmountCents).toBe(null);
+    expect(figures.averageAmountCents).toBe(null);
+    expect(figures.minAmountCents).toBe(null);
+    expect(figures.maxAmountCents).toBe(null);
+    expect(figures.variesInWindow).toBe(false);
+    expect(figures.windowTotalCents).toBe(0);
+  });
+});
+
+describe("sumWindowFigures", () => {
+  /** @type {PaySchedule} */
+  const paySchedule = { anchorDate: "2026-01-01", cadence: "fortnightly" };
+  const window = { from: "2026-09-01", to: "2027-09-01" };
+
+  /** @param {string} id @param {number} dollars @param {import("./cadence.js").Cadence} frequency */
+  function figuresFor(id, dollars, frequency) {
+    /** @type {Bill} */
+    const bill = {
+      id,
+      baseAmountCents: toCents(dollars),
+      frequency,
+      anchorDate: "2026-09-15",
+      amountModel: "flat",
+    };
+    return billWindowFigures(projectInstances(bill, window), window, paySchedule);
+  }
+
+  it("adds to exactly what the rows print, so a subtotal can never disagree with its column", () => {
+    const rows = [
+      figuresFor("internet", 90, "monthly"),
+      figuresFor("electricity", 320, "quarterly"),
+      figuresFor("ambulance", 51.94, "yearly"),
+    ];
+    const total = sumWindowFigures(rows);
+    /** @param {keyof typeof total} field */
+    const addedUp = (field) => rows.reduce((sum, row) => sum + row[field], 0);
+
+    expect(total.perYearCents).toBe(addedUp("perYearCents"));
+    expect(total.perMonthCents).toBe(addedUp("perMonthCents"));
+    expect(total.perPayCents).toBe(addedUp("perPayCents"));
+    expect(total.windowTotalCents).toBe(addedUp("windowTotalCents"));
+  });
+
+  it("keeps the window total identical to pooling every instance", () => {
+    // The window total is a plain sum of integer cents, so — unlike the
+    // annualised figures, which round after scaling — it is exactly equal
+    // whether the instances are pooled first or summed per bill afterwards.
+    const bills = /** @type {const} */ ([
+      ["internet", 90, "monthly"],
+      ["electricity", 320, "quarterly"],
+      ["ambulance", 51.94, "yearly"],
+    ]);
+    const pooled = bills.flatMap(([id, dollars, frequency]) =>
+      projectInstances(
+        { id, baseAmountCents: toCents(dollars), frequency, anchorDate: "2026-09-15", amountModel: "flat" },
+        window,
+      ),
+    );
+    const perBill = sumWindowFigures(bills.map(([id, dollars, frequency]) => figuresFor(id, dollars, frequency)));
+
+    expect(perBill.windowTotalCents).toBe(billWindowFigures(pooled, window, paySchedule).windowTotalCents);
+  });
+
+  it("returns zeroes for no rows at all", () => {
+    expect(sumWindowFigures([])).toEqual({
+      perPayCents: 0,
+      perMonthCents: 0,
+      perYearCents: 0,
+      windowTotalCents: 0,
+    });
   });
 });
 

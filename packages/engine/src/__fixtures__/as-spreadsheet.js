@@ -15,7 +15,7 @@ import { toCents } from "../money.js";
 
 /** @import { Cents } from "../money.js" */
 /** @import { Bill } from "../bills.js" */
-/** @import { AllocationLine } from "../allocation.js" */
+/** @import { AllocationLine, StageGoal } from "../allocation.js" */
 
 export const TODAY = "2026-01-01";
 
@@ -113,6 +113,8 @@ export const INCOME_VARIANTS_FORTNIGHTLY_CENTS = {
 export const INCOME_LANDING_ACCOUNT_ID = "income_bills";
 
 // Allocation lines, "Usual" variant — order and stages exactly as documented.
+// Stage 1/2/3 are sections A/B/C: Bills & Essentials, Save Invest & Give,
+// Leftover (`ALLOCATION_SECTIONS` in ../allocation.js).
 /** @type {AllocationLine[]} */
 export const ALLOCATION_LINES = [
   { id: "fixed", stage: 1, label: "Fixed", basis: "from_fixed_costs", value: null, goalPct: null, accountId: INCOME_LANDING_ACCOUNT_ID },
@@ -125,4 +127,18 @@ export const ALLOCATION_LINES = [
   { id: "bill_shock_save", stage: 2, label: "Bill Shock Save", basis: "pct_of_gross", value: 3, goalPct: null, accountId: "ubank_mojo" },
   { id: "eating_out", stage: 3, label: "Eating Out", basis: "pct_of_remaining", value: 50, goalPct: null, accountId: "2up" },
   { id: "personal_prize", stage: 3, label: "Personal Prize", basis: "pct_of_remaining", value: 50, goalPct: null, accountId: "2up" },
+];
+
+// The two section goals the workbook carries and the per-line `goalPct` column
+// cannot express: 50% on section A's Subtotal row, and the 10% the sheet writes
+// against section B's *Remaining* row — which is section C's subtotal, since
+// C's two lines split 100% of what B leaves.
+//
+// Section B has no goal of its own here: its own lines carry 10/10/10/7/3, and
+// the sheet leaves its Subtotal row's Goal % blank. That makes it the fixture
+// that exercises all three `goalSource` states at once.
+/** @type {StageGoal[]} */
+export const ALLOCATION_STAGE_GOALS = [
+  { stage: 1, goalPct: 50 },
+  { stage: 3, goalPct: 10 },
 ];

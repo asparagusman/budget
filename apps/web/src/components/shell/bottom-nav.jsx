@@ -3,6 +3,7 @@ import { Link, useRouterState } from "@tanstack/react-router";
 import { MoreHorizontal } from "lucide-react";
 import { cn } from "@/lib/utils.js";
 import { MOBILE_PRIMARY_PATHS, NAV_ITEMS } from "@/lib/nav.js";
+import { ThemeToggle } from "@/components/theme-toggle.jsx";
 import {
   Sheet,
   SheetContent,
@@ -84,6 +85,13 @@ export function BottomNav() {
                 {item.label}
               </Link>
             ))}
+          </div>
+          {/* The theme control's only other home is the desktop sidebar, so
+              before this there was no way to change theme on a phone at all
+              — the one place the preference matters most. */}
+          <div className="flex items-center justify-between gap-3 border-t border-border px-4 py-4">
+            <span className="text-sm font-medium text-text">Theme</span>
+            <ThemeToggle />
           </div>
         </SheetContent>
       </Sheet>

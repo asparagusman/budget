@@ -17,7 +17,7 @@
       "@/*": ["./src/*"]
     }
   },
-  "include": ["src", "vite.config.js"],
+  "include": ["src", "vite.config.js", "vitest.config.js"],
   // `checkJs` would otherwise typecheck the built bundle in dist/.
   "exclude": ["dist"]
 }

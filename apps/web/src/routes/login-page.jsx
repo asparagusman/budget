@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button.jsx";
 import {
@@ -32,6 +33,8 @@ export function LoginPage() {
   const { state, loading, refresh } = useAuth();
   const navigate = useNavigate();
   const [displayName, setDisplayName] = useState("");
+  const [password, setPassword] = useState("");
+  const [usingPassword, setUsingPassword] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(/** @type {string | null} */ (null));
 
@@ -40,6 +43,19 @@ export function LoginPage() {
   // behind that check, so `needsBootstrap` just falls back to `false`
   // (sign-in) rather than flashing the bootstrap form.
   const needsBootstrap = state?.needsBootstrap ?? false;
+
+  // Whether the household has a recovery password at all. Public, and it
+  // says nothing a sign-in screen could not already infer — but the
+  // affordance has to know whether to offer itself, and offering a way in
+  // that does not exist is worse than not offering one.
+  const recoveryQuery = useQuery({
+    queryKey: ["recovery-password-status"],
+    queryFn: async () => {
+      const res = await api.auth["recovery-password"].$get();
+      if (!res.ok) throw new Error(await readApiError(res));
+      return res.json();
+    },
+  });
 
   async function withPasskeyGuard(/** @type {() => Promise<void>} */ run) {
     setError(null);
@@ -55,6 +71,24 @@ export function LoginPage() {
     } finally {
       setBusy(false);
     }
+  }
+
+  /** @param {import("react").FormEvent} e */
+  function handleRecoveryLogin(e) {
+    e.preventDefault();
+    setError(null);
+    setBusy(true);
+    api.auth.login.password
+      .$post({ json: { password } })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(await readApiError(res));
+        await refresh();
+        // Never "/" — a recovery session can reach nothing behind the app
+        // shell (see router.jsx and the API's own guard).
+        navigate({ to: "/recovery", replace: true });
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setBusy(false));
   }
 
   /** @param {import("react").FormEvent} e */
@@ -102,7 +136,9 @@ export function LoginPage() {
         <CardDescription>
           {needsBootstrap
             ? "Set up the first passkey to get started."
-            : "Sign in with your passkey."}
+            : usingPassword
+              ? "The recovery password only lets you register a new passkey."
+              : "Sign in with your passkey."}
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
@@ -122,12 +158,56 @@ export function LoginPage() {
               {busy ? "Setting up…" : "Create passkey"}
             </Button>
           </form>
+        ) : usingPassword ? (
+          <form onSubmit={handleRecoveryLogin} className="flex flex-col gap-4">
+            <FieldRow label="Recovery password" htmlFor="recovery-password">
+              <Input
+                id="recovery-password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoFocus
+                autoComplete="current-password"
+              />
+            </FieldRow>
+            {error ? <p className="text-sm text-negative">{error}</p> : null}
+            <Button type="submit" disabled={busy || password === ""}>
+              {busy ? "Signing in…" : "Continue"}
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setUsingPassword(false);
+                setPassword("");
+                setError(null);
+              }}
+            >
+              Back to passkey
+            </Button>
+          </form>
         ) : (
           <>
             {error ? <p className="text-sm text-negative">{error}</p> : null}
             <Button onClick={handleSignIn} disabled={busy}>
               {busy ? "Signing in…" : "Sign in"}
             </Button>
+            {/* Only where one is actually set. Passkeys stay the way in;
+                this is the door for the day they are all gone. */}
+            {recoveryQuery.data?.configured ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setUsingPassword(true);
+                  setError(null);
+                }}
+              >
+                Lost every passkey?
+              </Button>
+            ) : null}
           </>
         )}
       </CardContent>

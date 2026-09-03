@@ -9,6 +9,7 @@ import {
   loadAllocationContext,
   serializeInputs,
   serializeVersion,
+  stageGoalsForVersion,
   variantGrossPerMonthCents,
 } from "../lib/allocation.js";
 import { todayIso } from "../lib/dates.js";
@@ -38,10 +39,13 @@ export function createAllocationRoutes({ db }) {
    * @param {import("../lib/allocation.js").StoredAllocationVersion} version
    */
   async function resolveVersionPayload(context, grossPerMonthCents, version) {
-    const lineRows = await linesForVersion(db, version.id);
+    const [lineRows, stageGoalRows] = await Promise.all([
+      linesForVersion(db, version.id),
+      stageGoalsForVersion(db, version.id),
+    ]);
     return {
-      version: serializeVersion(version, lineRows),
-      result: computeVersionAllocation(context, grossPerMonthCents, lineRows),
+      version: serializeVersion(version, lineRows, { stageGoalRows }),
+      result: computeVersionAllocation(context, grossPerMonthCents, lineRows, stageGoalRows),
     };
   }
 

@@ -4,7 +4,7 @@ import {
   LayoutDashboard,
   Landmark,
   Receipt,
-  Settings as SettingsIcon,
+  ShieldCheck,
   ShoppingBag,
   Target,
   TrendingUp,
@@ -32,10 +32,13 @@ export const NAV_ITEMS = [
   { to: "/projections", label: "Projections", icon: TrendingUp, phase: "09", chord: "p" },
   { to: "/calendar", label: "Calendar", icon: CalendarDays, phase: "06", chord: "c" },
   { to: "/accounts", label: "Accounts", icon: Landmark, phase: "04", chord: "a" },
-  // /settings/users is one of six tabs on the same Settings page (phase 03's
-  // Users/Devices/Sessions/Invites, phase 04's People and Pay schedules) —
-  // this nav entry just points at the first one; see settings-page.jsx.
-  { to: "/settings/users", label: "Settings", icon: SettingsIcon, phase: "03", chord: "s" },
+  // The old "Settings" entry, renamed to what it always was: user and
+  // household administration. Pay schedules moved out to /income (they are
+  // income, not admin) and the theme preference moved into the sidebar's
+  // Settings dropdown, which is a menu rather than a destination — so
+  // nothing in NAV_ITEMS points at /settings any more. "m" for adMin: "a"
+  // is Accounts and "s" no longer names a page.
+  { to: "/admin/users", label: "Admin", icon: ShieldCheck, phase: "03", chord: "m" },
 ];
 
 // Routes that are deliberately NOT in NAV_ITEMS but still need a name in the

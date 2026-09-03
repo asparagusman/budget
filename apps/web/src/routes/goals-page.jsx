@@ -29,14 +29,29 @@ import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select.jsx";
 import { Textarea } from "@/components/ui/textarea.jsx";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip.jsx";
-import { Chart } from "@/components/chart.jsx";
+import { Area, CartesianGrid, ComposedChart, Line, XAxis, YAxis } from "recharts";
+import {
+  AXIS,
+  Chart,
+  ChartTooltip,
+  MoneyTooltip,
+  SERIES,
+  TIME_AXIS,
+  isoToMs,
+  useChartMotion,
+  useMoneyTick,
+  useTimeAxis,
+} from "@/components/chart.jsx";
+import { DatePicker } from "@/components/date-picker.jsx";
 import { Delta } from "@/components/delta.jsx";
 import { EmptyState } from "@/components/empty-state.jsx";
+import { CardsSkeleton } from "@/components/loading.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
 import { Money } from "@/components/money.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
 import { QuickBalanceSheet } from "@/components/quick-balance-sheet.jsx";
 import { StatTile } from "@/components/stat-tile.jsx";
+import { useConfirm } from "@/components/confirm-dialog.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
 import { registerCommands } from "@/lib/commands.js";
@@ -255,75 +270,42 @@ function EtaAndRequired({ goal, summary }) {
  */
 function GoalCurve({ goal, summary }) {
   const { currency, locale } = useSettings();
+  const moneyTick = useMoneyTick();
+  const motion = useChartMotion();
 
-  const option = useMemo(
-    () =>
-      /** @param {import("@/components/chart.jsx").ChartTokens} tokens */
-      (tokens) => {
-        const dates = goal.curve.map((p) => p.date);
-        const paceLine =
-          goal.goal.targetDate && goal.curve[0]
-            ? [
-                [goal.curve[0].date, goal.currentBalanceCents / 100],
-                [goal.goal.targetDate, goal.targetCents / 100],
-              ]
-            : null;
+  // Recharts draws every series from ONE row array, so the pace line is
+  // computed per row by interpolating between today's balance and the
+  // target rather than being its own two-point series. Same straight line,
+  // and it now reads in the tooltip at every date instead of only at its
+  // two ends. It stops at the target date (or at the end of the curve,
+  // whichever comes first) — past that date there is no pace left to keep.
+  const rows = useMemo(() => {
+    const targetDollars = goal.targetCents / 100;
+    const startMs = goal.curve[0] ? isoToMs(goal.curve[0].date) : null;
+    const targetMs = goal.goal.targetDate ? isoToMs(goal.goal.targetDate) : null;
+    const startDollars = goal.currentBalanceCents / 100;
+    const span = startMs !== null && targetMs !== null ? targetMs - startMs : 0;
 
-        return {
-          grid: { top: 16, left: 8, right: 12, bottom: 8, containLabel: true },
-          xAxis: { type: "time" },
-          yAxis: { type: "value" },
-          tooltip: {
-            trigger: "axis",
-            /** @param {{ seriesName: string, value: [string, number] }[]} params */
-            formatter: (params) =>
-              params
-                .map(
-                  (p) =>
-                    `${p.seriesName}: ${new Intl.NumberFormat(locale, { style: "currency", currency }).format(p.value[1])}`,
-                )
-                .join("<br/>"),
-          },
-          series: [
-            {
-              type: "line",
-              name: "Projected",
-              data: goal.curve.map((p) => [p.date, p.projectedCents / 100]),
-              smooth: true,
-              showSymbol: false,
-              lineStyle: { width: 2, color: tokens.series[0] },
-              itemStyle: { color: tokens.series[0] },
-              areaStyle: { color: tokens.accentSoft, opacity: 0.5 },
-            },
-            {
-              type: "line",
-              name: "Target",
-              data: dates.map((date) => [date, goal.targetCents / 100]),
-              showSymbol: false,
-              lineStyle: { type: "dashed", width: 1.5, color: tokens.series[2] },
-              itemStyle: { color: tokens.series[2] },
-            },
-            ...(paceLine
-              ? [
-                  {
-                    type: "line",
-                    name: "Pace to target date",
-                    data: paceLine,
-                    showSymbol: false,
-                    lineStyle: { type: "dotted", width: 1.5, color: tokens.series[3] },
-                    itemStyle: { color: tokens.series[3] },
-                  },
-                ]
-              : []),
-          ],
-        };
-      },
-    [goal, currency, locale],
-  );
+    return goal.curve.map((point) => {
+      const t = isoToMs(point.date);
+      const onPace =
+        startMs !== null && targetMs !== null && span > 0 && t <= targetMs
+          ? startDollars + ((targetDollars - startDollars) * (t - startMs)) / span
+          : null;
+      return {
+        t,
+        label: formatIsoDate(point.date, locale),
+        projected: point.projectedCents / 100,
+        target: targetDollars,
+        pace: onPace,
+      };
+    });
+  }, [goal, locale]);
+
+  const timeAxis = useTimeAxis(rows[0]?.t ?? 0, rows[rows.length - 1]?.t ?? 0);
 
   return (
     <Chart
-      option={option}
       height={160}
       ariaLabel={`Projected balance for ${goal.goal.name} against a target of ${formatMoney(goal.targetCents, { currency, locale })}, currently ${formatMoney(goal.currentBalanceCents, { currency, locale })}.`}
       dataTable={{
@@ -340,7 +322,48 @@ function GoalCurve({ goal, summary }) {
       emptyDescription={
         goal.isFunded ? "This goal is already at its target." : "Fund this account from an allocation line to see a curve."
       }
-    />
+      config={{
+        projected: { label: "Projected", color: SERIES[0] },
+        target: { label: "Target", color: SERIES[2] },
+        pace: { label: "Pace to target date", color: SERIES[3] },
+      }}
+    >
+      <ComposedChart data={rows} margin={{ top: 16, right: 12, bottom: 0, left: 0 }}>
+        <CartesianGrid vertical={false} />
+        <XAxis dataKey="t" {...AXIS} {...TIME_AXIS} {...timeAxis} minTickGap={32} />
+        <YAxis {...AXIS} width={56} tickFormatter={moneyTick} />
+        <ChartTooltip content={<MoneyTooltip />} />
+        <Area
+          dataKey="projected"
+          type="monotone"
+          stroke="var(--color-projected)"
+          fill="var(--color-projected)"
+          fillOpacity={0.15}
+          strokeWidth={2}
+          dot={false}
+          {...motion}
+        />
+        <Line
+          dataKey="target"
+          type="monotone"
+          stroke="var(--color-target)"
+          strokeWidth={1.5}
+          strokeDasharray="5 4"
+          dot={false}
+          {...motion}
+        />
+        <Line
+          dataKey="pace"
+          type="linear"
+          stroke="var(--color-pace)"
+          strokeWidth={1.5}
+          strokeDasharray="2 3"
+          dot={false}
+          connectNulls={false}
+          {...motion}
+        />
+      </ComposedChart>
+    </Chart>
   );
 }
 
@@ -614,7 +637,7 @@ function GoalFormDialog({ open, onOpenChange, accounts, editing, submitting, onS
             htmlFor="goal-date"
             hint="Optional. Without one you still get an ETA — a date is what makes a required contribution meaningful."
           >
-            <Input id="goal-date" type="date" value={targetDate} onChange={(e) => setTargetDate(e.target.value)} />
+            <DatePicker id="goal-date" value={targetDate} onChange={setTargetDate} clearable placeholder="No target date" />
           </FieldRow>
           {editing ? (
             <FieldRow label="Status" htmlFor="goal-status">
@@ -659,6 +682,7 @@ function GoalFormDialog({ open, onOpenChange, accounts, editing, submitting, onS
  */
 export function GoalsPage() {
   const navigate = useNavigate();
+  const confirm = useConfirm();
   const queryClient = useQueryClient();
   const today = useMemo(todayIso, []);
 
@@ -862,7 +886,9 @@ export function GoalsPage() {
         </div>
       ) : null}
 
-      {isLoading ? null : goals.length === 0 ? (
+      {isLoading ? (
+        <CardsSkeleton cards={3} height={280} label="Loading goals" />
+      ) : goals.length === 0 ? (
         <EmptyState
           icon={TargetIcon}
           title="No goals yet"
@@ -890,7 +916,14 @@ export function GoalsPage() {
                 setEditing(goal);
                 setFormOpen(true);
               }}
-              onDelete={() => deleteGoal.mutate(goal.goal.id)}
+              onDelete={async () => {
+                const ok = await confirm({
+                  title: `Delete "${goal.goal.name}"?`,
+                  description: "The goal and its target go; the account and its balance history stay.",
+                  confirmLabel: "Delete",
+                });
+                if (ok) deleteGoal.mutate(goal.goal.id);
+              }}
               onUpdateBalance={() => setBalanceFor({ accountId: goal.goal.accountId })}
             />
           ))}

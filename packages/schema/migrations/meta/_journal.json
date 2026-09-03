@@ -64,6 +64,34 @@
       "when": 1787745586653,
       "tag": "0008_demonic_spirit",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1788240131470,
+      "tag": "0009_classy_logan",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1788330795615,
+      "tag": "0010_boring_lake",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1788355661179,
+      "tag": "0011_young_red_skull",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1788355820657,
+      "tag": "0012_sleepy_shard",
+      "breakpoints": true
     }
   ]
 }

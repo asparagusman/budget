@@ -41,3 +41,43 @@ export const importCommitSchema = z.object({
 });
 
 /** @typedef {z.infer<typeof importCommitSchema>} ImportCommitInput */
+
+// The source workbook is ~40kB. Ten megabytes is far more headroom than any
+// household spreadsheet needs and still small enough to parse in memory
+// without thinking about it.
+export const MAX_IMPORT_UPLOAD_BYTES = 10 * 1024 * 1024;
+
+// The multipart body of both import endpoints.
+//
+// Declaring it as a schema rather than reaching into `c.req.parseBody()` by
+// hand is what lets the Hono RPC client type these two calls like every other
+// endpoint: `hc` infers a route's body from its validator, and a route with
+// no validator has nothing to infer from — which is why apps/web used to talk
+// to the importer through a hand-written `fetch` and a hand-written response
+// typedef (todo.md `[P11-14]`).
+//
+// `z.instanceof(File)` rather than a looser shape: Hono parses a multipart
+// field into either a string or a File, and a workbook that arrived as a
+// string is a bug in the caller, not a file to try reading.
+const workbookFile = z
+  .instanceof(File, { message: "Attach a .xlsx file to import." })
+  .refine((file) => file.size > 0, { message: "Attach a .xlsx file to import." })
+  .refine((file) => file.size <= MAX_IMPORT_UPLOAD_BYTES, {
+    message: `The limit is ${MAX_IMPORT_UPLOAD_BYTES / 1024 / 1024}MB.`,
+  });
+
+// POST /import/preview
+export const importPreviewFormSchema = z.object({ file: workbookFile });
+
+/** @typedef {z.infer<typeof importPreviewFormSchema>} ImportPreviewForm */
+
+// POST /import/commit. `selection` is JSON in a string field because a
+// multipart part carries no type of its own; it is parsed and validated
+// against `importCommitSchema` in the handler, which is where a malformed
+// one gets its own message.
+export const importCommitFormSchema = z.object({
+  file: workbookFile,
+  selection: z.string().min(1, "Missing the import selection."),
+});
+
+/** @typedef {z.infer<typeof importCommitFormSchema>} ImportCommitForm */

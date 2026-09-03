@@ -8,7 +8,10 @@ import { ThemeToggle } from "@/components/theme-toggle.jsx";
  */
 export function AuthLayout() {
   return (
-    <div className="flex min-h-screen flex-col bg-bg">
+    // `h-dvh` + its own overflow, not `min-h-screen`: the document no longer
+    // scrolls (see styles/app.css), so every frame has to carry its own
+    // scroller or a tall viewport clips it.
+    <div className="flex h-dvh flex-col overflow-y-auto bg-bg">
       <div className="flex flex-1 items-center justify-center p-4">
         <Outlet />
       </div>

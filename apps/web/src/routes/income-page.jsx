@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { toCents } from "@budget/engine";
+import { addDaysIso, projectPaydays, toCents } from "@budget/engine";
 import {
   AlertTriangleIcon,
+  CalendarClockIcon,
   CalendarRangeIcon,
   CopyIcon,
   GitCompareIcon,
@@ -30,16 +31,20 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { Switch } from "@/components/ui/switch.jsx";
 import { Textarea } from "@/components/ui/textarea.jsx";
 import { DataList, DataListRow } from "@/components/data-list.jsx";
+import { DatePicker } from "@/components/date-picker.jsx";
 import { Delta } from "@/components/delta.jsx";
 import { EmptyState } from "@/components/empty-state.jsx";
+import { CardsSkeleton, ListSkeleton, PanelSkeleton } from "@/components/loading.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
 import { Money } from "@/components/money.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
+import { useConfirm } from "@/components/confirm-dialog.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
 import { registerCommands } from "@/lib/commands.js";
 import { CADENCES, CADENCE_LABELS } from "@/lib/constants.js";
 import { formatIsoDate, todayIso } from "@/lib/dates.js";
+import { useSettings } from "@/lib/settings.jsx";
 import { cn } from "@/lib/utils.js";
 
 /** @import { Cadence, Cents } from "@budget/engine" */
@@ -541,7 +546,7 @@ function ScheduleEntryFormDialog({ open, onOpenChange, entry, variants, submitti
             <p className="text-sm text-text-muted">{variantName(variants, entry.variantId)}</p>
           )}
           <FieldRow label="Starts on" htmlFor="entry-starts">
-            <Input id="entry-starts" type="date" value={startsOn} onChange={(e) => setStartsOn(e.target.value)} />
+            <DatePicker id="entry-starts" value={startsOn} onChange={setStartsOn} />
           </FieldRow>
           <FieldRow
             label="Open-ended"
@@ -552,7 +557,7 @@ function ScheduleEntryFormDialog({ open, onOpenChange, entry, variants, submitti
           </FieldRow>
           {!openEnded ? (
             <FieldRow label="Ends on" htmlFor="entry-ends">
-              <Input id="entry-ends" type="date" value={endsOn} onChange={(e) => setEndsOn(e.target.value)} />
+              <DatePicker id="entry-ends" value={endsOn} onChange={setEndsOn} />
             </FieldRow>
           ) : null}
           <FieldRow label="Notes" htmlFor="entry-notes" hint="Optional.">
@@ -903,8 +908,356 @@ function VariantDetailSheet(props) {
  * and a comparison tool — no allocation, no tax math, no leave-entitlement
  * tracking (phases/05-income.md "Non-goals").
  */
+/** @typedef {{ id: string, personId: string, anchorDate: string, cadence: import("@budget/engine").Cadence, isPrimary: boolean }} PaySchedule */
+/** @typedef {{ personId: string, anchorDate: string, cadence: import("@budget/engine").Cadence, isPrimary: boolean }} PayScheduleFormData */
+
+/**
+ * @param {{
+ *   open: boolean,
+ *   onOpenChange: (open: boolean) => void,
+ *   schedule: PaySchedule | null,
+ *   people: { id: string, name: string }[],
+ *   submitting: boolean,
+ *   onSubmit: (data: PayScheduleFormData) => Promise<void>,
+ * }} props
+ */
+function PayScheduleFormDialog({ open, onOpenChange, schedule, people, submitting, onSubmit }) {
+  const { locale } = useSettings();
+  const [personId, setPersonId] = useState("");
+  const [anchorDate, setAnchorDate] = useState(todayIso());
+  const [cadence, setCadence] = useState(/** @type {import("@budget/engine").Cadence} */ ("fortnightly"));
+  const [isPrimary, setIsPrimary] = useState(false);
+  const [error, setError] = useState(/** @type {string | null} */ (null));
+
+  useEffect(() => {
+    if (!open) return;
+    setPersonId(schedule?.personId ?? people[0]?.id ?? "");
+    setAnchorDate(schedule?.anchorDate ?? todayIso());
+    setCadence(schedule?.cadence ?? "fortnightly");
+    setIsPrimary(schedule?.isPrimary ?? false);
+    setError(null);
+  }, [open, schedule, people]);
+
+  // Computed entirely client-side — @budget/engine is pure and zero-I/O, so
+  // there's no reason to round-trip to the API just to preview what the
+  // operator hasn't saved yet (phases/04-accounts-people.md wants this
+  // preview live "as the operator types").
+  const preview = useMemo(() => {
+    if (!anchorDate) return [];
+    try {
+      return projectPaydays({ anchorDate, cadence }, { from: anchorDate, to: addDaysIso(anchorDate, 3660) }).slice(
+        0,
+        6,
+      );
+    } catch {
+      return [];
+    }
+  }, [anchorDate, cadence]);
+
+  /** @param {import("react").FormEvent} e */
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setError(null);
+    if (!schedule && !personId) {
+      setError("Choose a person.");
+      return;
+    }
+    // Always includes `personId`, even when editing — the PATCH schema
+    // (zod/pay-schedules.js) has no such field, so Zod's default "strip
+    // unknown keys" behaviour drops it there; one uniform shape here instead
+    // of a create/update union.
+    const data = { personId, anchorDate, cadence, isPrimary };
+    try {
+      await onSubmit(data);
+      onOpenChange(false);
+    } catch (err) {
+      setError(/** @type {Error} */ (err).message);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{schedule ? "Edit pay schedule" : "Add pay schedule"}</DialogTitle>
+          <DialogDescription>Any known payday — the rest of the series is derived from it.</DialogDescription>
+        </DialogHeader>
+        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+          {!schedule ? (
+            <FieldRow label="Person" htmlFor="schedule-person">
+              <Select value={personId} onValueChange={setPersonId}>
+                <SelectTrigger id="schedule-person" className="w-full">
+                  <SelectValue placeholder="Choose a person" />
+                </SelectTrigger>
+                <SelectContent>
+                  {people.map((p) => (
+                    <SelectItem key={p.id} value={p.id}>
+                      {p.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </FieldRow>
+          ) : null}
+          <FieldRow label="Anchor date" htmlFor="schedule-anchor" hint="Any payday you know for certain.">
+            <DatePicker id="schedule-anchor" value={anchorDate} onChange={setAnchorDate} />
+          </FieldRow>
+          <FieldRow label="Cadence" htmlFor="schedule-cadence">
+            <Select value={cadence} onValueChange={(value) => setCadence(/** @type {import("@budget/engine").Cadence} */ (value))}>
+              <SelectTrigger id="schedule-cadence" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {CADENCES.map((c) => (
+                  <SelectItem key={c} value={c}>
+                    {CADENCE_LABELS[c]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </FieldRow>
+          <FieldRow
+            label="Primary schedule"
+            htmlFor="schedule-primary"
+            hint="The schedule that defines your household's transfer cycle. Only one may be set."
+          >
+            <Switch id="schedule-primary" checked={isPrimary} onCheckedChange={setIsPrimary} />
+          </FieldRow>
+          {preview.length > 0 ? (
+            <FieldRow label="Next paydays">
+              <div className="flex flex-wrap gap-1.5">
+                {preview.map((d) => (
+                  <Badge key={d} variant="outline">
+                    {formatIsoDate(d, locale)}
+                  </Badge>
+                ))}
+              </div>
+            </FieldRow>
+          ) : null}
+          {error ? <p className="text-sm text-negative">{error}</p> : null}
+          <DialogFooter>
+            <Button type="submit" disabled={submitting}>
+              {submitting ? "Saving…" : "Save"}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * Who gets paid, how often, and which schedule defines the household's
+ * transfer cycle. This was a tab on the old /settings page; it is income,
+ * and it belongs beside the income it describes — every per-pay figure on
+ * this screen is quoted in the cadence set here.
+ *
+ * `people` and `schedules` come from the page rather than from queries of
+ * this panel's own: IncomePage already holds both, and a second `useQuery`
+ * on the same keys would only be the same cache read written twice.
+ *
+ * @param {{ people: Person[], schedules: PaySchedule[], isLoading: boolean }} props
+ */
+function PaySchedulesPanel({ people, schedules, isLoading }) {
+  const confirm = useConfirm();
+  const { locale } = useSettings();
+  const queryClient = useQueryClient();
+  const [formOpen, setFormOpen] = useState(false);
+  const [editing, setEditing] = useState(/** @type {PaySchedule | null} */ (null));
+
+  const createMutation = useMutation({
+    mutationFn: async (/** @type {PayScheduleFormData} */ data) => {
+      const res = await api["pay-schedules"].$post({ json: data });
+      if (!res.ok) throw new Error(await readApiError(res));
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["pay-schedules"] });
+      toast.success("Pay schedule added.");
+    },
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: async (/** @type {{ id: string, data: PayScheduleFormData }} */ { id, data }) => {
+      const res = await api["pay-schedules"][":id"].$patch({ param: { id }, json: data });
+      if (!res.ok) throw new Error(await readApiError(res));
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["pay-schedules"] });
+      toast.success("Pay schedule updated.");
+    },
+  });
+
+  const archiveMutation = useMutation({
+    mutationFn: async (/** @type {string} */ id) => {
+      const res = await api["pay-schedules"][":id"].$delete({ param: { id } });
+      if (!res.ok) throw new Error(await readApiError(res));
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["pay-schedules"] });
+      toast.success("Pay schedule archived.");
+    },
+    onError: (err) => toast.error(err.message),
+  });
+
+  useEffect(
+    () =>
+      registerCommands([
+        {
+          id: "pay-schedules:add",
+          group: "Actions",
+          label: "Add pay schedule",
+          icon: CalendarClockIcon,
+          run: () => {
+            setEditing(null);
+            setFormOpen(true);
+          },
+        },
+      ]),
+    [],
+  );
+
+  /** @param {string} personId */
+  function personName(personId) {
+    return people.find((p) => p.id === personId)?.name ?? "Unknown person";
+  }
+
+  /** @param {{ anchorDate: string, cadence: import("@budget/engine").Cadence }} schedule */
+  function nextPayday(schedule) {
+    try {
+      const from = todayIso();
+      const [next] = projectPaydays(schedule, { from, to: addDaysIso(from, 400) });
+      return next ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  return (
+    <>
+      {/* The section's own control sits on its heading row rather than in
+          the page control bar above: that bar already carries two buttons
+          and a third overflows it at 375px. */}
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h2 id="pay-schedules" className="text-lg font-semibold text-text">
+            Pay schedules
+          </h2>
+          <p className="mt-1 text-sm text-text-muted">
+            One known payday per person. Everything on this page quoted &ldquo;per pay&rdquo; uses the
+            primary schedule&apos;s cadence.
+          </p>
+        </div>
+        <Button
+          variant="outline"
+          className="shrink-0"
+          onClick={() => {
+            setEditing(null);
+            setFormOpen(true);
+          }}
+          disabled={people.length === 0}
+          title={people.length === 0 ? "Add a person first." : undefined}
+        >
+          <PlusIcon />
+          Add pay schedule
+        </Button>
+      </div>
+
+      {isLoading ? (
+        <ListSkeleton rows={2} label="Loading pay schedules" />
+      ) : schedules.length === 0 ? (
+        <EmptyState
+          icon={CalendarClockIcon}
+          title="No pay schedules yet"
+          description="Add one known payday per person — the rest of the series, including any 27-payday years, is derived from it."
+          action={
+            <Button
+              onClick={() => {
+                setEditing(null);
+                setFormOpen(true);
+              }}
+              disabled={people.length === 0}
+              title={people.length === 0 ? "Add a person in Admin first." : undefined}
+            >
+              <PlusIcon />
+              Add pay schedule
+            </Button>
+          }
+        />
+      ) : (
+        <DataList>
+          {schedules.map((schedule) => {
+            const next = nextPayday(schedule);
+            return (
+              <DataListRow
+                key={schedule.id}
+                primary={
+                  <span className="flex items-center gap-2">
+                    {personName(schedule.personId)}
+                    {schedule.isPrimary ? <Badge variant="secondary">Primary</Badge> : null}
+                  </span>
+                }
+                secondary={`${CADENCE_LABELS[schedule.cadence]} · anchored ${formatIsoDate(schedule.anchorDate, locale)}${next ? ` · next ${formatIsoDate(next, locale)}` : ""}`}
+                trailing={
+                  <div className="flex items-center gap-1">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => {
+                        setEditing(schedule);
+                        setFormOpen(true);
+                      }}
+                    >
+                      Edit
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="text-negative"
+                      onClick={async () => {
+                        const ok = await confirm({
+                          title: `Archive ${personName(schedule.personId)}'s pay schedule?`,
+                          description: schedule.isPrimary
+                            ? "This is the primary schedule — archiving it leaves every per-pay figure in the app without a cadence until another is made primary."
+                            : "It stops being selectable. Anything already resolved against it is kept.",
+                          confirmLabel: "Archive",
+                        });
+                        if (ok) archiveMutation.mutate(schedule.id);
+                      }}
+                    >
+                      Archive
+                    </Button>
+                  </div>
+                }
+              />
+            );
+          })}
+        </DataList>
+      )}
+
+      <PayScheduleFormDialog
+        open={formOpen}
+        onOpenChange={setFormOpen}
+        schedule={editing}
+        people={people}
+        submitting={createMutation.isPending || updateMutation.isPending}
+        onSubmit={async (data) => {
+          if (editing) {
+            await updateMutation.mutateAsync({ id: editing.id, data });
+          } else {
+            await createMutation.mutateAsync(data);
+          }
+        }}
+      />
+    </>
+  );
+}
+
 export function IncomePage() {
   const navigate = useNavigate();
+  const confirm = useConfirm();
   const search = useSearch({ strict: false });
   const queryClient = useQueryClient();
 
@@ -962,14 +1315,15 @@ export function IncomePage() {
     queryFn: async () => {
       const res = await api["pay-schedules"].$get();
       if (!res.ok) throw new Error(await readApiError(res));
-      return (await res.json()).paySchedules;
+      return /** @type {PaySchedule[]} */ ((await res.json()).paySchedules);
     },
   });
 
   const variants = variantsQuery.data?.variants ?? [];
   const people = peopleQuery.data ?? [];
   const schedule = scheduleQuery.data ?? [];
-  const primarySchedule = (payScheduleQuery.data ?? []).find((s) => s.isPrimary) ?? null;
+  const paySchedules = payScheduleQuery.data ?? [];
+  const primarySchedule = paySchedules.find((s) => s.isPrimary) ?? null;
   const payCadenceLabel = primarySchedule ? CADENCE_LABELS[primarySchedule.cadence] : null;
   const overrideVariant = search.variant ? (variants.find((v) => v.id === search.variant) ?? null) : null;
 
@@ -1089,6 +1443,30 @@ export function IncomePage() {
     onError: (err) => toast.error(err.message),
   });
 
+  // Both are reached from two places each — the card grid and the detail
+  // sheet — so the wording of the confirmation lives in one place rather
+  // than being retyped per call site and drifting.
+  /** @param {{ id: string, name: string }} variant */
+  async function confirmArchiveVariant(variant) {
+    const ok = await confirm({
+      title: `Archive "${variant.name}"?`,
+      description: "It stops being selectable and stops resolving from the schedule. Its lines are kept.",
+      confirmLabel: "Archive",
+    });
+    if (ok) archiveVariant.mutate(variant.id);
+    return ok;
+  }
+
+  /** @param {string} id */
+  async function confirmDeleteLine(id) {
+    const ok = await confirm({
+      title: "Delete this income line?",
+      description: "Gross income for this variant drops by its amount, and every allocation resolved from it moves.",
+      confirmLabel: "Delete",
+    });
+    if (ok) deleteLine.mutate(id);
+  }
+
   useEffect(
     () =>
       registerCommands([
@@ -1127,16 +1505,29 @@ export function IncomePage() {
       <PageHeader
         title="Income"
         description="Named income scenarios and the calendar that says which one is active."
+        // One control bar at the top carrying every action on this screen,
+        // rather than an "Add entry" button buried beside the Schedule
+        // heading halfway down.
         actions={
-          <Button
-            onClick={() => {
-              setEditingVariant(null);
-              setVariantFormOpen(true);
-            }}
-          >
-            <PlusIcon />
-            Add variant
-          </Button>
+          <>
+            <Button
+              variant="outline"
+              onClick={() => setScheduleForm({ entry: null })}
+              disabled={variants.length === 0}
+            >
+              <PlusIcon />
+              Add schedule entry
+            </Button>
+            <Button
+              onClick={() => {
+                setEditingVariant(null);
+                setVariantFormOpen(true);
+              }}
+            >
+              <PlusIcon />
+              Add variant
+            </Button>
+          </>
         }
       />
 
@@ -1157,14 +1548,56 @@ export function IncomePage() {
       {!payCadenceLabel && !payScheduleQuery.isLoading ? (
         <div className="rounded-(--radius-card) bg-surface-muted p-3 text-sm text-text-muted">
           No primary pay schedule is set, so per-pay figures aren&apos;t available yet — only per-month and per-year.{" "}
-          <Button variant="link" className="h-auto p-0" onClick={() => navigate({ to: "/settings/pay-schedules" })}>
-            Set one in Settings
+          <Button
+            variant="link"
+            className="h-auto p-0"
+            onClick={() => document.getElementById("pay-schedules")?.scrollIntoView({ behavior: "smooth" })}
+          >
+            Set one below
           </Button>
           .
         </div>
       ) : null}
 
-      {isLoading ? null : variants.length === 0 ? (
+      {/* Sits above variants: which variant is live on a given date is the
+          more pertinent question, and the variants below are what it selects
+          between. Named "Variant schedule" rather than plain "Schedule"
+          because pay schedules are on this page too, and they are a
+          different calendar entirely. */}
+      <h2 className="text-lg font-semibold text-text">Variant schedule</h2>
+
+      {scheduleQuery.isLoading ? (
+        <PanelSkeleton height={140} label="Loading variant schedule" />
+      ) : schedule.length === 0 ? (
+        <EmptyState
+          icon={CalendarRangeIcon}
+          title="No schedule yet"
+          description="Add an entry so the app knows which variant is active on any given date. Until then, every date is a gap."
+        />
+      ) : (
+        <>
+          <div className="hidden md:block">
+            <ScheduleTimelineDesktop
+              entries={schedule}
+              variants={variants}
+              onEditEntry={(entry) => setScheduleForm({ entry })}
+            />
+          </div>
+          <div className="md:hidden">
+            <ScheduleTimelineMobile
+              entries={schedule}
+              variants={variants}
+              onEditEntry={(entry) => setScheduleForm({ entry })}
+            />
+          </div>
+        </>
+      )}
+
+      <h2 className="text-lg font-semibold text-text">Variants</h2>
+
+      {isLoading ? (
+        <CardsSkeleton cards={3} height={300} label="Loading income variants" />
+      ) : variants.length === 0 ? (
         <EmptyState
           icon={WalletIcon}
           title="No income variants yet"
@@ -1191,10 +1624,10 @@ export function IncomePage() {
                   setVariantFormOpen(true);
                 }}
                 onDuplicate={() => duplicateVariant.mutate(variant.id)}
-                onArchive={() => archiveVariant.mutate(variant.id)}
+                onArchive={() => confirmArchiveVariant(variant)}
                 onAddLine={() => setLineForm({ variantId: variant.id, line: null })}
                 onEditLine={(line) => setLineForm({ variantId: variant.id, line })}
-                onDeleteLine={(id) => deleteLine.mutate(id)}
+                onDeleteLine={confirmDeleteLine}
               />
             ))}
           </div>
@@ -1224,50 +1657,21 @@ export function IncomePage() {
         </>
       )}
 
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-text">Schedule</h2>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => setScheduleForm({ entry: null })}
-          disabled={variants.length === 0}
-        >
-          <PlusIcon />
-          Add entry
-        </Button>
-      </div>
-
-      {scheduleQuery.isLoading ? null : schedule.length === 0 ? (
-        <EmptyState
-          icon={CalendarRangeIcon}
-          title="No schedule yet"
-          description="Add an entry so the app knows which variant is active on any given date. Until then, every date is a gap."
-        />
-      ) : (
-        <>
-          <div className="hidden md:block">
-            <ScheduleTimelineDesktop
-              entries={schedule}
-              variants={variants}
-              onEditEntry={(entry) => setScheduleForm({ entry })}
-            />
-          </div>
-          <div className="md:hidden">
-            <ScheduleTimelineMobile
-              entries={schedule}
-              variants={variants}
-              onEditEntry={(entry) => setScheduleForm({ entry })}
-            />
-          </div>
-        </>
-      )}
-
       {variants.length >= 2 ? (
         <div id="income-comparison" className="flex flex-col gap-3">
           <h2 className="text-lg font-semibold text-text">Compare variants</h2>
           <ComparisonPanel variants={variants} people={people} payCadenceLabel={payCadenceLabel} />
         </div>
       ) : null}
+
+      {/* Last on the page on purpose: set-once configuration, below the
+          day-to-day reading order (active today → variant schedule →
+          variants) that adjustment #13 settled. */}
+      <PaySchedulesPanel
+        people={people}
+        schedules={paySchedules}
+        isLoading={payScheduleQuery.isLoading}
+      />
 
       <VariantFormDialog
         open={variantFormOpen}
@@ -1314,8 +1718,18 @@ export function IncomePage() {
         onDelete={
           scheduleForm?.entry
             ? () => {
-                if (scheduleForm.entry) deleteSchedule.mutate(scheduleForm.entry.id);
-                setScheduleForm(null);
+                const entry = scheduleForm.entry;
+                if (!entry) return;
+                confirm({
+                  title: "Delete this schedule entry?",
+                  description:
+                    "The window it covers stops resolving to its variant — dates inside it fall through to whatever else covers them, or to nothing.",
+                  confirmLabel: "Delete",
+                }).then((ok) => {
+                  if (!ok) return;
+                  deleteSchedule.mutate(entry.id);
+                  setScheduleForm(null);
+                });
               }
             : null
         }
@@ -1333,13 +1747,14 @@ export function IncomePage() {
           setVariantFormOpen(true);
         }}
         onDuplicate={() => detailVariant && duplicateVariant.mutate(detailVariant.id)}
-        onArchive={() => {
-          if (detailVariant) archiveVariant.mutate(detailVariant.id);
+        onArchive={async () => {
+          if (!detailVariant) return;
+          if (!(await confirmArchiveVariant(detailVariant))) return;
           setDetailVariant(null);
         }}
         onAddLine={() => detailVariant && setLineForm({ variantId: detailVariant.id, line: null })}
         onEditLine={(line) => detailVariant && setLineForm({ variantId: detailVariant.id, line })}
-        onDeleteLine={(id) => deleteLine.mutate(id)}
+        onDeleteLine={confirmDeleteLine}
       />
     </>
   );

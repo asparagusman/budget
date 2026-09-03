@@ -56,9 +56,22 @@ script, use `exec`: `pnpm api exec node src/scripts/auth-invite.js`.
 `node --watch`, so a change to `apps/api` is live on save. Rebuilding images is only for testing a
 prod-like build or deploying.
 
-`pnpm dev` is safe to run over a broken session: it sweeps this repo's leftover dev processes,
-stops any `api`/`web` container holding a port, and makes sure the db container is up with 5432
-published, before starting anything. If it ever refuses, `pnpm status` says why.
+`pnpm dev` is safe to run over a broken session, and over a machine that has just booted. Before
+starting anything it:
+
+1. sweeps this repo's leftover dev processes,
+2. **starts Docker Desktop if it isn't running**, and waits for the engine,
+3. stops any `api`/`web` container holding a port,
+4. brings the db up and waits for it to actually accept a connection on 5432,
+5. **applies any pending migrations**, the same guarantee compose's one-shot `migrate` service
+   gives the deployed stack — so pulling a branch that adds a column can't leave you with an api
+   that starts cleanly and then 500s every request.
+
+If any of those can't be completed it **refuses to start** rather than launching an api that
+cannot work — those failures surface in the browser as a wall of CORS/NetworkError messages, or as
+Postgres `column ... does not exist` buried in a Drizzle stack trace, neither of which points
+anywhere near the real cause. `pnpm status` says what's up, what's held and whether Postgres is
+genuinely answering. `pnpm dev --no-db` skips steps 2, 4 and 5 if you really want it.
 
 <details>
 <summary>Why that sweep exists</summary>
@@ -190,9 +203,24 @@ repo currently has no `.d.ts` at all; adding one should feel like a defeat.
 
 ## Testing
 
-Vitest, colocated as `*.test.js`. `packages/engine` is the only package with a coverage bar: every
-exported function is tested, including golden fixtures transcribed from the source spreadsheet and
-property tests that assert exact cent reconciliation over randomised inputs.
+Vitest, colocated as `*.test.js`. `pnpm test` runs all three suites and needs nothing running —
+no database, no dev server, no environment variables.
+
+- **`packages/engine`** is the only package with a coverage bar: every exported function is tested,
+  including golden fixtures transcribed from the source spreadsheet and property tests that assert
+  exact cent reconciliation over randomised inputs.
+- **`apps/api`** tests that touch the database migrate a [PGlite](https://pglite.dev) instance per
+  file (`src/test/db.js`) — real Postgres compiled to WASM, so enums, `jsonb` and
+  `gen_random_uuid()` behave as they do in the container. `/dashboard` is checked against the
+  endpoints it aggregates rather than against hardcoded figures, since drifting apart from them is
+  the only failure that endpoint really has.
+- **`apps/web`** runs under jsdom (pinned to v25 — see its `vitest.config.js`). No snapshot tests:
+  the suites cover the allocation draft store, money formatting, the nav list, and the component
+  behaviour that has broken silently before.
+- No test depends on a file that is not in the repo. The importer runs against a workbook generated
+  by `apps/api/src/lib/import/__fixtures__/make-workbook.js`, which reproduces the source
+  spreadsheet's structure with invented figures; only the assertions about the real workbook's own
+  numbers are skipped where it is absent, and the suite says so out loud when it skips them.
 
 ---
 

@@ -32,6 +32,8 @@ export {
 export {
   projectInstances,
   billsContribution,
+  billWindowFigures,
+  sumWindowFigures,
   simulateBalance,
   requiredOpeningBalanceCents,
 } from "./bills.js";
@@ -39,14 +41,16 @@ export {
 /** @typedef {import("./bills.js").Bill} Bill */
 /** @typedef {import("./bills.js").BillInstance} BillInstance */
 /** @typedef {import("./bills.js").BalancePoint} BalancePoint */
+/** @typedef {import("./bills.js").WindowFigures} WindowFigures */
 
 export { resolveVariableBudget, trailingAverageCents } from "./variable-costs.js";
 /** @typedef {import("./variable-costs.js").VariableBudgetRow} VariableBudgetRow */
 
-export { computeAllocation, diffAllocations } from "./allocation.js";
+export { computeAllocation, diffAllocations, ALLOCATION_SECTIONS, sectionForStage } from "./allocation.js";
 /** @typedef {import("./allocation.js").Basis} Basis */
 /** @typedef {import("./allocation.js").AllocationLine} AllocationLine */
 /** @typedef {import("./allocation.js").AllocationInput} AllocationInput */
+/** @typedef {import("./allocation.js").StageGoal} StageGoal */
 /** @typedef {import("./allocation.js").ResolvedLine} ResolvedLine */
 /** @typedef {import("./allocation.js").StageResult} StageResult */
 /** @typedef {import("./allocation.js").Transfer} Transfer */

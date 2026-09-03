@@ -1,5 +1,5 @@
 import { addDaysIso, computeAllocation, equivalent, mustAt, mustGet, resolveVariant } from "@budget/engine";
-import { allocationLines, allocationVersions } from "@budget/schema";
+import { allocationLines, allocationStageGoals, allocationVersions } from "@budget/schema";
 import { and, desc, eq } from "drizzle-orm";
 import { computeContribution, projectActiveBills } from "./bills.js";
 import { computeVariantTotals, getPrimaryPaySchedule } from "./income.js";
@@ -12,6 +12,7 @@ import { summarizeVariableCosts } from "./variable-costs.js";
  *   id: string,
  *   versionId: string,
  *   stage: number,
+ *   category: string | null,
  *   label: string,
  *   basis: AllocationLine["basis"],
  *   value: number | null,
@@ -19,6 +20,19 @@ import { summarizeVariableCosts } from "./variable-costs.js";
  *   accountId: string,
  *   sortOrder: number,
  * }} StoredAllocationLine An `allocation_lines` row as Drizzle returns it.
+ *
+ * `category` is still on the row and is deliberately never read — see the
+ * column's own comment in packages/schema/src/tables/allocation.js. The three
+ * fixed sections replaced it.
+ */
+
+/**
+ * @typedef {{
+ *   id: string,
+ *   versionId: string,
+ *   stage: number,
+ *   goalPct: number,
+ * }} StoredAllocationStageGoal An `allocation_stage_goals` row.
  */
 
 /**
@@ -194,13 +208,20 @@ export function serializeLine(row) {
 }
 
 /**
+ * @param {StoredAllocationStageGoal} row
+ */
+export function serializeStageGoal(row) {
+  return { stage: row.stage, goalPct: row.goalPct };
+}
+
+/**
  * Timestamps go out as ISO strings rather than `Date`s: the RPC client reads
  * these back off `res.json()`, where a Date has already become a string
  * anyway — sending one keeps the type honest about what actually arrives.
  *
  * @param {StoredAllocationVersion} version
  * @param {StoredAllocationLine[]} lineRows
- * @param {{ createdByName?: string | null }} [extra]
+ * @param {{ createdByName?: string | null, stageGoalRows?: StoredAllocationStageGoal[] }} [extra]
  */
 export function serializeVersion(version, lineRows, extra = {}) {
   return {
@@ -215,6 +236,11 @@ export function serializeVersion(version, lineRows, extra = {}) {
     createdAt: version.createdAt.toISOString(),
     activatedAt: version.activatedAt ? version.activatedAt.toISOString() : null,
     lines: lineRows.map(serializeLine),
+    // Sent with the lines, always — the editor hydrates its section goals from
+    // the same response it hydrates its rows from. Defaults to empty rather
+    // than being omitted so a caller never has to distinguish "this version
+    // has no section goals" from "this response didn't say".
+    stageGoals: (extra.stageGoalRows ?? []).map(serializeStageGoal),
   };
 }
 
@@ -227,9 +253,10 @@ export function serializeVersion(version, lineRows, extra = {}) {
  * @param {AllocationContext} context
  * @param {Cents} grossPerMonthCents
  * @param {StoredAllocationLine[]} lineRows
+ * @param {StoredAllocationStageGoal[]} [stageGoalRows]
  * @returns {AllocationResult}
  */
-export function computeVersionAllocation(context, grossPerMonthCents, lineRows) {
+export function computeVersionAllocation(context, grossPerMonthCents, lineRows, stageGoalRows = []) {
   return computeAllocation({
     grossPerMonthCents,
     payCadence: context.payCadence,
@@ -240,6 +267,7 @@ export function computeVersionAllocation(context, grossPerMonthCents, lineRows) 
     // flagged — an empty string here would silently invent a destination.
     incomeLandingAccountId: /** @type {string} */ (context.incomeLandingAccountId),
     lines: toEngineLines(lineRows),
+    stageGoals: stageGoalRows.map(serializeStageGoal),
   });
 }
 
@@ -388,8 +416,9 @@ export async function resolveActiveAllocation(db, context) {
   }
 
   const version = mustGet(activeByPlan, plan.id, "active allocation version");
-  const [lineRows, grossPerMonthCents] = await Promise.all([
+  const [lineRows, stageGoalRows, grossPerMonthCents] = await Promise.all([
     linesForVersion(db, version.id),
+    stageGoalsForVersion(db, version.id),
     variantGrossPerMonthCents(db, plan.incomeVariantId),
   ]);
 
@@ -399,7 +428,9 @@ export async function resolveActiveAllocation(db, context) {
     // Without an income-landing account the engine has no destination for
     // money nobody allocated, so there is nothing to compute — the same guard
     // /allocation/compute makes, minus the 400: goals are still readable.
-    result: context.incomeLandingAccountId ? computeVersionAllocation(context, grossPerMonthCents, lineRows) : null,
+    result: context.incomeLandingAccountId
+      ? computeVersionAllocation(context, grossPerMonthCents, lineRows, stageGoalRows)
+      : null,
     grossPerMonthCents,
     /** @type {{ code: string, message: string } | null} */
     warning: context.incomeLandingAccountId
@@ -428,6 +459,39 @@ export async function linesForVersion(db, versionId) {
     where: (l, { eq: eqCol }) => eqCol(l.versionId, versionId),
     orderBy: (l, { asc }) => [asc(l.stage), asc(l.sortOrder)],
   });
+}
+
+/**
+ * A version's section goals. Loaded everywhere the lines are — the two are one
+ * plan, and a compute that had the lines but not the goals would report a
+ * section as having no target the operator can plainly see they set.
+ *
+ * @param {import("@budget/schema").Db | import("@budget/schema").Tx} db
+ * @param {string} versionId
+ */
+export async function stageGoalsForVersion(db, versionId) {
+  return db.query.allocationStageGoals.findMany({
+    where: (g, { eq: eqCol }) => eqCol(g.versionId, versionId),
+    orderBy: (g, { asc }) => [asc(g.stage)],
+  });
+}
+
+/**
+ * `serializeVersion` with both halves of a version fetched for you. Every
+ * route that returns a version goes through this rather than fetching the
+ * lines alone — one place to forget the section goals is one place too many,
+ * and a response missing them silently empties the editor's goal fields.
+ *
+ * @param {import("@budget/schema").Db | import("@budget/schema").Tx} db
+ * @param {StoredAllocationVersion} version
+ * @param {{ createdByName?: string | null }} [extra]
+ */
+export async function serializeVersionById(db, version, extra = {}) {
+  const [lineRows, stageGoalRows] = await Promise.all([
+    linesForVersion(db, version.id),
+    stageGoalsForVersion(db, version.id),
+  ]);
+  return serializeVersion(version, lineRows, { ...extra, stageGoalRows });
 }
 
 /**
@@ -470,6 +534,7 @@ export async function findNewestVersion(db, planId) {
  */
 export async function createDraftVersion(db, { planId, source, createdBy, note = null }) {
   const sourceLines = source ? await linesForVersion(db, source.id) : [];
+  const sourceStageGoals = source ? await stageGoalsForVersion(db, source.id) : [];
 
   return db.transaction(async (tx) => {
     const newest = await findNewestVersion(tx, planId);
@@ -497,6 +562,19 @@ export async function createDraftVersion(db, { planId, source, createdBy, note =
           goalPct: line.goalPct,
           accountId: line.accountId,
           sortOrder: line.sortOrder,
+        })),
+      );
+    }
+
+    // Copied with the lines and in the same transaction, for the reason at the
+    // top of this section: a draft that silently lost its section goals is the
+    // same class of bug as one that lost a line's goal.
+    if (sourceStageGoals.length > 0) {
+      await tx.insert(allocationStageGoals).values(
+        sourceStageGoals.map((goal) => ({
+          versionId: draft.id,
+          stage: goal.stage,
+          goalPct: goal.goalPct,
         })),
       );
     }

@@ -13,6 +13,7 @@ import { Badge } from "@/components/ui/badge.jsx";
 import { Button } from "@/components/ui/button.jsx";
 import { Input } from "@/components/ui/input.jsx";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select.jsx";
+import { DatePicker } from "@/components/date-picker.jsx";
 import { EmptyState } from "@/components/empty-state.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
 import { Money } from "@/components/money.jsx";
@@ -654,12 +655,7 @@ export function ImportPage() {
             description="The workbook holds no due dates, so every imported bill and budget starts from this date. Set real due dates on Fixed Costs afterwards."
           >
             <FieldRow label="Anchor date" htmlFor="import-anchor" className="max-w-52">
-              <Input
-                id="import-anchor"
-                type="date"
-                value={anchorDate}
-                onChange={(e) => setAnchorDate(e.target.value)}
-              />
+              <DatePicker id="import-anchor" value={anchorDate} onChange={setAnchorDate} />
             </FieldRow>
           </Section>
 

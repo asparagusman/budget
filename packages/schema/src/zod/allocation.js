@@ -33,7 +33,12 @@ export const updateAllocationPlanSchema = z
 // — an allocation line that takes money back out of a destination is not a
 // thing this app models.
 const allocationLineFields = {
-  stage: z.number().int().min(1).max(99),
+  // 1, 2 or 3 — the three fixed sections, nothing else. It was `max(99)` while
+  // stages were an open-ended list the operator could add to; they are now a
+  // closed set of named sections (Bills & Essentials / Save, Invest & Give /
+  // Leftover), so a stage 4 is a bug in the caller rather than a plan shape
+  // this app can render.
+  stage: z.number().int().min(1).max(3),
   label: z.string().trim().min(1, "Label is required").max(160),
   basis: z.enum(allocationBasis.enumValues),
   value: z.number().min(0).max(99_999_999).nullable(),
@@ -42,17 +47,40 @@ const allocationLineFields = {
   sortOrder: z.number().int().default(0),
 };
 
+// A goal on a whole section — see packages/schema/src/tables/allocation.js.
+// Sent on the same body as the lines, not a route of its own: one autosave
+// carries the whole draft, so a section goal and the lines it is measured
+// against can never land half-applied.
+const allocationStageGoalFields = {
+  stage: z.number().int().min(1).max(3),
+  goalPct: z.number().min(0).max(100),
+};
+
 // PUT /allocation-versions/:id/lines — a bulk replace of one draft's lines,
 // never a per-line PATCH. The editor holds the whole draft in memory and
 // autosaves it, and a partial write would let a reorder or a stage move land
 // half-applied.
 export const replaceAllocationLinesSchema = z.object({
   lines: z.array(z.object(allocationLineFields)).max(200),
+  // Optional so an older client (or a caller that only means to move a line)
+  // is not forced to restate the goals; absent means "leave them alone",
+  // an empty array means "clear them". At most one row per section, enforced
+  // here as well as by the table's unique index — a duplicated stage would
+  // otherwise reach the database as a 500 rather than a 400 naming the field.
+  stageGoals: z
+    .array(z.object(allocationStageGoalFields))
+    .max(3)
+    .refine((rows) => new Set(rows.map((r) => r.stage)).size === rows.length, {
+      message: "One goal per section at most.",
+    })
+    .optional(),
 });
 
 /** @typedef {z.infer<typeof replaceAllocationLinesSchema>} ReplaceAllocationLinesInput */
 
 /** @typedef {z.infer<typeof replaceAllocationLinesSchema>["lines"][number]} AllocationLineInput */
+
+/** @typedef {{ stage: number, goalPct: number }} AllocationStageGoalInput */
 
 // POST /allocation-plans/:id/draft/apply — the note is the operator's own
 // "why", stored on the version that becomes active.

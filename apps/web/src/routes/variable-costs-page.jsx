@@ -8,6 +8,7 @@ import {
   ChevronLeftIcon,
   ChevronRightIcon,
   InfoIcon,
+  PencilIcon,
   PlusIcon,
   SaveIcon,
   ShoppingBagIcon,
@@ -25,14 +26,28 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet.jsx";
 import { Switch } from "@/components/ui/switch.jsx";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip.jsx";
-import { Chart } from "@/components/chart.jsx";
+import { Area, AreaChart, CartesianGrid, Line, LineChart, ReferenceLine, XAxis, YAxis } from "recharts";
+import {
+  AXIS,
+  Chart,
+  ChartLegend,
+  ChartLegendContent,
+  ChartTooltip,
+  MoneyTooltip,
+  SERIES,
+  useChartMotion,
+  useMoneyTick,
+} from "@/components/chart.jsx";
 import { DataList, DataListRow } from "@/components/data-list.jsx";
+import { DatePicker } from "@/components/date-picker.jsx";
 import { Delta } from "@/components/delta.jsx";
 import { EmptyState } from "@/components/empty-state.jsx";
+import { PanelSkeleton } from "@/components/loading.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
 import { Money } from "@/components/money.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
 import { StatTile } from "@/components/stat-tile.jsx";
+import { useConfirm } from "@/components/confirm-dialog.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
 import { registerCommands } from "@/lib/commands.js";
@@ -249,7 +264,7 @@ function NewBudgetForm({ categoryId, currentCadence, submitting, prefillAmountCe
         </FieldRow>
       </div>
       <FieldRow label="Effective from" htmlFor="variable-budget-from" hint="A new plan from this date forward — it never rewrites an earlier budget's amount.">
-        <Input id="variable-budget-from" type="date" value={effectiveFrom} onChange={(e) => setEffectiveFrom(e.target.value)} />
+        <DatePicker id="variable-budget-from" value={effectiveFrom} onChange={setEffectiveFrom} />
       </FieldRow>
       <FieldRow label="Note" htmlFor="variable-budget-note" hint="Optional.">
         <Input id="variable-budget-note" value={note} onChange={(e) => setNote(e.target.value)} />
@@ -263,18 +278,137 @@ function NewBudgetForm({ categoryId, currentCadence, submitting, prefillAmountCe
 }
 
 /**
+ * One budget row, open for correction.
+ *
+ * The dated-row model says a new budget is a NEW row from a date forward, and
+ * this is the other case: a row that was entered wrong. The screen used to
+ * offer only "add another row" and "delete this one" for that, so fixing a
+ * typo meant calling `PATCH /variable-budgets/:id` by hand (todo.md
+ * `[P07-6]`) — or adding a correcting row, which leaves the mistake in the
+ * history as though the household had really budgeted it.
+ *
+ * Mounted only while the row is being edited, and keyed by the row's id, so
+ * its fields always start from what THAT row holds rather than from whatever
+ * was last typed into a different one.
+ *
+ * @param {{
+ *   budget: VariableBudget, submitting: boolean, onCancel: () => void,
+ *   onSave: (patch: { amountCents: Cents, cadence: Cadence, effectiveFrom: string, note: string | null }) => Promise<void>,
+ * }} props
+ */
+function BudgetRowEditor({ budget, submitting, onCancel, onSave }) {
+  const [amount, setAmount] = useState(String(budget.amountCents / 100));
+  const [cadence, setCadence] = useState(budget.cadence);
+  const [effectiveFrom, setEffectiveFrom] = useState(budget.effectiveFrom);
+  const [note, setNote] = useState(budget.note ?? "");
+  const [error, setError] = useState(/** @type {string | null} */ (null));
+
+  /** @param {import("react").FormEvent} e */
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setError(null);
+    if (amount.trim() === "") {
+      setError("Enter an amount.");
+      return;
+    }
+    try {
+      await onSave({ amountCents: toCents(Number(amount)), cadence, effectiveFrom, note: note.trim() || null });
+    } catch (err) {
+      // Kept on the row rather than in a toast: the message that matters
+      // here is "this category already has a budget from that date", and it
+      // is about the field the operator is looking at.
+      setError(/** @type {Error} */ (err).message);
+    }
+  }
+
+  return (
+    <li>
+      <form onSubmit={handleSubmit} className="flex flex-col gap-3 bg-surface-muted px-4 py-3">
+        <div className="grid grid-cols-2 gap-3">
+          <FieldRow label="Amount" htmlFor={`budget-edit-amount-${budget.id}`} required>
+            <InputGroup>
+              <InputGroupAddon>
+                <InputGroupText>$</InputGroupText>
+              </InputGroupAddon>
+              <InputGroupInput
+                id={`budget-edit-amount-${budget.id}`}
+                type="number"
+                step="0.01"
+                inputMode="decimal"
+                autoFocus
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+              />
+            </InputGroup>
+          </FieldRow>
+          <FieldRow label="Cadence" htmlFor={`budget-edit-cadence-${budget.id}`}>
+            <Select value={cadence} onValueChange={(v) => setCadence(/** @type {Cadence} */ (v))}>
+              <SelectTrigger id={`budget-edit-cadence-${budget.id}`} className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {CADENCES.map((c) => (
+                  <SelectItem key={c} value={c}>
+                    {CADENCE_LABELS[c]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </FieldRow>
+        </div>
+        <FieldRow
+          label="Effective from"
+          htmlFor={`budget-edit-from-${budget.id}`}
+          hint="Correcting the date this row took effect — it does not add a new one."
+        >
+          <DatePicker
+            id={`budget-edit-from-${budget.id}`}
+            value={effectiveFrom}
+            onChange={setEffectiveFrom}
+          />
+        </FieldRow>
+        <FieldRow label="Note" htmlFor={`budget-edit-note-${budget.id}`} hint="Optional.">
+          <Input id={`budget-edit-note-${budget.id}`} value={note} onChange={(e) => setNote(e.target.value)} />
+        </FieldRow>
+        {error ? <p className="text-sm text-negative">{error}</p> : null}
+        <div className="flex gap-2">
+          <Button type="submit" size="sm" disabled={submitting}>
+            {submitting ? "Saving…" : "Save correction"}
+          </Button>
+          <Button type="button" size="sm" variant="ghost" onClick={onCancel} disabled={submitting}>
+            Cancel
+          </Button>
+        </div>
+      </form>
+    </li>
+  );
+}
+
+/**
  * @param {{
  *   category: CostCategory | null, onOpenChange: (open: boolean) => void, ownBudgets: VariableBudget[],
  *   categorySummary: CategorySummary | undefined, primary: { anchorDate: string, cadence: Cadence } | null,
  *   submitting: boolean,
  *   onCreateBudget: (data: { categoryId: string, amountCents: Cents, cadence: Cadence, effectiveFrom: string, note: string | null }) => Promise<void>,
+ *   onUpdateBudget: (id: string, patch: { amountCents: Cents, cadence: Cadence, effectiveFrom: string, note: string | null }) => Promise<void>,
  *   onDeleteBudget: (id: string) => void,
  * }} props
  */
-function CategoryBudgetSheet({ category, onOpenChange, ownBudgets, categorySummary, primary, submitting, onCreateBudget, onDeleteBudget }) {
+function CategoryBudgetSheet({
+  category,
+  onOpenChange,
+  ownBudgets,
+  categorySummary,
+  primary,
+  submitting,
+  onCreateBudget,
+  onUpdateBudget,
+  onDeleteBudget,
+}) {
   const today = todayIso();
   const current = category ? resolveVariableBudget(ownBudgets, today) : null;
   const history = [...ownBudgets].sort((a, b) => (a.effectiveFrom < b.effectiveFrom ? 1 : -1));
+  const [editingBudgetId, setEditingBudgetId] = useState(/** @type {string | null} */ (null));
 
   return (
     <Sheet open={category !== null} onOpenChange={onOpenChange}>
@@ -339,22 +473,51 @@ function CategoryBudgetSheet({ category, onOpenChange, ownBudgets, categorySumma
                 <p className="text-sm text-text-muted">No budget set yet.</p>
               ) : (
                 <DataList>
-                  {history.map((b) => (
-                    <DataListRow
-                      key={b.id}
-                      primary={
-                        <>
-                          <Money value={b.amountCents} /> / {CADENCE_LABELS[b.cadence].toLowerCase()}
-                        </>
-                      }
-                      secondary={`from ${formatIsoDate(b.effectiveFrom, "en-AU")}${b.note ? ` · ${b.note}` : ""}`}
-                      trailing={
-                        <Button size="sm" variant="ghost" className="text-negative" onClick={() => onDeleteBudget(b.id)}>
-                          <Trash2Icon />
-                        </Button>
-                      }
-                    />
-                  ))}
+                  {history.map((b) =>
+                    editingBudgetId === b.id ? (
+                      <BudgetRowEditor
+                        key={b.id}
+                        budget={b}
+                        submitting={submitting}
+                        onCancel={() => setEditingBudgetId(null)}
+                        onSave={async (patch) => {
+                          await onUpdateBudget(b.id, patch);
+                          setEditingBudgetId(null);
+                        }}
+                      />
+                    ) : (
+                      <DataListRow
+                        key={b.id}
+                        primary={
+                          <>
+                            <Money value={b.amountCents} /> / {CADENCE_LABELS[b.cadence].toLowerCase()}
+                          </>
+                        }
+                        secondary={`from ${formatIsoDate(b.effectiveFrom, "en-AU")}${b.note ? ` · ${b.note}` : ""}`}
+                        trailing={
+                          <div className="flex gap-1">
+                            <Button
+                              size="icon-sm"
+                              variant="ghost"
+                              aria-label="Correct this budget row"
+                              onClick={() => setEditingBudgetId(b.id)}
+                            >
+                              <PencilIcon />
+                            </Button>
+                            <Button
+                              size="icon-sm"
+                              variant="ghost"
+                              className="text-negative"
+                              aria-label="Delete this budget row"
+                              onClick={() => onDeleteBudget(b.id)}
+                            >
+                              <Trash2Icon />
+                            </Button>
+                          </div>
+                        }
+                      />
+                    ),
+                  )}
                 </DataList>
               )}
             </div>
@@ -674,6 +837,7 @@ function ActualsGridMobile({ cycles, gridCategories, values, cycleIndex, onCycle
  */
 function OrphanedCyclesPanel() {
   const queryClient = useQueryClient();
+  const confirm = useConfirm();
   const orphansQuery = useQuery({
     queryKey: ["variable-actuals", "orphans"],
     queryFn: async () => {
@@ -715,7 +879,19 @@ function OrphanedCyclesPanel() {
             <span className="text-text">
               {formatIsoDate(o.cycleStart, "en-AU")} · <Money value={o.amountCents} />
             </span>
-            <Button size="sm" variant="ghost" className="text-negative" onClick={() => deleteMutation.mutate(o.id)}>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="text-negative"
+              onClick={async () => {
+                const ok = await confirm({
+                  title: "Delete this orphaned actual?",
+                  description: "Its cycle no longer matches any pay period. Deleting it removes it from every trailing average.",
+                  confirmLabel: "Delete",
+                });
+                if (ok) deleteMutation.mutate(o.id);
+              }}
+            >
               Delete
             </Button>
           </li>
@@ -734,6 +910,9 @@ function OrphanedCyclesPanel() {
  */
 export function VariableCostsPage() {
   const { currency, locale } = useSettings();
+  const moneyTick = useMoneyTick();
+  const motion = useChartMotion();
+  const confirm = useConfirm();
   const queryClient = useQueryClient();
   const today = useMemo(todayIso, []);
   const inputRefs = useRef(/** @type {Map<string, HTMLInputElement>} */ (new Map()));
@@ -803,6 +982,63 @@ export function VariableCostsPage() {
   const essentialCategories = categories.filter((c) => c.isEssential);
   const nonEssentialCategories = categories.filter((c) => !c.isEssential);
   const gridCategories = useMemo(() => [...essentialCategories, ...nonEssentialCategories], [essentialCategories, nonEssentialCategories]);
+
+  // Cycles come back newest-first; both charts read left-to-right in time.
+  const oldestFirst = useMemo(() => [...cycles].reverse(), [cycles]);
+
+  // Every series on a Recharts chart draws from ONE row array, so each
+  // category becomes a column keyed `cat<id>` — the id, not the name, since
+  // two categories may share a name and a data key has to be unique. The
+  // name is the config label, which is what the tooltip and legend show.
+  const categoryChart = useMemo(() => {
+    /** @type {import("@/components/ui/chart.jsx").ChartConfig} */
+    const config = {};
+    /** @type {string[]} */
+    const keys = [];
+    /** @type {{ key: string, dollars: number }[]} */
+    const budgetLines = [];
+
+    gridCategories.forEach((cat, i) => {
+      const key = `cat${cat.id}`;
+      keys.push(key);
+      config[key] = { label: cat.name, color: SERIES[i % SERIES.length] };
+      const current = resolveVariableBudget(budgetsFor(budgets, cat.id), today);
+      if (current && primary) {
+        budgetLines.push({
+          key,
+          dollars: equivalent(current.amountCents, current.cadence, primary.cadence) / 100,
+        });
+      }
+    });
+
+    const rows = oldestFirst.map((cycle) => {
+      /** @type {Record<string, number | string | null>} */
+      const row = { label: formatIsoDate(cycle.cycleStart, locale) };
+      gridCategories.forEach((cat) => {
+        const amountCents = cycle.entries.find((e) => e.categoryId === cat.id)?.amountCents ?? null;
+        row[`cat${cat.id}`] = amountCents !== null ? amountCents / 100 : null;
+      });
+      return row;
+    });
+
+    return { config, keys, budgets: budgetLines, rows };
+  }, [gridCategories, oldestFirst, budgets, today, primary, locale]);
+
+  const splitRows = useMemo(
+    () =>
+      oldestFirst.map((cycle) => {
+        const sumOf = (/** @type {boolean} */ essential) =>
+          cycle.entries
+            .filter((e) => e.isEssential === essential)
+            .reduce((sum, e) => sum + (e.amountCents ?? 0), 0) / 100;
+        return {
+          label: formatIsoDate(cycle.cycleStart, locale),
+          essential: sumOf(true),
+          nonEssential: sumOf(false),
+        };
+      }),
+    [oldestFirst, locale],
+  );
 
   // Re-syncs only when the cycle set itself changes (a different lookback or
   // fresh data from the server) — never while the operator is mid-edit,
@@ -878,6 +1114,27 @@ export function VariableCostsPage() {
       queryClient.invalidateQueries({ queryKey: ["variable-budgets"] });
       invalidateCosts();
       toast.success("Budget saved.");
+    },
+  });
+
+  // Correcting a row that was entered wrong, which is a different act from
+  // changing the budget going forward — that is a new dated row, and it is
+  // what `createBudget` above does (phases/07-variable-costs.md "Schema").
+  const updateBudget = useMutation({
+    mutationFn: async (
+      /** @type {{ id: string, patch: { amountCents: Cents, cadence: Cadence, effectiveFrom: string, note: string | null } }} */ {
+        id,
+        patch,
+      },
+    ) => {
+      const res = await api["variable-budgets"][":id"].$patch({ param: { id }, json: patch });
+      if (!res.ok) throw new Error(await readApiError(res));
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["variable-budgets"] });
+      invalidateCosts();
+      toast.success("Budget corrected.");
     },
   });
 
@@ -1128,7 +1385,9 @@ export function VariableCostsPage() {
             </Button>
           </div>
 
-          {cyclesQuery.isLoading ? null : cycles.length === 0 || gridCategories.length === 0 ? (
+          {cyclesQuery.isLoading ? (
+            <PanelSkeleton height={360} label="Loading cycles" />
+          ) : cycles.length === 0 || gridCategories.length === 0 ? (
             <EmptyState title="Nothing to enter yet" description="Add a variable cost category first." />
           ) : (
             <>
@@ -1174,43 +1433,41 @@ export function VariableCostsPage() {
                   }),
                 ]),
               }}
-              option={(tokens) => {
-                const oldestFirst = [...cycles].reverse();
-                return {
-                  legend: { top: 0, textStyle: { color: tokens.axisLabel } },
-                  grid: { top: 36 },
-                  xAxis: { type: "category", data: oldestFirst.map((c) => formatIsoDate(c.cycleStart, "en-AU")) },
-                  yAxis: { type: "value" },
-                  series: gridCategories.map((cat, i) => {
-                    const current = resolveVariableBudget(budgetsFor(budgets, cat.id), today);
-                    const budgetPerCycleCents = current && primary ? equivalent(current.amountCents, current.cadence, primary.cadence) : null;
-                    const color = tokens.series[i % tokens.series.length];
-                    return {
-                      type: "line",
-                      name: cat.name,
-                      data: oldestFirst.map((c) => {
-                        const amountCents = c.entries.find((e) => e.categoryId === cat.id)?.amountCents ?? null;
-                        return amountCents !== null ? amountCents / 100 : null;
-                      }),
-                      connectNulls: false,
-                      smooth: true,
-                      lineStyle: { color, width: 2 },
-                      itemStyle: { color },
-                      markLine:
-                        budgetPerCycleCents !== null
-                          ? {
-                              silent: true,
-                              symbol: "none",
-                              label: { show: false },
-                              lineStyle: { type: "dashed", color },
-                              data: [{ yAxis: budgetPerCycleCents / 100 }],
-                            }
-                          : undefined,
-                    };
-                  }),
-                };
-              }}
-            />
+              config={categoryChart.config}
+            >
+              <LineChart data={categoryChart.rows} margin={{ top: 8, right: 32, bottom: 0, left: 0 }}>
+                <CartesianGrid vertical={false} />
+                <XAxis dataKey="label" {...AXIS} minTickGap={24} />
+                <YAxis {...AXIS} width={56} tickFormatter={moneyTick} />
+                <ChartTooltip content={<MoneyTooltip />} />
+                <ChartLegend content={<ChartLegendContent />} />
+                {/* Each category's budget as a dashed rule in its own colour.
+                    A reference line, not a flat extra series: it is a
+                    threshold rather than a measurement, and it stays out of
+                    the tooltip and the legend where it would read as one. */}
+                {categoryChart.budgets.map((budget) => (
+                  <ReferenceLine
+                    key={budget.key}
+                    y={budget.dollars}
+                    stroke={`var(--color-${budget.key})`}
+                    strokeDasharray="4 4"
+                    ifOverflow="extendDomain"
+                  />
+                ))}
+                {categoryChart.keys.map((key) => (
+                  <Line
+                    key={key}
+                    dataKey={key}
+                    type="monotone"
+                    stroke={`var(--color-${key})`}
+                    strokeWidth={2}
+                    dot={false}
+                    connectNulls={false}
+                    {...motion}
+                  />
+                ))}
+              </LineChart>
+            </Chart>
           </div>
           <div className="rounded-(--radius-card) bg-surface p-5 shadow-(--shadow-card)">
             <h3 className="mb-3 text-sm font-semibold text-text">Total variable spend, essential vs non-essential</h3>
@@ -1232,25 +1489,41 @@ export function VariableCostsPage() {
                   ];
                 }),
               }}
-              option={(tokens) => {
-                const oldestFirst = [...cycles].reverse();
-                /** @param {boolean} essential */
-                const seriesFor = (essential) =>
-                  oldestFirst.map((c) =>
-                    c.entries.filter((e) => e.isEssential === essential).reduce((sum, e) => sum + (e.amountCents ?? 0), 0) / 100,
-                  );
-                return {
-                  legend: { top: 0, textStyle: { color: tokens.axisLabel } },
-                  grid: { top: 36 },
-                  xAxis: { type: "category", data: oldestFirst.map((c) => formatIsoDate(c.cycleStart, "en-AU")) },
-                  yAxis: { type: "value" },
-                  series: [
-                    { type: "line", name: "Essential", stack: "total", areaStyle: {}, data: seriesFor(true), itemStyle: { color: tokens.series[0] }, lineStyle: { color: tokens.series[0] } },
-                    { type: "line", name: "Non-essential", stack: "total", areaStyle: {}, data: seriesFor(false), itemStyle: { color: tokens.series[3] }, lineStyle: { color: tokens.series[3] } },
-                  ],
-                };
+              config={{
+                essential: { label: "Essential", color: SERIES[0] },
+                nonEssential: { label: "Non-essential", color: SERIES[3] },
               }}
-            />
+            >
+              <AreaChart data={splitRows} margin={{ top: 8, right: 32, bottom: 0, left: 0 }}>
+                <CartesianGrid vertical={false} />
+                <XAxis dataKey="label" {...AXIS} minTickGap={24} />
+                <YAxis {...AXIS} width={56} tickFormatter={moneyTick} />
+                <ChartTooltip content={<MoneyTooltip />} />
+                <ChartLegend content={<ChartLegendContent />} />
+                <Area
+                  dataKey="essential"
+                  type="monotone"
+                  stackId="total"
+                  stroke="var(--color-essential)"
+                  fill="var(--color-essential)"
+                  fillOpacity={0.3}
+                  strokeWidth={2}
+                  dot={false}
+                  {...motion}
+                />
+                <Area
+                  dataKey="nonEssential"
+                  type="monotone"
+                  stackId="total"
+                  stroke="var(--color-nonEssential)"
+                  fill="var(--color-nonEssential)"
+                  fillOpacity={0.3}
+                  strokeWidth={2}
+                  dot={false}
+                  {...motion}
+                />
+              </AreaChart>
+            </Chart>
           </div>
           <div className="rounded-(--radius-card) bg-surface-muted p-4">
             <p className="text-sm text-text-muted">
@@ -1284,7 +1557,14 @@ export function VariableCostsPage() {
           await renameCategory.mutateAsync({ id, name });
         }}
         onToggleEssential={(id, isEssential) => toggleEssential.mutate({ id, isEssential })}
-        onArchive={(id) => archiveCategory.mutate(id)}
+        onArchive={async (id) => {
+          const ok = await confirm({
+            title: `Archive ${categories.find((c) => c.id === id)?.name ?? "this category"}?`,
+            description: "It leaves the budget and actuals grids. Everything recorded against it is kept.",
+            confirmLabel: "Archive",
+          });
+          if (ok) archiveCategory.mutate(id);
+        }}
       />
 
       <CategoryBudgetSheet
@@ -1293,11 +1573,21 @@ export function VariableCostsPage() {
         ownBudgets={budgetSheetCategoryId ? budgetsFor(budgets, budgetSheetCategoryId) : []}
         categorySummary={budgetSheetCategoryId ? summaryByCategory.get(budgetSheetCategoryId) : undefined}
         primary={primary}
-        submitting={createBudget.isPending}
+        submitting={createBudget.isPending || updateBudget.isPending}
         onCreateBudget={async (data) => {
           await createBudget.mutateAsync(data);
         }}
-        onDeleteBudget={(id) => deleteBudget.mutate(id)}
+        onUpdateBudget={async (id, patch) => {
+          await updateBudget.mutateAsync({ id, patch });
+        }}
+        onDeleteBudget={async (id) => {
+          const ok = await confirm({
+            title: "Delete this budget row?",
+            description: "The category falls back to whichever dated row was in force before it.",
+            confirmLabel: "Delete",
+          });
+          if (ok) deleteBudget.mutate(id);
+        }}
       />
     </>
   );

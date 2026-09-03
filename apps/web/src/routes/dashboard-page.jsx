@@ -22,8 +22,21 @@ import { Badge } from "@/components/ui/badge.jsx";
 import { Button } from "@/components/ui/button.jsx";
 import { Skeleton } from "@/components/ui/skeleton.jsx";
 import { AllocationFlow } from "@/components/allocation-flow.jsx";
-import { Chart } from "@/components/chart.jsx";
+import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts";
+import {
+  AXIS,
+  Chart,
+  ChartTooltip,
+  MoneyTooltip,
+  SERIES,
+  TIME_AXIS,
+  isoToMs,
+  useChartMotion,
+  useMoneyTick,
+  useTimeAxis,
+} from "@/components/chart.jsx";
 import { Delta } from "@/components/delta.jsx";
+import { FidelityBadge } from "@/components/fidelity-badge.jsx";
 import { GoodLifeFidelity } from "@/components/good-life-fidelity.jsx";
 import { Money } from "@/components/money.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
@@ -42,9 +55,9 @@ import { cn } from "@/lib/utils.js";
 /** @import { Cadence, Cents, Transfer } from "@budget/engine" */
 
 /** @typedef {{ id: string, name: string, type: "transaction" | "savings" | "investment" | "external", isIncomeLanding: boolean, latestBalance: { amountCents: Cents, asAt: string } | null }} DashAccount */
-/** @typedef {{ stage: number, subtotalPerMonthCents: Cents, remainingPerMonthCents: Cents, goalPct: number | null, actualPct: number | null, fidelity: number | null, subtotalPerPayCents: Cents | null }} DashStage */
-/** @typedef {{ lineId: string, perMonthCents: Cents, perPayCents: Cents, perWeekCents: Cents, actualPct: number | null, fidelity: number | null }} DashResolvedLine */
-/** @typedef {{ key: string, perMonthCents: Cents, perPayCents: Cents | null, pctOfGross: number | null, lineCount: number }} DashBreakdown */
+/** @typedef {{ stage: number, goalPerMonthCents: Cents | null, goalPerPayCents: Cents | null, subtotalPerMonthCents: Cents, subtotalPerPayCents: Cents, subtotalPerWeekCents: Cents, remainingPerMonthCents: Cents, remainingPerPayCents: Cents, remainingPerWeekCents: Cents, goalPct: number | null, goalSource: "stage" | "lines" | null, actualPct: number | null, fidelity: number | null }} DashStage */
+/** @typedef {{ lineId: string, perMonthCents: Cents, perPayCents: Cents, perWeekCents: Cents, actualPct: number | null, goalPerMonthCents: Cents | null, goalPerPayCents: Cents | null, fidelity: number | null }} DashResolvedLine */
+/** @typedef {{ key: string, label: string, perMonthCents: Cents, perPayCents: Cents | null, pctOfGross: number | null, goalPct: number | null, goalSource: "stage" | "lines" | null, fidelity: number | null, lineCount: number }} DashBreakdown */
 /**
  * @typedef {{
  *   on: string,
@@ -89,16 +102,18 @@ import { cn } from "@/lib/utils.js";
 // (phases/10-dashboard.md "Warnings strip").
 const MAX_VISIBLE_WARNINGS = 3;
 
-// What each hero tile is called. The grouping itself is the API's (by
-// allocation basis) — this only names it. "Allocated out" rather than
-// "Saving" deliberately: everything that is not a bill and not an essential
-// is money the operator directed somewhere, and some of it is giving or the
-// prize pool, not saving. The app does not get to reclassify it.
-/** @type {Record<string, { label: string, hint: string }>} */
-const BREAKDOWN_LABELS = {
-  bills: { label: "Bills", hint: "Fixed costs, set aside" },
-  spending: { label: "Spending", hint: "Variable essentials" },
-  allocated: { label: "Allocated out", hint: "Saving, investing, giving, prize pool" },
+// A tile's NAME comes from the API now, because on a plan with categories it
+// is the household's own word and no map here could know it. Only these hints
+// stay: they belong to the three groups the server falls back to when no line
+// carries a category. A category tile needs no hint of ours — the household
+// named it, and its own goal is the more useful second line.
+/** @type {Record<string, string>} */
+// Keyed by `ALLOCATION_SECTIONS[].key`. Shown only where a section carries no
+// goal — where it does, the fidelity badge is the more useful sentence.
+const BREAKDOWN_HINTS = {
+  needs: "Fixed bills and variable essentials",
+  saving: "Saving, investing, giving, buffer",
+  leftover: "What's left for day to day",
 };
 
 /**
@@ -346,12 +361,12 @@ function HeroCard({ data }) {
       {allocation ? (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {allocation.breakdown.map((group, index) => {
-            const meta = BREAKDOWN_LABELS[group.key] ?? { label: group.key, hint: "" };
+            const hint = BREAKDOWN_HINTS[group.key] ?? null;
             return (
               <StatTile
                 key={group.key}
                 className="bg-surface-muted shadow-none"
-                label={meta.label}
+                label={group.label}
                 value={
                   <span className="text-2xl tabular-nums">
                     {group.perPayCents !== null ? (
@@ -372,9 +387,21 @@ function HeroCard({ data }) {
                         }}
                       />
                     </div>
-                    <p className="mt-1.5 text-xs text-text-muted">
-                      {group.pctOfGross !== null ? `${group.pctOfGross.toFixed(1)}% of income` : "—"}
-                      <span className="text-text-subtle"> · {meta.hint}</span>
+                    <p className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-text-muted">
+                      <span>{group.pctOfGross !== null ? `${group.pctOfGross.toFixed(1)}% of income` : "—"}</span>
+                      {/* The goal, where the household set one, said the way
+                          it asked for it: what you're doing, against what you
+                          meant to. Where there is no goal the tile keeps the
+                          hint it always had. */}
+                      {group.fidelity !== null ? (
+                        <FidelityBadge fidelity={group.fidelity} goalPct={group.goalPct} />
+                      ) : hint !== null ? (
+                        <span className="text-text-subtle">· {hint}</span>
+                      ) : (
+                        <span className="text-text-subtle">
+                          · {group.lineCount} {group.lineCount === 1 ? "line" : "lines"}
+                        </span>
+                      )}
                     </p>
                   </>
                 }
@@ -532,42 +559,24 @@ function UpcomingCard({ data }) {
  */
 function NetWorthCard({ data, onUpdateBalance }) {
   const { currency, locale } = useSettings();
+  const moneyTick = useMoneyTick();
+  const motion = useChartMotion();
   const { netWorth } = data;
   const isStale = netWorth.staleDays !== null && netWorth.staleDays > netWorth.staleAfterDays;
 
-  const option = useMemo(
+  // A real time axis: `t` is the point's own date in milliseconds, so the
+  // gap between two balances recorded a day apart is a day wide and one
+  // recorded a year apart is a year wide.
+  const rows = useMemo(
     () =>
-      /** @param {import("@/components/chart.jsx").ChartTokens} tokens */
-      (tokens) => ({
-        grid: { top: 16, left: 8, right: 12, bottom: 8, containLabel: true },
-        xAxis: { type: "time" },
-        yAxis: { type: "value" },
-        tooltip: {
-          trigger: "axis",
-          /** @param {{ value: [string, number] }[]} params */
-          formatter: (params) =>
-            params
-              .map(
-                (p) =>
-                  `${new Intl.DateTimeFormat(locale, { dateStyle: "medium" }).format(new Date(p.value[0]))}<br/>${new Intl.NumberFormat(locale, { style: "currency", currency }).format(p.value[1])}`,
-              )
-              .join("<br/>"),
-        },
-        series: [
-          {
-            type: "line",
-            name: "Net worth",
-            data: netWorth.series.map((point) => [point.date, point.totalCents / 100]),
-            step: "end",
-            showSymbol: false,
-            lineStyle: { width: 2, color: tokens.series[0] },
-            itemStyle: { color: tokens.series[0] },
-            areaStyle: { color: tokens.accentSoft, opacity: 0.5 },
-          },
-        ],
-      }),
-    [netWorth.series, currency, locale],
+      netWorth.series.map((point) => ({
+        t: isoToMs(point.date),
+        label: formatIsoDate(point.date, locale),
+        netWorth: point.totalCents / 100,
+      })),
+    [netWorth.series, locale],
   );
+  const timeAxis = useTimeAxis(rows[0]?.t ?? 0, rows[rows.length - 1]?.t ?? 0);
 
   return (
     <Card
@@ -609,7 +618,6 @@ function NetWorthCard({ data, onUpdateBalance }) {
           chart is never the only way a number is available
           (phases/11-polish-mobile-import.md, workstream B). */}
       <Chart
-        option={option}
         height={200}
         ariaLabel={`Net worth over time, ${netWorth.series.length} recorded points, currently ${formatMoney(netWorth.totalCents, { currency, locale })}.`}
         dataTable={{
@@ -623,7 +631,28 @@ function NetWorthCard({ data, onUpdateBalance }) {
         empty={netWorth.series.length < 2}
         emptyTitle="Not enough history yet"
         emptyDescription="Record a balance on two different dates and the line starts to draw itself."
-      />
+        config={{ netWorth: { label: "Net worth", color: SERIES[0] } }}
+      >
+        <AreaChart data={rows} margin={{ top: 16, right: 12, bottom: 0, left: 0 }}>
+          <CartesianGrid vertical={false} />
+          <XAxis dataKey="t" {...AXIS} {...TIME_AXIS} {...timeAxis} minTickGap={32} />
+          <YAxis {...AXIS} width={56} tickFormatter={moneyTick} />
+          <ChartTooltip content={<MoneyTooltip />} />
+          {/* `stepAfter`, not a smooth curve: a balance holds the figure it
+              was last recorded at until the next reading, and interpolating
+              between two readings draws a number nobody recorded. */}
+          <Area
+            dataKey="netWorth"
+            type="stepAfter"
+            stroke="var(--color-netWorth)"
+            fill="var(--color-netWorth)"
+            fillOpacity={0.15}
+            strokeWidth={2}
+            dot={false}
+            {...motion}
+          />
+        </AreaChart>
+      </Chart>
     </Card>
   );
 }
@@ -683,6 +712,20 @@ function MojoCard({ mojo }) {
 }
 
 /**
+ * Days for a near miss, months once it runs to years — "20061 days sooner" is
+ * a true number that tells the operator nothing. Same rule as /goals'
+ * `EtaAndRequired`.
+ *
+ * @param {DashboardData["goals"][number]} goal
+ */
+function aheadBehindLabel(goal) {
+  const days = goal.aheadBehindDays;
+  if (goal.reached || days === null || days <= 0) return null;
+  if (days < 60) return `${days} days`;
+  return `about ${Math.round(days / 30.44)} months`;
+}
+
+/**
  * @param {{ goals: DashboardData["goals"] }} props
  */
 function GoalsCard({ goals }) {
@@ -727,6 +770,14 @@ function GoalsCard({ goals }) {
                 ) : (
                   <span>no ETA at this contribution</span>
                 )}
+                {/* What the account's own growth is buying, against a
+                    no-growth projection of the same contribution. Only shown
+                    when it's worth a day — an "0 days sooner" pill on a
+                    transaction account is noise. Wording matches /goals so
+                    the two screens don't describe the same figure two ways. */}
+                {aheadBehindLabel(goal) ? (
+                  <span className="text-positive">{aheadBehindLabel(goal)} sooner with growth</span>
+                ) : null}
               </p>
             </li>
           ))}
@@ -806,8 +857,8 @@ function GoodLifeCard({ data }) {
  */
 function SetupPath({ setup }) {
   const steps = [
-    { done: setup.people, to: "/settings/people", label: "Add the people in your household" },
-    { done: setup.paySchedule, to: "/settings/pay-schedules", label: "Set a primary pay schedule" },
+    { done: setup.people, to: "/admin/people", label: "Add the people in your household" },
+    { done: setup.paySchedule, to: "/income", label: "Set a primary pay schedule" },
     { done: setup.accounts, to: "/accounts", label: "Add your accounts, and mark where income lands" },
     { done: setup.bills, to: "/costs/fixed", label: "Add your bills" },
     { done: setup.allocation, to: "/allocation", label: "Build an allocation and apply it" },
@@ -1072,12 +1123,9 @@ export function DashboardPage() {
             {result && data.allocation ? (
               <div className="lg:order-3 lg:col-span-4">
                 <Card title="Where the money goes" icon={ArrowLeftRightIcon} to="/allocation">
-                  <AllocationFlow
-                    result={result}
-                    accounts={data.accounts}
-                    lines={data.allocation.lines}
-                    heading={null}
-                  />
+                  {/* `lines` is gone with the sankey: slices are keyed by
+                      destination, which the result's own transfers carry. */}
+                  <AllocationFlow result={result} accounts={data.accounts} heading={null} />
                 </Card>
               </div>
             ) : null}

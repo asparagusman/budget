@@ -186,6 +186,92 @@ export function billsContribution(instances, window, paySchedule) {
 
 /**
  * @typedef {{
+ *   perPayCents: Cents,
+ *   perMonthCents: Cents,
+ *   perYearCents: Cents,
+ *   windowTotalCents: Cents,
+ *   instanceCount: number,
+ *   nextDueDate: IsoDate | null,
+ *   nextAmountCents: Cents | null,
+ *   averageAmountCents: Cents | null,
+ *   minAmountCents: Cents | null,
+ *   maxAmountCents: Cents | null,
+ *   variesInWindow: boolean
+ * }} WindowFigures
+ */
+
+/**
+ * `billsContribution` plus everything a single bill's row needs to state what
+ * it actually costs: the next occurrence, the average occurrence, the spread,
+ * and the window total the three cadence figures are derived from.
+ *
+ * Its reason for existing is that a row cannot be restated from
+ * `baseAmountCents * occurrences-per-year` without contradicting the
+ * contribution it feeds. That shortcut is only correct for a `flat` bill: a
+ * `rolling_average` bill prints the base the operator typed rather than the
+ * average of the actuals they entered, and a `seasonal` or `escalating` bill
+ * multiplies one occurrence by a whole year as though the model did nothing.
+ * Both the API's `/fixed-costs/summary` and the fixed-costs screen's own live
+ * preview call this, so a figure on screen and a figure in the budget cannot
+ * be computed two different ways.
+ *
+ * `variesInWindow` describes the forecast, not the history: a
+ * `rolling_average` bill collapses a spread of past actuals into one steady
+ * figure and so does *not* vary, while a `flat` bill with a step change
+ * inside the window does.
+ *
+ * @param {BillInstance[]} instances
+ * @param {DateWindow} window
+ * @param {PaySchedule} paySchedule
+ * @returns {WindowFigures}
+ */
+export function billWindowFigures(instances, window, paySchedule) {
+  const inWindow = instances
+    .filter((i) => i.dueDate >= window.from && i.dueDate < window.to)
+    .sort((a, b) => (a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : 0));
+  // An entered actual beats the projection, the same precedence
+  // `billsContribution` uses — so a row reads as the contribution it feeds.
+  const amounts = inWindow.map((i) => i.actualCents ?? i.expectedCents);
+  const first = inWindow[0];
+  const windowTotalCents = sumCents(amounts);
+
+  return {
+    ...billsContribution(instances, window, paySchedule),
+    windowTotalCents,
+    instanceCount: amounts.length,
+    nextDueDate: first?.dueDate ?? null,
+    nextAmountCents: first ? (first.actualCents ?? first.expectedCents) : null,
+    averageAmountCents: amounts.length > 0 ? Math.round(windowTotalCents / amounts.length) : null,
+    minAmountCents: amounts.length > 0 ? Math.min(...amounts) : null,
+    maxAmountCents: amounts.length > 0 ? Math.max(...amounts) : null,
+    variesInWindow: amounts.length > 1 && Math.min(...amounts) !== Math.max(...amounts),
+  };
+}
+
+/**
+ * Adds a set of `billWindowFigures` into the subtotal printed above them.
+ *
+ * Deliberately a sum of the rows rather than a second `billsContribution`
+ * over the same instances pooled together. Those two differ by a cent or
+ * two, because `perYearCents` scales a window total by `365.25 / days` and
+ * rounds, and rounding-then-summing is not summing-then-rounding. A subtotal
+ * that does not equal the column above it is the exact class of bug phase 06
+ * exists to make impossible, and "which of these two is the truer
+ * annualisation" is a question worth less than the rows adding up.
+ *
+ * @param {WindowFigures[]} rows
+ */
+export function sumWindowFigures(rows) {
+  return {
+    perPayCents: sumCents(rows.map((r) => r.perPayCents)),
+    perMonthCents: sumCents(rows.map((r) => r.perMonthCents)),
+    perYearCents: sumCents(rows.map((r) => r.perYearCents)),
+    windowTotalCents: sumCents(rows.map((r) => r.windowTotalCents)),
+  };
+}
+
+/**
+ * @typedef {{
  *   date: IsoDate,
  *   balanceCents: Cents,
  *   event: "payday" | "bill"

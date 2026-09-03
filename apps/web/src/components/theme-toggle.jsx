@@ -1,6 +1,10 @@
 import { Monitor, Moon, Sun } from "lucide-react";
 import { cn } from "@/lib/utils.js";
 import { useTheme } from "@/lib/theme.jsx";
+import {
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+} from "@/components/ui/dropdown-menu.jsx";
 
 /** @type {Array<{ value: import("@/lib/theme.jsx").ThemePref, label: string, Icon: typeof Sun }>} */
 const OPTIONS = [
@@ -51,5 +55,30 @@ export function ThemeToggle({ className }) {
         );
       })}
     </div>
+  );
+}
+
+/**
+ * The same three options, shaped as dropdown-menu radio items — for the
+ * sidebar's Settings menu, where theme is one entry among whatever
+ * preferences come later rather than a control sitting permanently on
+ * screen. Lives here rather than in the sidebar so `OPTIONS` above stays
+ * the one list of what a theme can be.
+ */
+export function ThemeMenuItems() {
+  const { pref, setPref } = useTheme();
+
+  return (
+    <DropdownMenuRadioGroup
+      value={pref}
+      onValueChange={(value) => setPref(/** @type {import("@/lib/theme.jsx").ThemePref} */ (value))}
+    >
+      {OPTIONS.map(({ value, label, Icon }) => (
+        <DropdownMenuRadioItem key={value} value={value}>
+          <Icon className="size-4" aria-hidden="true" />
+          {label}
+        </DropdownMenuRadioItem>
+      ))}
+    </DropdownMenuRadioGroup>
   );
 }

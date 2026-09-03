@@ -8,6 +8,7 @@ import {
   CommandItem,
   CommandList,
   CommandSeparator,
+  CommandShortcut,
 } from "@/components/ui/command.jsx";
 import { ShortcutsDialog } from "@/components/shortcuts-dialog.jsx";
 import {
@@ -57,6 +58,10 @@ export function CommandPalette() {
         group: /** @type {const} */ ("Navigation"),
         label: item.label,
         icon: item.icon,
+        // The chord already works from anywhere; the palette is where an
+        // operator finds out it exists, so it is shown beside the entry it
+        // duplicates rather than only in the `?` cheatsheet.
+        shortcut: `G ${item.chord.toUpperCase()}`,
         run: () => navigate({ to: item.to }),
       })),
     [navigate],
@@ -125,7 +130,7 @@ export function CommandPalette() {
 
   return (
     <>
-      <CommandDialog open={open} onOpenChange={setCommandPaletteOpen}>
+      <CommandDialog loop open={open} onOpenChange={setCommandPaletteOpen}>
         <CommandInput placeholder="Search or jump to…" />
         <CommandList>
           <CommandEmpty>No results.</CommandEmpty>
@@ -149,6 +154,7 @@ export function CommandPalette() {
                         <command.icon className="size-4" aria-hidden="true" />
                       ) : null}
                       {command.label}
+                      {command.shortcut ? <CommandShortcut>{command.shortcut}</CommandShortcut> : null}
                     </CommandItem>
                   ))}
                 </CommandGroup>

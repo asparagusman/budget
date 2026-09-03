@@ -6,7 +6,16 @@ import { Badge } from "@/components/ui/badge.jsx";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet.jsx";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs.jsx";
 import { Button } from "@/components/ui/button.jsx";
-import { Chart } from "@/components/chart.jsx";
+import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
+import {
+  AXIS,
+  Chart,
+  ChartTooltip,
+  MoneyTooltip,
+  SERIES,
+  useChartMotion,
+  useMoneyTick,
+} from "@/components/chart.jsx";
 import { EmptyState } from "@/components/empty-state.jsx";
 import { Money } from "@/components/money.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
@@ -125,6 +134,8 @@ function DayDetailSheet({ date, onOpenChange, instances, isPayday, billsById }) 
  */
 export function CalendarPage() {
   const { currency, locale } = useSettings();
+  const moneyTick = useMoneyTick();
+  const motion = useChartMotion();
   const today = new Date();
   const [year, setYear] = useState(today.getFullYear());
   const [month, setMonth] = useState(today.getMonth());
@@ -235,6 +246,16 @@ export function CalendarPage() {
     return totals;
   }, [instancesByDate, year]);
 
+  const outflowRows = monthlyOutflow.map((row) => ({
+    label: row.label.slice(0, 3),
+    outflow: row.totalCents / 100,
+  }));
+
+  const heaviestMonth = monthlyOutflow.reduce(
+    (max, row) => (row.totalCents > max.totalCents ? row : max),
+    { label: "no month", totalCents: 0 },
+  );
+
   return (
     <>
       <PageHeader
@@ -325,47 +346,33 @@ export function CalendarPage() {
       )}
 
       <div className="rounded-(--radius-card) bg-surface p-5 shadow-(--shadow-card)">
-        <p className="mb-3 text-sm font-medium text-text-muted">Outflow intensity — {year}</p>
-        {/* By month, not by day: 366 rows of mostly zero is not an
-            alternative to anything. The month totals are the figure the
-            heatmap is actually communicating. */}
+        <p className="mb-3 text-sm font-medium text-text-muted">Outflow by month — {year}</p>
+        {/* This was a day-by-day calendar heat map. Two problems with that
+            shape: 366 cells of mostly zero say very little about a household
+            whose bills land on a dozen dates, and the panel's own data table
+            was already by MONTH — the comment there said outright that the
+            month totals are "the figure the heatmap is actually
+            communicating". So the figure it was communicating is now what it
+            draws. */}
         <Chart
           height={200}
           loading={instancesQuery.isLoading}
-          ariaLabel={`Heat map of bill outflow across ${year}. The busiest day is ${formatMoney(heatmapMax, { currency, locale })}.`}
+          ariaLabel={`Bill outflow by month across ${year}. The heaviest month is ${heaviestMonth.label} at ${formatMoney(heaviestMonth.totalCents, { currency, locale })}.`}
           dataTable={{
             caption: `Bill outflow by month, ${year}`,
             columns: ["Month", "Outflow"],
             rows: monthlyOutflow.map((row) => [row.label, formatMoney(row.totalCents, { currency, locale })]),
           }}
-          option={(tokens) => ({
-            calendar: {
-              range: String(year),
-              cellSize: ["auto", 14],
-              itemStyle: { borderWidth: 3, borderColor: tokens.surface },
-              splitLine: { lineStyle: { color: tokens.grid } },
-              yearLabel: { show: false },
-              dayLabel: { color: tokens.axisLabel },
-              monthLabel: { color: tokens.axisLabel },
-            },
-            visualMap: { show: false, min: 0, max: heatmapMax, dimension: 1 },
-            series: [
-              {
-                type: "heatmap",
-                coordinateSystem: "calendar",
-                data: Array.from({ length: 366 }, (_, i) => {
-                  const date = addDaysIso(`${year}-01-01`, i);
-                  if (!date.startsWith(String(year))) return null;
-                  const total = (instancesByDate.get(date) ?? []).reduce((s, inst) => s + (inst.actualCents ?? inst.expectedCents), 0);
-                  return {
-                    value: [date, total / 100],
-                    itemStyle: { color: mixRgb(tokens.accentSoft, mustAt(tokens.series, 3, "chart series colour"), Math.min(total / heatmapMax, 1)) },
-                  };
-                }).filter((d) => d !== null),
-              },
-            ],
-          })}
-        />
+          config={{ outflow: { label: "Outflow", color: SERIES[3] } }}
+        >
+          <BarChart data={outflowRows} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+            <CartesianGrid vertical={false} />
+            <XAxis dataKey="label" {...AXIS} interval={0} />
+            <YAxis {...AXIS} width={56} tickFormatter={moneyTick} />
+            <ChartTooltip content={<MoneyTooltip />} />
+            <Bar dataKey="outflow" fill="var(--color-outflow)" radius={[4, 4, 0, 0]} {...motion} />
+          </BarChart>
+        </Chart>
       </div>
 
       <DayDetailSheet

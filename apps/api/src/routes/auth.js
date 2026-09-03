@@ -8,9 +8,11 @@ import {
   credentials as credentialsTable,
   invites as invitesTable,
   loginVerifySchema,
+  passwordLoginSchema,
   registerOptionsSchema,
   registerVerifySchema,
   sessions as sessionsTable,
+  setRecoveryPasswordSchema,
   users as usersTable,
 } from "@budget/schema";
 import { mustAt } from "@budget/engine";
@@ -21,11 +23,13 @@ import { writeAuditLog } from "../lib/audit.js";
 import { putChallenge, takeChallenge } from "../lib/challenge-store.js";
 import { guessDeviceName } from "../lib/device-name.js";
 import { hashInviteCode } from "../lib/invite.js";
+import { hashPassword, verifyPassword } from "../lib/password.js";
 import { rateLimit } from "../lib/rate-limit.js";
 import {
   clearSessionCookie,
   createSession,
   getSessionFromRequest,
+  sessionTtlMs,
   setSessionCookie,
 } from "../lib/session.js";
 import { handleValidation } from "../lib/validation.js";
@@ -98,6 +102,25 @@ export function createAuthRoutes({ db, env }) {
       return c.json({
         needsBootstrap: false,
         user: { id: user.id, displayName: user.displayName, email: user.email },
+        // The browser has to know it is on a recovery session BEFORE it
+        // renders the app: every screen would 403, and a wall of failed
+        // queries is a worse answer than "add a passkey to continue".
+        authMethod: session.authMethod,
+      });
+    })
+
+    // Whether the household has a recovery password at all, and whose it is.
+    // Public, like every other /auth route, and deliberately says nothing a
+    // sign-in screen could not already infer: the "can't use a passkey?"
+    // affordance has to know whether to offer itself.
+    .get("/recovery-password", async (c) => {
+      const holder = await db.query.users.findFirst({
+        where: (u, { isNotNull }) => isNotNull(u.recoveryPasswordHash),
+      });
+      return c.json({
+        configured: holder != null,
+        holderDisplayName: holder?.displayName ?? null,
+        setAt: holder?.recoveryPasswordSetAt ?? null,
       });
     })
 
@@ -432,6 +455,162 @@ export function createAuthRoutes({ db, env }) {
       return c.json({ user: { id: user.id, displayName: user.displayName, email: user.email } });
       },
     )
+
+    // The break-glass sign-in.
+    //
+    // Usernameless like the passkey flow: there is at most one recovery
+    // password in the household, so the password itself identifies the user.
+    // The session it opens is confined to the recovery surface and expires in
+    // an hour — see middleware/auth.js and lib/session.js.
+    .post(
+      "/login/password",
+      rateLimit("login-password"),
+      zValidator("json", passwordLoginSchema, handleValidation),
+      async (c) => {
+        const { password } = c.req.valid("json");
+
+        const holder = await db.query.users.findFirst({
+          where: (u, { isNotNull }) => isNotNull(u.recoveryPasswordHash),
+        });
+        // One message for "there is no recovery password", "you typed it
+        // wrong" and "that user is deactivated". A caller who can tell those
+        // apart can enumerate the household's state without knowing anything.
+        const ok = holder?.isActive === true && (await verifyPassword(password, holder.recoveryPasswordHash));
+        if (!holder || !ok) {
+          if (holder) {
+            await writeAuditLog(db, {
+              actorId: null,
+              action: "auth.recovery_login_failed",
+              entityType: "user",
+              entityId: holder.id,
+            });
+          }
+          return c.json(
+            { error: { code: "invalid_password", message: "That is not the recovery password." } },
+            400,
+          );
+        }
+
+        const { token, session } = await createSession(db, {
+          userId: holder.id,
+          userAgent: c.req.header("user-agent"),
+          authMethod: "recovery_password",
+        });
+        setSessionCookie(c, token, "recovery_password");
+        await writeAuditLog(db, {
+          actorId: holder.id,
+          action: "auth.recovery_login",
+          entityType: "session",
+          entityId: session.id,
+        });
+
+        return c.json({
+          user: { id: holder.id, displayName: holder.displayName, email: holder.email },
+          authMethod: /** @type {const} */ ("recovery_password"),
+          expiresInSeconds: sessionTtlMs("recovery_password") / 1000,
+        });
+      },
+    )
+
+    // Set or replace the household's one recovery password.
+    //
+    // Requires a PASSKEY session, checked here rather than by the middleware
+    // because /auth/* is public to it. There is no current-password field:
+    // holding a passkey is a stronger claim than knowing the password being
+    // replaced, and a recovery session must never be able to change the
+    // credential that created it.
+    .put("/recovery-password", zValidator("json", setRecoveryPasswordSchema, handleValidation), async (c) => {
+      const session = await getSessionFromRequest(db, c);
+      if (!session) {
+        return c.json({ error: { code: "unauthenticated", message: "Sign in required." } }, 401);
+      }
+      if (session.authMethod !== "passkey") {
+        return c.json(
+          {
+            error: {
+              code: "passkey_required",
+              message: "Sign in with a passkey to change the recovery password.",
+            },
+          },
+          403,
+        );
+      }
+
+      const existing = await db.query.users.findFirst({
+        where: (u, { isNotNull }) => isNotNull(u.recoveryPasswordHash),
+      });
+      if (existing && existing.id !== session.userId) {
+        return c.json(
+          {
+            error: {
+              code: "recovery_password_exists",
+              message: `${existing.displayName} already holds the recovery password. Remove theirs first.`,
+            },
+          },
+          400,
+        );
+      }
+
+      const hash = await hashPassword(c.req.valid("json").password);
+      const setAt = new Date();
+      await db
+        .update(usersTable)
+        .set({ recoveryPasswordHash: hash, recoveryPasswordSetAt: setAt })
+        .where(eq(usersTable.id, session.userId));
+
+      await writeAuditLog(db, {
+        actorId: session.userId,
+        action: existing ? "auth.recovery_password_replaced" : "auth.recovery_password_set",
+        entityType: "user",
+        entityId: session.userId,
+      });
+
+      return c.json({ configured: true, setAt });
+    })
+
+    // Remove it. Also passkey-only, for the same reason.
+    .delete("/recovery-password", async (c) => {
+      const session = await getSessionFromRequest(db, c);
+      if (!session) {
+        return c.json({ error: { code: "unauthenticated", message: "Sign in required." } }, 401);
+      }
+      if (session.authMethod !== "passkey") {
+        return c.json(
+          {
+            error: {
+              code: "passkey_required",
+              message: "Sign in with a passkey to remove the recovery password.",
+            },
+          },
+          403,
+        );
+      }
+
+      const holder = await db.query.users.findFirst({
+        where: (u, { isNotNull }) => isNotNull(u.recoveryPasswordHash),
+      });
+      if (!holder) return c.json({ configured: false });
+
+      await db
+        .update(usersTable)
+        .set({ recoveryPasswordHash: null, recoveryPasswordSetAt: null })
+        .where(eq(usersTable.id, holder.id));
+      // Any session it opened dies with it — otherwise removing the password
+      // would leave the door it opened standing ajar for another hour.
+      await db
+        .update(sessionsTable)
+        .set({ revokedAt: new Date() })
+        .where(eq(sessionsTable.authMethod, "recovery_password"));
+
+      await writeAuditLog(db, {
+        actorId: session.userId,
+        action: "auth.recovery_password_removed",
+        entityType: "user",
+        entityId: holder.id,
+      });
+
+      return c.json({ configured: false });
+    })
 
     .post("/logout", async (c) => {
       const session = await getSessionFromRequest(db, c);

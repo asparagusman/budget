@@ -1,54 +1,23 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
-import { toCents } from "@budget/engine";
-import { ArrowLeftIcon, SaveIcon } from "lucide-react";
-import { toast } from "sonner";
+import { ArrowLeftIcon } from "lucide-react";
 import { Button } from "@/components/ui/button.jsx";
-import { Input } from "@/components/ui/input.jsx";
-import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/components/ui/input-group.jsx";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select.jsx";
-import { EmptyState } from "@/components/empty-state.jsx";
-import { FieldRow } from "@/components/field-row.jsx";
-import { Money } from "@/components/money.jsx";
+import { BillHistoryEntry } from "@/components/bill-history-entry.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
-import { StatTile } from "@/components/stat-tile.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
 import { registerCommands } from "@/lib/commands.js";
-import { formatIsoDate } from "@/lib/dates.js";
-
-/** @import { Cents } from "@budget/engine" */
-/** @typedef {{ ordinal: number, label: string, dueDate: string, actualCents: Cents | null }} HistorySlot */
-
-const LOOKBACK_OPTIONS = /** @type {const} */ (["6", "12", "24", "custom"]);
-
-/** @param {Cents[]} values */
-function computeStats(values) {
-  const mean = Math.round(values.reduce((a, b) => a + b, 0) / values.length);
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const variance = values.reduce((a, b) => a + (b - mean) ** 2, 0) / values.length;
-  const stdDev = Math.round(Math.sqrt(variance));
-  return { mean, min, max, stdDev };
-}
 
 /**
- * The reverse-sequential entry screen — the phase's most important
- * interaction (phases/06-fixed-costs.md "/costs/fixed/:billId/history").
- * Pick a lookback, then enter downward: "Previous bill", "2 bills ago", …
- * Typing never reorders rows or steals focus — the operator is reading off a
- * stack of statements and any jump loses their place.
+ * The full-screen route for bill history entry. The interaction itself lives
+ * in `<BillHistoryEntry>`, which /costs/fixed also opens in a dialog beside
+ * the bill being edited — that is the fast path now, and this route stays for
+ * a bookmarked or shared deep link.
  */
 export function BillHistoryPage() {
   const { billId } = useParams({ strict: false });
   const navigate = useNavigate();
-  const queryClient = useQueryClient();
-  const inputRefs = useRef(/** @type {(HTMLInputElement | null)[]} */ ([]));
-
-  const [lookback, setLookback] = useState(/** @type {(typeof LOOKBACK_OPTIONS)[number]} */ ("6"));
-  const [customPeriods, setCustomPeriods] = useState("18");
-  const [values, setValues] = useState(/** @type {string[]} */ ([]));
 
   const billQuery = useQuery({
     queryKey: ["bill-detail", billId],
@@ -60,112 +29,19 @@ export function BillHistoryPage() {
     enabled: billId !== undefined,
   });
 
-  const settingsQuery = useQuery({
-    queryKey: ["settings"],
-    queryFn: async () => {
-      const res = await api.settings.$get();
-      if (!res.ok) throw new Error(await readApiError(res));
-      return (await res.json()).settings;
-    },
-  });
-
-  // Applies the operator's saved default lookback once, the first time it
-  // loads — an explicit later choice (including "custom") must never be
-  // overwritten by a slow settings response landing after it.
-  const appliedDefaultRef = useRef(false);
-  useEffect(() => {
-    if (appliedDefaultRef.current) return;
-    const def = Number(settingsQuery.data?.historyLookbackDefault);
-    if (!Number.isFinite(def)) return;
-    appliedDefaultRef.current = true;
-    setLookback(/** @type {(typeof LOOKBACK_OPTIONS)[number]} */ ([6, 12, 24].includes(def) ? String(def) : "custom"));
-    setCustomPeriods(String(def));
-  }, [settingsQuery.data]);
-
-  const periods = lookback === "custom" ? Math.max(1, Number(customPeriods) || 1) : Number(lookback);
-
-  const historyQuery = useQuery({
-    queryKey: ["bill-history", billId, periods],
-    queryFn: async () => {
-      const res = await api.bills[":id"].history.$get({
-        param: { id: /** @type {string} */ (billId) },
-        query: { periods: String(periods) },
-      });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return /** @type {{ billId: string, slots: HistorySlot[] }} */ (await res.json());
-    },
-    enabled: billId !== undefined,
-  });
-
-  const slots = historyQuery.data?.slots ?? [];
-
-  useEffect(() => {
-    setValues(slots.map((s) => (s.actualCents !== null ? String(s.actualCents / 100) : "")));
-    // Only re-syncs when the slot set itself changes (a different bill or
-    // lookback) — never while the operator is mid-edit.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [historyQuery.data]);
-
-  const saveMutation = useMutation({
-    mutationFn: async () => {
-      // Only entries that actually changed from what loaded — an untouched
-      // blank slot has nothing to remember (phases/06-fixed-costs.md
-      // "Instance storage"), and submitting one anyway would create a bare
-      // row with nothing in it.
-      const entries = slots
-        .map((slot, i) => {
-          const raw = values[i]?.trim() ?? "";
-          const nextCents = raw === "" ? null : toCents(Number(raw));
-          return nextCents !== slot.actualCents ? { dueDate: slot.dueDate, actualCents: nextCents } : null;
-        })
-        .filter((e) => e !== null);
-      if (entries.length === 0) return { billInstances: [] };
-      const res = await api.bills[":id"].history.$put({ param: { id: /** @type {string} */ (billId) }, json: { entries } });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return res.json();
-    },
-    onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: ["bill-history", billId] });
-      queryClient.invalidateQueries({ queryKey: ["bill-detail", billId] });
-      queryClient.invalidateQueries({ queryKey: ["fixed-costs-summary"] });
-      queryClient.invalidateQueries({ queryKey: ["bill-instances"] });
-      toast.success(result.billInstances.length > 0 ? "History saved." : "Nothing changed.");
-    },
-    onError: (err) => toast.error(err.message),
-  });
-
   useEffect(
     () =>
       registerCommands([
         {
-          id: "bill-history:save",
-          group: "Actions",
-          label: "Save bill history",
-          icon: SaveIcon,
-          run: () => saveMutation.mutate(),
+          id: "bill-history:back",
+          group: "Navigation",
+          label: "Back to Fixed Costs",
+          icon: ArrowLeftIcon,
+          run: () => navigate({ to: "/costs/fixed" }),
         },
       ]),
-    [saveMutation],
+    [navigate],
   );
-
-  const stats = useMemo(() => {
-    const enteredCents = values.map((v) => (v.trim() === "" ? null : toCents(Number(v)))).filter((v) => v !== null);
-    return enteredCents.length > 0 ? computeStats(enteredCents) : null;
-  }, [values]);
-
-  /** @param {number} index */
-  function focusSlot(index) {
-    inputRefs.current[index]?.focus();
-    inputRefs.current[index]?.select();
-  }
-
-  /** @param {import("react").KeyboardEvent<HTMLInputElement>} e @param {number} index */
-  function handleKeyDown(e, index) {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      focusSlot(index + 1);
-    }
-  }
 
   if (billId === undefined) return null;
 
@@ -175,87 +51,13 @@ export function BillHistoryPage() {
         title={billQuery.data ? `${billQuery.data.name} — history` : "Bill history"}
         description="Enter downward, newest first — the dates are derived from this bill's own cadence."
         actions={
-          <>
-            <Button variant="outline" onClick={() => navigate({ to: "/costs/fixed" })}>
-              <ArrowLeftIcon />
-              Back
-            </Button>
-            <Button onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>
-              <SaveIcon />
-              {saveMutation.isPending ? "Saving…" : "Save"}
-            </Button>
-          </>
+          <Button variant="outline" onClick={() => navigate({ to: "/costs/fixed" })}>
+            <ArrowLeftIcon />
+            Back
+          </Button>
         }
       />
-
-      <div className="flex flex-wrap items-end gap-4">
-        <FieldRow label="Lookback" htmlFor="history-lookback" className="w-40">
-          <Select value={lookback} onValueChange={(v) => setLookback(/** @type {(typeof LOOKBACK_OPTIONS)[number]} */ (v))}>
-            <SelectTrigger id="history-lookback" className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="6">6 periods</SelectItem>
-              <SelectItem value="12">12 periods</SelectItem>
-              <SelectItem value="24">24 periods</SelectItem>
-              <SelectItem value="custom">Custom</SelectItem>
-            </SelectContent>
-          </Select>
-        </FieldRow>
-        {lookback === "custom" ? (
-          <FieldRow label="Periods" htmlFor="history-custom" className="w-28">
-            <Input id="history-custom" type="number" min="1" inputMode="numeric" value={customPeriods} onChange={(e) => setCustomPeriods(e.target.value)} />
-          </FieldRow>
-        ) : null}
-      </div>
-
-      {stats ? (
-        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-          <StatTile label="Mean" value={<Money value={stats.mean} />} />
-          <StatTile label="Min" value={<Money value={stats.min} />} />
-          <StatTile label="Max" value={<Money value={stats.max} />} />
-          <StatTile
-            label="Variance band"
-            value={
-              <span className="text-lg">
-                <Money value={stats.mean - stats.stdDev} /> – <Money value={stats.mean + stats.stdDev} />
-              </span>
-            }
-          />
-        </div>
-      ) : null}
-
-      {historyQuery.isLoading ? null : slots.length === 0 ? (
-        <EmptyState title="No history to show" description="This bill has no derivable due dates in the chosen lookback." />
-      ) : (
-        <div className="flex flex-col divide-y divide-border rounded-(--radius-card) bg-surface shadow-(--shadow-card)">
-          {slots.map((slot, i) => (
-            <div key={slot.dueDate} className="flex items-center justify-between gap-4 p-4">
-              <div className="min-w-0">
-                <p className="text-sm font-medium text-text">{slot.label}</p>
-                <p className="text-xs text-text-muted">{formatIsoDate(slot.dueDate, "en-AU")}</p>
-              </div>
-              <InputGroup className="h-11 w-40 shrink-0">
-                <InputGroupAddon>
-                  <InputGroupText>$</InputGroupText>
-                </InputGroupAddon>
-                <InputGroupInput
-                  ref={(el) => {
-                    inputRefs.current[i] = el;
-                  }}
-                  type="number"
-                  step="0.01"
-                  inputMode="decimal"
-                  className="text-base"
-                  value={values[i] ?? ""}
-                  onChange={(e) => setValues((prev) => prev.map((v, idx) => (idx === i ? e.target.value : v)))}
-                  onKeyDown={(e) => handleKeyDown(e, i)}
-                />
-              </InputGroup>
-            </div>
-          ))}
-        </div>
-      )}
+      <BillHistoryEntry billId={billId} />
     </>
   );
 }

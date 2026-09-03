@@ -2,7 +2,7 @@ import { fileURLToPath } from "node:url";
 import { config as loadEnv } from "dotenv";
 import { createDb } from "./client.js";
 import { accounts } from "./tables/accounts.js";
-import { allocationLines, allocationPlans, allocationVersions } from "./tables/allocation.js";
+import { allocationLines, allocationPlans, allocationStageGoals, allocationVersions } from "./tables/allocation.js";
 import { balanceSnapshots } from "./tables/balance-snapshots.js";
 import { goals } from "./tables/goals.js";
 import { bills } from "./tables/bills.js";
@@ -281,6 +281,10 @@ const EXAMPLE_ALLOCATION_LINE_SHAPE = [
   // from /fixed-costs/summary and /variable-costs/summary. Fixed stays in
   // the income-landing account (bills are debited from it, so nothing
   // moves); essentials transfer out to the joint spending account.
+  //
+  // `stage` is both the order a line resolves in and the section it belongs
+  // to: 1/2/3 are Bills & Essentials, Save Invest & Give, Leftover
+  // (`ALLOCATION_SECTIONS` in packages/engine/src/allocation.js).
   { label: "Fixed", stage: 1, basis: "from_fixed_costs", value: null, goalPct: null, accountIndex: 0 },
   { label: "Variable", stage: 1, basis: "from_variable_essentials", value: null, goalPct: null, accountIndex: 1 },
   // Stage 2 — percentages of GROSS, each with the operator's own goal.
@@ -340,6 +344,27 @@ const exampleAllocationLines = EXAMPLE_ALLOCATION_VERSION_IDS.flatMap((versionId
     sortOrder: lineIndex,
   }));
 });
+// The two Goal % cells the workbook carries on its Running Totals rows, which
+// no per-line goal can express: 50% on section A's Subtotal, and the 10% the
+// sheet writes against section B's *Remaining* row — which is section C's
+// subtotal, because C's two lines split 100% of what B leaves. Section B has
+// no goal of its own; the sheet leaves that cell blank and its own lines sum
+// to 40%, so the seeded data exercises all three `goalSource` states at once.
+/** @type {(typeof allocationStageGoals.$inferInsert)[]} */
+const exampleAllocationStageGoals = EXAMPLE_ALLOCATION_VERSION_IDS.flatMap((versionId, planIndex) =>
+  [
+    { stage: 1, goalPct: 50 },
+    { stage: 3, goalPct: 10 },
+  ].map((goal, goalIndex) => ({
+    // 1901, 1902, … — two ids reserved per plan, in the same uuid shape as
+    // the blocks above.
+    id: `00000000-0000-4000-8000-${String(1901 + planIndex * 2 + goalIndex).padStart(12, "0")}`,
+    versionId,
+    stage: goal.stage,
+    goalPct: goal.goalPct,
+  })),
+);
+
 // The fortnightly transfer figures in phases/08-allocation.md's "Example
 // data" table assume a FORTNIGHTLY primary pay schedule. None is seeded — a
 // payday is real household data and phase 04 deliberately seeds none — so
@@ -530,6 +555,13 @@ async function seed(databaseUrl) {
       await db.insert(allocationLines).values(row).onConflictDoUpdate({ target: allocationLines.id, set: row });
       count++;
     }
+    for (const row of exampleAllocationStageGoals) {
+      await db
+        .insert(allocationStageGoals)
+        .values(row)
+        .onConflictDoUpdate({ target: allocationStageGoals.id, set: row });
+      count++;
+    }
     for (const row of exampleBalances) {
       await db.insert(balanceSnapshots).values(row).onConflictDoUpdate({ target: balanceSnapshots.id, set: row });
       count++;
@@ -556,6 +588,7 @@ async function seed(databaseUrl) {
       allocationPlans: EXAMPLE_ALLOCATION_PLAN_IDS,
       allocationVersions: EXAMPLE_ALLOCATION_VERSION_IDS,
       allocationLines: exampleAllocationLines.map((l) => l.id),
+      allocationStageGoals: exampleAllocationStageGoals.map((g) => g.id),
       balanceSnapshots: EXAMPLE_BALANCE_IDS,
       goals: EXAMPLE_GOAL_IDS,
     };

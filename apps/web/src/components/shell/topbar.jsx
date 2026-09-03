@@ -21,7 +21,9 @@ export function TopBar() {
 
   return (
     <header
-      className="sticky top-0 z-30 flex h-14 shrink-0 items-center justify-between border-b border-border bg-surface px-4 md:hidden"
+      // Not sticky: it is a sibling of the scroll container now, so it
+      // simply never moves.
+      className="z-30 flex h-14 shrink-0 items-center justify-between border-b border-border bg-surface px-4 md:hidden"
       style={{ paddingTop: "env(safe-area-inset-top)" }}
     >
       <h1 className="truncate text-base font-semibold text-text">

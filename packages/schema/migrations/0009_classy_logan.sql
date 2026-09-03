@@ -1,0 +1,1 @@
+ALTER TABLE "allocation_lines" ADD COLUMN "category" text;

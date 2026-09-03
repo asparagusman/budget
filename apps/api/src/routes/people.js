@@ -1,8 +1,9 @@
-import { createPersonSchema, people, updatePersonSchema } from "@budget/schema";
+import { createPersonSchema, people, reorderSchema, updatePersonSchema } from "@budget/schema";
 import { mustAt } from "@budget/engine";
 import { zValidator } from "@hono/zod-validator";
 import { and, eq, isNull } from "drizzle-orm";
 import { Hono } from "hono";
+import { reorderError } from "../lib/reorder.js";
 import { handleValidation } from "../lib/validation.js";
 
 /**
@@ -28,6 +29,31 @@ export function createPeopleRoutes({ db }) {
       const created = await db.insert(people).values(data).returning();
       const person = mustAt(created, 0, "created person");
       return c.json({ person }, 201);
+    })
+
+    // The whole list in its new order, renumbered 0..n-1 in one transaction.
+    // See the schema's own comment for why this is not a `sortOrder` field on
+    // the edit form: every row starts at the column default of 0, so there is
+    // no per-row number to nudge until something has written a real one.
+    .post("/reorder", zValidator("json", reorderSchema, handleValidation), async (c) => {
+      const { ids } = c.req.valid("json");
+
+      const rows = await db.query.people.findMany({
+        where: (p, { isNull: isNullCol }) => isNullCol(p.archivedAt),
+        columns: { id: true },
+      });
+      const problem = reorderError(ids, rows.map((row) => row.id), "people");
+      if (problem) {
+        return c.json({ error: { code: "incomplete_order", message: problem } }, 400);
+      }
+
+      await db.transaction(async (tx) => {
+        for (const [index, id] of ids.entries()) {
+          await tx.update(people).set({ sortOrder: index }).where(eq(people.id, id));
+        }
+      });
+
+      return c.json({ ok: true });
     })
 
     .patch("/:id", zValidator("json", updatePersonSchema, handleValidation), async (c) => {

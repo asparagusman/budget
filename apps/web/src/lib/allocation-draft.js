@@ -1,4 +1,4 @@
-import { toCents } from "@budget/engine";
+import { ALLOCATION_SECTIONS, toCents } from "@budget/engine";
 import { create } from "zustand";
 import { temporal } from "zundo";
 
@@ -15,10 +15,22 @@ import { temporal } from "zundo";
  *   accountId: string,
  * }} DraftLine
  *
- * The editor's own line shape. `valueText`/`goalPctText` are the raw strings
- * from their inputs, not numbers: the preview recomputes on every keystroke,
- * and a number would make "7." or "" unrepresentable — the field would fight
- * the operator mid-type. They also make undo restore exactly what was typed.
+ * The editor's own line shape. `valueText` and `goalPctText` are the raw
+ * strings from their inputs, not numbers or nulls: the preview recomputes on
+ * every keystroke, and a number would make "7." or "" unrepresentable — the
+ * field would fight the operator mid-type. They also make undo restore exactly
+ * what was typed.
+ *
+ * `stage` is the section the line sits in — 1, 2 or 3. There is no per-line
+ * category: the sheet's "Category" column is the section heading, and `label`
+ * is its "Division".
+ */
+
+/**
+ * A section's own goal, as typed. Keyed by stage, and a raw string for the
+ * same reason `goalPctText` is one.
+ *
+ * @typedef {Record<number, string>} DraftStageGoals
  */
 
 // Ids are local to the editing session and never sent anywhere: PUT
@@ -29,6 +41,14 @@ let lineSeq = 0;
 function nextLineId() {
   lineSeq += 1;
   return `draft-line-${lineSeq}`;
+}
+
+// What a new row in each section starts as. Section A's amounts are injected
+// totals with nothing to type, so a new row there is a percentage of gross
+// like section B's; section C divides what's left.
+/** @param {number} stage */
+function defaultBasisForStage(stage) {
+  return /** @type {Basis} */ (stage === 3 ? "pct_of_remaining" : "pct_of_gross");
 }
 
 /**
@@ -105,6 +125,33 @@ export function draftLinesToPayload(lines) {
 }
 
 /**
+ * Draft stage goals -> the API's payload. Only the sections that actually
+ * carry a number are sent: a cleared field is the absence of a goal, not a
+ * goal of nothing (the same rule `goalPct` follows on a line).
+ *
+ * @param {DraftStageGoals} stageGoals
+ */
+export function draftStageGoalsToPayload(stageGoals) {
+  return ALLOCATION_SECTIONS.map((section) => ({
+    stage: section.stage,
+    goalPct: textToGoalPct(stageGoals[section.stage] ?? ""),
+  })).flatMap((goal) => (goal.goalPct === null ? [] : [{ stage: goal.stage, goalPct: goal.goalPct }]));
+}
+
+/**
+ * Server stage goals -> the editor's keyed strings.
+ *
+ * @param {{ stage: number, goalPct: number }[]} rows
+ * @returns {DraftStageGoals}
+ */
+export function serverStageGoalsToDraft(rows) {
+  /** @type {DraftStageGoals} */
+  const out = {};
+  for (const row of rows) out[row.stage] = String(row.goalPct);
+  return out;
+}
+
+/**
  * Server line -> draft line.
  *
  * @param {{ id: string, stage: number, label: string, basis: Basis, value: number | null, goalPct: number | null, accountId: string }} row
@@ -127,21 +174,28 @@ export function serverLineToDraft(row) {
  * changed in the other session" from "this is the same draft we already have".
  * Deliberately ignores line ids, which are reassigned on every save.
  *
+ * Section goals are part of it: a goal typed in the other session is a change
+ * to the same draft, and a signature blind to it would leave one browser
+ * showing a target the other had already moved.
+ *
  * @param {{ stage: number, label: string, basis: string, value: number | null, goalPct: number | null, accountId: string, sortOrder: number }[]} rows
+ * @param {{ stage: number, goalPct: number }[]} [stageGoalRows]
  */
-export function serverLinesSignature(rows) {
-  return JSON.stringify(
+export function serverLinesSignature(rows, stageGoalRows = []) {
+  return JSON.stringify([
     [...rows]
       .sort((a, b) => a.stage - b.stage || a.sortOrder - b.sortOrder)
       .map((r) => [r.stage, r.label, r.basis, r.value, r.goalPct, r.accountId]),
-  );
+    [...stageGoalRows].sort((a, b) => a.stage - b.stage).map((g) => [g.stage, g.goalPct]),
+  ]);
 }
 
 /**
  * @param {DraftLine[]} lines
+ * @param {DraftStageGoals} [stageGoals]
  */
-export function draftLinesSignature(lines) {
-  return JSON.stringify(
+export function draftLinesSignature(lines, stageGoals = {}) {
+  return JSON.stringify([
     lines.map((l) => [
       l.stage,
       l.label,
@@ -150,7 +204,8 @@ export function draftLinesSignature(lines) {
       textToGoalPct(l.goalPctText),
       l.accountId,
     ]),
-  );
+    draftStageGoalsToPayload(stageGoals).map((g) => [g.stage, g.goalPct]),
+  ]);
 }
 
 /**
@@ -195,31 +250,39 @@ export const useAllocationDraft = create(
     /** @returns {{
      *   versionId: string | null,
      *   lines: DraftLine[],
+     *   stageGoals: DraftStageGoals,
      *   dirty: boolean,
-     *   load: (versionId: string, rows: Parameters<typeof serverLineToDraft>[0][]) => void,
+     *   load: (versionId: string, rows: Parameters<typeof serverLineToDraft>[0][], stageGoalRows?: { stage: number, goalPct: number }[]) => void,
      *   reset: () => void,
      *   markSaved: () => void,
      *   updateLine: (id: string, patch: Partial<DraftLine>) => void,
+     *   setStageGoal: (stage: number, text: string) => void,
      *   addLine: (stage: number, accountId: string) => void,
      *   removeLine: (id: string) => void,
      *   moveLine: (id: string, direction: -1 | 1) => void,
      *   moveLineBefore: (id: string, targetId: string) => void,
      *   setLineStage: (id: string, stage: number) => void,
-     *   addStage: (accountId: string) => void,
      * }} */
-    (set, get) => ({
+    (set) => ({
       versionId: null,
       /** @type {DraftLine[]} */
       lines: [],
+      /** @type {DraftStageGoals} */
+      stageGoals: {},
       dirty: false,
 
-      load: (versionId, rows) => {
-        set({ versionId, lines: rows.map(serverLineToDraft), dirty: false });
+      load: (versionId, rows, stageGoalRows = []) => {
+        set({
+          versionId,
+          lines: rows.map(serverLineToDraft),
+          stageGoals: serverStageGoalsToDraft(stageGoalRows),
+          dirty: false,
+        });
         useAllocationDraft.temporal.getState().clear();
       },
 
       reset: () => {
-        set({ versionId: null, lines: [], dirty: false });
+        set({ versionId: null, lines: [], stageGoals: {}, dirty: false });
         useAllocationDraft.temporal.getState().clear();
       },
 
@@ -231,21 +294,27 @@ export const useAllocationDraft = create(
           dirty: true,
         })),
 
+      setStageGoal: (stage, text) =>
+        set((state) => ({ stageGoals: { ...state.stageGoals, [stage]: text }, dirty: true })),
+
       addLine: (stage, accountId) =>
         set((state) => {
+          // Appended after the last line of its own stage so a new line lands
+          // where the operator was looking, not at the end of the plan.
+          const lastIndexInStage = state.lines.reduce((last, l, i) => (l.stage === stage ? i : last), -1);
           /** @type {DraftLine} */
           const line = {
             id: nextLineId(),
             stage,
             label: "",
-            basis: "pct_of_gross",
+            // Whatever the section it lands in mostly uses — a new row in
+            // Leftover is a share of what's left, not a percentage of gross.
+            // A starting value in an editable control, never a rule.
+            basis: defaultBasisForStage(stage),
             valueText: "",
             goalPctText: "",
             accountId,
           };
-          // Appended after the last line of its own stage so a new line lands
-          // where the operator was looking, not at the end of the plan.
-          const lastIndexInStage = state.lines.reduce((last, l, i) => (l.stage === stage ? i : last), -1);
           const next = [...state.lines];
           next.splice(lastIndexInStage + 1, 0, line);
           return { lines: next, dirty: true };
@@ -300,16 +369,12 @@ export const useAllocationDraft = create(
           return { lines: next, dirty: true };
         }),
 
-      addStage: (accountId) => {
-        const highest = get().lines.reduce((max, line) => Math.max(max, line.stage), 0);
-        get().addLine(highest + 1, accountId);
-      },
     }),
     {
-      // Only the lines are undoable. `dirty` and `versionId` are bookkeeping:
-      // an undo that also un-dirtied the draft would skip the autosave that
-      // has to follow it.
-      partialize: (state) => ({ lines: state.lines }),
+      // The lines and the section goals are undoable; `dirty` and `versionId`
+      // are bookkeeping, and an undo that also un-dirtied the draft would skip
+      // the autosave that has to follow it.
+      partialize: (state) => ({ lines: state.lines, stageGoals: state.stageGoals }),
       limit: HISTORY_LIMIT,
       handleSet: (handleSet) => throttleLeading(handleSet, HISTORY_THROTTLE_MS),
     },

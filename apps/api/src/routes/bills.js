@@ -35,11 +35,17 @@ function factorsToRecord(factorRows) {
 async function loadBillWithModifiers(db, id) {
   const bill = await db.query.bills.findFirst({ where: (b, { eq: eqCol }) => eqCol(b.id, id) });
   if (!bill) return null;
-  const { factorsByBill, stepChangesByBill } = await loadBillModifiers(db, [id], { withHistory: false });
+  const { factorsByBill, stepChangesByBill, historyByBill } = await loadBillModifiers(db, [id]);
   return {
     ...bill,
     seasonalFactors: factorsToRecord(factorsByBill.get(id) ?? []),
     stepChanges: stepChangesByBill.get(id) ?? [],
+    history: (historyByBill.get(id) ?? []).map((i) => ({
+      dueDate: i.dueDate,
+      actualCents: i.actualCents,
+      expectedCents: i.expectedCents,
+      isOverride: i.isOverride,
+    })),
   };
 }
 
@@ -50,26 +56,36 @@ export function createBillsRoutes({ db }) {
   const app = new Hono();
 
   return app
-    // Every active bill, each with its factors and step changes embedded —
-    // one request for the /costs/fixed list, which builds its own
-    // amount-model preview client-side via @budget/engine rather than the
-    // server duplicating that math for a non-headline display figure (same
-    // "compute client-side from pure engine output" pattern as settings-
-    // page.jsx's pay-schedule preview).
+    // Every active bill, each with its factors, step changes and entered
+    // history embedded — one request for the /costs/fixed list, which
+    // recomputes amount-model previews client-side via @budget/engine while
+    // the operator is mid-edit (same "compute client-side from pure engine
+    // output" pattern as the pay-schedule preview in admin settings).
+    //
+    // `history` is the whole reason a preview can be trusted: without the
+    // entered actuals a `rolling_average` bill projects to its base, so the
+    // screen would print an amount the server never budgets with. Only the
+    // four columns `projectInstances` reads are sent, not the whole
+    // instance row.
     .get("/", async (c) => {
       const rows = await db.query.bills.findMany({
         where: (b, { isNull: isNullCol }) => isNullCol(b.archivedAt),
         orderBy: (b, { asc }) => [asc(b.sortOrder), asc(b.name)],
       });
-      const { factorsByBill, stepChangesByBill } = await loadBillModifiers(
+      const { factorsByBill, stepChangesByBill, historyByBill } = await loadBillModifiers(
         db,
         rows.map((r) => r.id),
-        { withHistory: false },
       );
       const result = rows.map((row) => ({
         ...row,
         seasonalFactors: factorsToRecord(factorsByBill.get(row.id) ?? []),
         stepChanges: stepChangesByBill.get(row.id) ?? [],
+        history: (historyByBill.get(row.id) ?? []).map((i) => ({
+          dueDate: i.dueDate,
+          actualCents: i.actualCents,
+          expectedCents: i.expectedCents,
+          isOverride: i.isOverride,
+        })),
       }));
       return c.json({ bills: result });
     })
@@ -114,7 +130,7 @@ export function createBillsRoutes({ db }) {
         metadata: data,
       });
 
-      return c.json({ bill: { ...bill, seasonalFactors: {}, stepChanges: [] } }, 201);
+      return c.json({ bill: { ...bill, seasonalFactors: {}, stepChanges: [], history: [] } }, 201);
     })
 
     .patch("/:id", zValidator("json", updateBillSchema, handleValidation), async (c) => {

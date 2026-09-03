@@ -2,10 +2,10 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    // The importer's tests read the household's real workbook, which lives in
-    // the gitignored `.claude/plans/` directory. On a machine without it the
-    // suite is empty rather than failing — see parse.test.js, which says so
-    // out loud rather than skipping quietly.
-    passWithNoTests: true,
+    // The dashboard suite migrates a PGlite database per file, which costs a
+    // few seconds before the first assertion runs. The default 5s timeout is
+    // for a unit test; this one is for a Postgres.
+    hookTimeout: 60_000,
+    testTimeout: 30_000,
   },
 });

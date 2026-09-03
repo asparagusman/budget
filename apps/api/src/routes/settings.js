@@ -10,7 +10,13 @@ import { handleValidation } from "../lib/validation.js";
 // version` also lives in this table but is infrastructure bookkeeping, not
 // a setting — deliberately excluded from both the whitelist and the
 // response.
-const SETTINGS_KEYS = /** @type {const} */ (["currency", "locale", "billsBufferCents", "historyLookbackDefault"]);
+const SETTINGS_KEYS = /** @type {const} */ ([
+  "currency",
+  "locale",
+  "billsBufferCents",
+  "historyLookbackDefault",
+  "billsOpeningBalanceCents",
+]);
 
 // Fallback only for a row seed.js hasn't written yet (a fresh database
 // queried before `pnpm db:seed` runs) — normal operation always reads the
@@ -21,6 +27,9 @@ const SETTINGS_DEFAULTS = {
   locale: "en-AU",
   billsBufferCents: 0,
   historyLookbackDefault: 6,
+  // No override — the balance curve opens from the income-landing account's
+  // own latest snapshot instead.
+  billsOpeningBalanceCents: null,
 };
 
 /** @param {import("@budget/schema").Db} db */

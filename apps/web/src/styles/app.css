@@ -34,6 +34,33 @@
     max-width: 100%;
   }
 
+  /* ---- who scrolls ---------------------------------------------------
+     The DOCUMENT does not. The app frame is exactly one viewport tall and
+     <main> scrolls inside it (see components/shell/app-shell.jsx).
+
+     This is one change with four consequences, which is why the sidebar,
+     the topbar, the overlay scrollbar and most of the dropdown/palette CLS
+     were never four separate problems:
+
+     1. The sidebar and top bar stop scrolling away with the page — they
+        are siblings of the scroll container, not content inside it.
+     2. Radix's scroll lock (every dropdown, dialog and the command
+        palette) freezes `body`. While the document was the scroller, that
+        removed the document scrollbar and shifted the whole layout by its
+        width on every open and close. A body that never scrolled has no
+        scrollbar to remove.
+     3. `scrollbar-gutter: stable` on the scroller below reserves the space
+        once, so a short page and a long page align.
+     4. There is now a single, styleable scroll container to hang an
+        overlay scrollbar off, instead of the browser's document one. */
+  html,
+  body,
+  #root {
+    height: 100%;
+    overflow-y: hidden;
+    overscroll-behavior-y: none;
+  }
+
   /* ---- touch targets -------------------------------------------------
      44px minimum on anything driven by a finger
      (phases/11-polish-mobile-import.md, workstream B). Gated on
@@ -112,7 +139,8 @@
    --------------------------------------------------------------------------- */
 @theme {
   /* Named so no component has to re-type a duration. Nothing exceeds 300ms
-     except the deliberate chart entrance, which echarts owns. */
+     except the deliberate chart entrance, which each series owns through
+     `useChartMotion` (components/chart.jsx). */
   --animate-card-enter: card-enter 260ms cubic-bezier(0.16, 1, 0.3, 1) both;
   --animate-route-enter: route-enter 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
   --animate-row-flash: row-flash 600ms ease-out both;

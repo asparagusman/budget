@@ -10,6 +10,11 @@ export const updateSettingsSchema = z
     locale: z.string().trim().min(2).max(35),
     billsBufferCents: z.number().int().min(0),
     historyLookbackDefault: z.number().int().min(1).max(24),
+    // Null means "no override" — the balance curve then opens from the
+    // income-landing account's own latest snapshot. Explicitly nullable
+    // rather than absent-means-clear, because `.partial()` already gives
+    // absent the meaning "don't touch this key".
+    billsOpeningBalanceCents: z.number().int().nullable(),
   })
   .partial()
   .refine((value) => Object.keys(value).length > 0, {

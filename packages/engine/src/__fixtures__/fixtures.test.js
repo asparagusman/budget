@@ -17,6 +17,7 @@ import { mustAt, mustFind, mustGet } from "../invariant.js";
 import { futureValueCents } from "../projections.js";
 import {
   ALLOCATION_LINES,
+  ALLOCATION_STAGE_GOALS,
   FIXED_COST_BILLS,
   FIXED_COST_BILLS_AS_SPREADSHEET_TOTAL,
   GROSS_USUAL_FORTNIGHTLY_CENTS,
@@ -118,6 +119,7 @@ describe("Fixture A — as-spreadsheet", () => {
       variableNonEssentialPerMonthCents: VARIABLE_NON_ESSENTIAL_MONTHLY_CENTS,
       incomeLandingAccountId: INCOME_LANDING_ACCOUNT_ID,
       lines: ALLOCATION_LINES,
+      stageGoals: ALLOCATION_STAGE_GOALS,
     });
 
     it("reproduces stage 1 (Fixed + Variable)", () => {
@@ -180,6 +182,7 @@ describe("Fixture B — corrected (unlabelled duplicate Rent bill removed)", () 
     variableNonEssentialPerMonthCents: VARIABLE_NON_ESSENTIAL_MONTHLY_CENTS,
     incomeLandingAccountId: INCOME_LANDING_ACCOUNT_ID,
     lines: ALLOCATION_LINES,
+    stageGoals: ALLOCATION_STAGE_GOALS,
   });
 
   it("reproduces the corrected fixed total", () => {
@@ -191,6 +194,32 @@ describe("Fixture B — corrected (unlabelled duplicate Rent bill removed)", () 
     expectDollarsNear(mustAt(result.stages, 0).subtotalPerMonthCents, 5029.656667);
     expect(mustAt(result.stages, 0).actualPct).toBeCloseTo(47.9465, 1);
     expectDollarsNear(mustAt(result.stages, 0).remainingPerMonthCents, 5460.498333);
+  });
+
+  // The two Goal % cells the workbook carries on its Running Totals rows, and
+  // the fidelity figures printed beside them. Section A's goal sits on a
+  // Subtotal row; the second sits on section B's *Remaining* row, which is
+  // section C's subtotal — C's two lines split 100% of what B leaves. Neither
+  // is the sum of any line's goal, which is why `stageGoals` exists.
+  it("reproduces the sheet's two section-level fidelity figures", () => {
+    const sectionA = mustAt(result.stages, 0);
+    expect(sectionA.goalPct).toBe(50);
+    expect(sectionA.goalSource).toBe("stage");
+    // Sheet: Goal % 50, Actual % 47.9465, Fidelity -4.1%.
+    expect(sectionA.fidelity).toBeCloseTo(-0.041, 2);
+
+    // Section B carries no goal of its own — the sheet leaves that cell blank
+    // — so it falls back to the sum of its own lines' goals (10+10+10+7+3).
+    const sectionB = mustAt(result.stages, 1);
+    expect(sectionB.goalPct).toBe(40);
+    expect(sectionB.goalSource).toBe("lines");
+
+    const sectionC = mustAt(result.stages, 2);
+    expect(sectionC.goalPct).toBe(10);
+    expect(sectionC.goalSource).toBe("stage");
+    // Sheet: Goal % 10, Actual % 16.05355243, Fidelity +60.5%.
+    expect(sectionC.actualPct).toBeCloseTo(16.0536, 1);
+    expect(sectionC.fidelity).toBeCloseTo(0.605, 2);
   });
 
   it("leaves stage 2 unchanged — it's a pure percentage of gross", () => {

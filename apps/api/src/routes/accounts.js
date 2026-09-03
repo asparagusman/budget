@@ -4,6 +4,7 @@ import {
   balanceSnapshots,
   createAccountSchema,
   createBalanceSnapshotSchema,
+  reorderSchema,
   updateAccountSchema,
 } from "@budget/schema";
 import { zValidator } from "@hono/zod-validator";
@@ -12,6 +13,7 @@ import { Hono } from "hono";
 import { getUserId } from "../lib/app-env.js";
 import { writeAuditLog } from "../lib/audit.js";
 import { isUniqueViolation } from "../lib/db-errors.js";
+import { reorderError } from "../lib/reorder.js";
 import { handleValidation } from "../lib/validation.js";
 
 const INCOME_LANDING_CONFLICT = {
@@ -131,6 +133,37 @@ export function createAccountsRoutes({ db }) {
         if (isUniqueViolation(err)) return c.json(INCOME_LANDING_CONFLICT, 400);
         throw err;
       }
+    })
+
+    // The whole list in its new order, renumbered 0..n-1 in one transaction.
+    // See the schema's own comment for why this is not a `sortOrder` field on
+    // the edit form: every row starts at the column default of 0, so there is
+    // no per-row number to nudge until something has written a real one.
+    .post("/reorder", zValidator("json", reorderSchema, handleValidation), async (c) => {
+      const { ids } = c.req.valid("json");
+
+      const rows = await db.query.accounts.findMany({
+        where: (a, { isNull: isNullCol }) => isNullCol(a.archivedAt),
+        columns: { id: true },
+      });
+      const problem = reorderError(ids, rows.map((row) => row.id), "accounts");
+      if (problem) {
+        return c.json({ error: { code: "incomplete_order", message: problem } }, 400);
+      }
+
+      await db.transaction(async (tx) => {
+        for (const [index, id] of ids.entries()) {
+          await tx.update(accounts).set({ sortOrder: index }).where(eq(accounts.id, id));
+        }
+      });
+
+      // No audit entry, unlike every other write on this router. The log is
+      // keyed to one entity by a NOT NULL `entity_id`, and a reorder is a
+      // statement about the list rather than about any row in it — it would
+      // have to be either a fabricated id or one line per account. It also
+      // changes no financial value: `sortOrder` decides what order the
+      // screen lists accounts in and nothing else reads it.
+      return c.json({ ok: true });
     })
 
     .patch("/:id", zValidator("json", updateAccountSchema, handleValidation), async (c) => {

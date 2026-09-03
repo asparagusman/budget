@@ -1,14 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { addDaysIso, projectPaydays } from "@budget/engine";
 import {
-  CalendarClockIcon,
   CheckIcon,
   CopyIcon,
   FileSpreadsheetIcon,
   LogOutIcon,
-  PlusIcon,
   ShieldCheckIcon,
   SmartphoneIcon,
   TicketIcon,
@@ -27,19 +24,18 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog.jsx";
 import { Input } from "@/components/ui/input.jsx";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select.jsx";
-import { Switch } from "@/components/ui/switch.jsx";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs.jsx";
 import { DataList, DataListRow } from "@/components/data-list.jsx";
 import { EmptyState } from "@/components/empty-state.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
+import { ReorderControls } from "@/components/reorder-controls.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
+import { useConfirm } from "@/components/confirm-dialog.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
 import { useAuth } from "@/lib/auth.jsx";
 import { registerCommands } from "@/lib/commands.js";
-import { CADENCES, CADENCE_LABELS } from "@/lib/constants.js";
-import { formatIsoDate, todayIso } from "@/lib/dates.js";
+import { moveInList } from "@/lib/reorder.js";
 import { useSettings } from "@/lib/settings.jsx";
 
 /** @param {string} locale @param {string} iso */
@@ -87,6 +83,7 @@ function ShareLinkDialog({ open, onOpenChange, title, description, link }) {
 }
 
 function UsersPanel() {
+  const confirm = useConfirm();
   const queryClient = useQueryClient();
   const [shareLink, setShareLink] = useState(/** @type {string | null} */ (null));
 
@@ -166,7 +163,14 @@ function UsersPanel() {
                         <Button
                           size="sm"
                           variant="outline"
-                          onClick={() => deactivateMutation.mutate(user.id)}
+                          onClick={async () => {
+                            const ok = await confirm({
+                              title: `Deactivate ${user.displayName}?`,
+                              description: "They lose access immediately and every session of theirs is ended.",
+                              confirmLabel: "Deactivate",
+                            });
+                            if (ok) deactivateMutation.mutate(user.id);
+                          }}
                           disabled={deactivateMutation.isPending}
                         >
                           Deactivate
@@ -207,7 +211,156 @@ function UsersPanel() {
   );
 }
 
+/**
+ * The household's one recovery password.
+ *
+ * Passkeys are the way in, and this is not a second one: a session opened
+ * with this password reaches only the screen that mints a new-device invite,
+ * so the worst a phished copy of it buys an attacker is the ability to ask
+ * the household for a passkey (apps/api/src/middleware/auth.js). That
+ * confinement is the whole reason the app has a password at all — see
+ * todo.md #17.
+ *
+ * It lives beside the passkey list because that is the question it answers:
+ * what happens when every one of those is gone. The CLI path
+ * (`pnpm auth:invite --user X --purpose new_device`) still exists and still
+ * works; this is the same recovery without shell access to the box.
+ */
+function RecoveryPasswordPanel() {
+  const confirm = useConfirm();
+  const { locale } = useSettings();
+  const queryClient = useQueryClient();
+  const [password, setPassword] = useState("");
+  const [editing, setEditing] = useState(false);
+
+  const statusQuery = useQuery({
+    queryKey: ["recovery-password-status"],
+    queryFn: async () => {
+      const res = await api.auth["recovery-password"].$get();
+      if (!res.ok) throw new Error(await readApiError(res));
+      return res.json();
+    },
+  });
+
+  const setMutation = useMutation({
+    mutationFn: async (/** @type {string} */ next) => {
+      const res = await api.auth["recovery-password"].$put({ json: { password: next } });
+      if (!res.ok) throw new Error(await readApiError(res));
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["recovery-password-status"] });
+      setPassword("");
+      setEditing(false);
+      toast.success("Recovery password saved. Write it down somewhere that is not this app.");
+    },
+    onError: (err) => toast.error(err.message),
+  });
+
+  const removeMutation = useMutation({
+    mutationFn: async () => {
+      const res = await api.auth["recovery-password"].$delete();
+      if (!res.ok) throw new Error(await readApiError(res));
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["recovery-password-status"] });
+      toast.success("Recovery password removed.");
+    },
+    onError: (err) => toast.error(err.message),
+  });
+
+  const status = statusQuery.data;
+  const configured = status?.configured === true;
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div>
+        <h3 className="text-sm font-semibold text-text">Recovery password</h3>
+        <p className="text-xs text-text-muted">
+          One password, for the day every passkey is gone. It only lets you register a new passkey — it
+          cannot see or change anything in the app.
+        </p>
+      </div>
+
+      <div className="rounded-(--radius-card) bg-surface-muted p-4">
+        <p className="text-sm text-text">
+          {configured
+            ? `Set by ${status?.holderDisplayName} on ${status?.setAt ? formatDateTime(locale, status.setAt) : "an unknown date"}.`
+            : "Not set. Recovery currently needs shell access to the server."}
+        </p>
+
+        {editing ? (
+          <form
+            className="mt-3 flex flex-col gap-3"
+            onSubmit={(e) => {
+              e.preventDefault();
+              setMutation.mutate(password);
+            }}
+          >
+            <FieldRow
+              label="New recovery password"
+              htmlFor="new-recovery-password"
+              hint="At least 16 characters. Length is what matters — a passphrase beats a short password with symbols in it."
+            >
+              <Input
+                id="new-recovery-password"
+                type="password"
+                autoFocus
+                autoComplete="new-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+            </FieldRow>
+            <div className="flex gap-2">
+              <Button type="submit" size="sm" disabled={setMutation.isPending || password === ""}>
+                {setMutation.isPending ? "Saving…" : "Save"}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setEditing(false);
+                  setPassword("");
+                }}
+              >
+                Cancel
+              </Button>
+            </div>
+          </form>
+        ) : (
+          <div className="mt-3 flex gap-2">
+            <Button size="sm" variant="outline" onClick={() => setEditing(true)}>
+              {configured ? "Replace" : "Set a recovery password"}
+            </Button>
+            {configured ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="text-negative"
+                onClick={async () => {
+                  const ok = await confirm({
+                    title: "Remove the recovery password?",
+                    description:
+                      "Getting back in after losing every passkey will need shell access to the server again. Any session it opened is signed out immediately.",
+                    confirmLabel: "Remove",
+                  });
+                  if (ok) removeMutation.mutate();
+                }}
+              >
+                Remove
+              </Button>
+            ) : null}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function DevicesPanel() {
+  const confirm = useConfirm();
   const { state } = useAuth();
   const { locale } = useSettings();
   const queryClient = useQueryClient();
@@ -323,7 +476,15 @@ function DevicesPanel() {
                       size="sm"
                       variant="ghost"
                       className="text-negative"
-                      onClick={() => removeMutation.mutate(cred.id)}
+                      onClick={async () => {
+                        const ok = await confirm({
+                          title: `Remove ${cred.deviceName ?? "this passkey"}?`,
+                          description:
+                            "That device can no longer sign in. This cannot be undone — the device has to be re-registered from an invite.",
+                          confirmLabel: "Remove",
+                        });
+                        if (ok) removeMutation.mutate(cred.id);
+                      }}
                       disabled={removeMutation.isPending || credentials.length <= 1}
                       title={
                         credentials.length <= 1
@@ -353,6 +514,7 @@ function DevicesPanel() {
 }
 
 function SessionsPanel() {
+  const confirm = useConfirm();
   const { locale } = useSettings();
   const queryClient = useQueryClient();
 
@@ -379,6 +541,12 @@ function SessionsPanel() {
   const others = sessions.filter((s) => !s.isCurrent);
 
   async function revokeAllOthers() {
+    const ok = await confirm({
+      title: `Revoke ${others.length} other ${others.length === 1 ? "session" : "sessions"}?`,
+      description: "Every other signed-in device is signed out. This one stays.",
+      confirmLabel: "Revoke all",
+    });
+    if (!ok) return;
     await Promise.all(others.map((s) => revokeMutation.mutateAsync(s.id)));
     toast.success("Other sessions revoked.");
   }
@@ -413,7 +581,14 @@ function SessionsPanel() {
                     size="sm"
                     variant="ghost"
                     className="text-negative"
-                    onClick={() => revokeMutation.mutate(s.id)}
+                    onClick={async () => {
+                      const ok = await confirm({
+                        title: "Revoke this session?",
+                        description: "That device is signed out and has to sign in again.",
+                        confirmLabel: "Revoke",
+                      });
+                      if (ok) revokeMutation.mutate(s.id);
+                    }}
                     disabled={revokeMutation.isPending}
                   >
                     Revoke
@@ -429,6 +604,7 @@ function SessionsPanel() {
 }
 
 function InvitesPanel() {
+  const confirm = useConfirm();
   const { locale } = useSettings();
   const queryClient = useQueryClient();
 
@@ -471,7 +647,14 @@ function InvitesPanel() {
               size="sm"
               variant="ghost"
               className="text-negative"
-              onClick={() => revokeMutation.mutate(invite.id)}
+              onClick={async () => {
+                const ok = await confirm({
+                  title: "Revoke this invite?",
+                  description: "The link stops working. Issue a new one if it's still needed.",
+                  confirmLabel: "Revoke",
+                });
+                if (ok) revokeMutation.mutate(invite.id);
+              }}
               disabled={revokeMutation.isPending}
             >
               Revoke
@@ -483,7 +666,6 @@ function InvitesPanel() {
   );
 }
 
-/** Shared by the People and Pay schedules panels below. */
 function usePeopleQuery() {
   return useQuery({
     queryKey: ["people"],
@@ -496,6 +678,7 @@ function usePeopleQuery() {
 }
 
 function PeoplePanel() {
+  const confirm = useConfirm();
   const queryClient = useQueryClient();
   const [newName, setNewName] = useState("");
   const [renaming, setRenaming] = useState(/** @type {{ id: string, name: string } | null} */ (null));
@@ -539,6 +722,21 @@ function PeoplePanel() {
       queryClient.invalidateQueries({ queryKey: ["people"] });
       toast.success("Person archived.");
     },
+    onError: (err) => toast.error(err.message),
+  });
+
+  // `sortOrder` has driven this list's order since phase 04 and nothing has
+  // ever been able to change it (todo.md `[P04-12]`), so every row sat at the
+  // column default and the list was in insertion order whether that suited
+  // the household or not. The whole order goes in one request — see the
+  // endpoint's own comment for why a per-row number would not have worked.
+  const reorderMutation = useMutation({
+    mutationFn: async (/** @type {string[]} */ ids) => {
+      const res = await api.people.reorder.$post({ json: { ids } });
+      if (!res.ok) throw new Error(await readApiError(res));
+      return res.json();
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["people"] }),
     onError: (err) => toast.error(err.message),
   });
 
@@ -586,7 +784,7 @@ function PeoplePanel() {
         />
       ) : (
         <DataList>
-          {people.map((person) => (
+          {people.map((person, index) => (
             <DataListRow
               key={person.id}
               primary={
@@ -618,6 +816,16 @@ function PeoplePanel() {
               trailing={
                 renaming?.id === person.id ? null : (
                   <div className="flex items-center gap-1">
+                    <ReorderControls
+                      index={index}
+                      count={people.length}
+                      label={person.name}
+                      disabled={reorderMutation.isPending}
+                      onMove={(direction) => {
+                        const next = moveInList(people, index, direction);
+                        if (next !== people) reorderMutation.mutate(next.map((p) => p.id));
+                      }}
+                    />
                     <Button size="sm" variant="ghost" onClick={() => setRenaming({ id: person.id, name: person.name })}>
                       Rename
                     </Button>
@@ -625,7 +833,15 @@ function PeoplePanel() {
                       size="sm"
                       variant="ghost"
                       className="text-negative"
-                      onClick={() => archiveMutation.mutate(person.id)}
+                      onClick={async () => {
+                        const ok = await confirm({
+                          title: `Archive ${person.name}?`,
+                          description:
+                            "They stop appearing as a bill or income owner. Everything already recorded against them is kept.",
+                          confirmLabel: "Archive",
+                        });
+                        if (ok) archiveMutation.mutate(person.id);
+                      }}
                     >
                       Archive
                     </Button>
@@ -640,341 +856,31 @@ function PeoplePanel() {
   );
 }
 
-/** @typedef {{ id: string, personId: string, anchorDate: string, cadence: import("@budget/engine").Cadence, isPrimary: boolean }} PaySchedule */
-/** @typedef {{ personId: string, anchorDate: string, cadence: import("@budget/engine").Cadence, isPrimary: boolean }} PayScheduleFormData */
-
-/**
- * @param {{
- *   open: boolean,
- *   onOpenChange: (open: boolean) => void,
- *   schedule: PaySchedule | null,
- *   people: { id: string, name: string }[],
- *   submitting: boolean,
- *   onSubmit: (data: PayScheduleFormData) => Promise<void>,
- * }} props
- */
-function PayScheduleFormDialog({ open, onOpenChange, schedule, people, submitting, onSubmit }) {
-  const { locale } = useSettings();
-  const [personId, setPersonId] = useState("");
-  const [anchorDate, setAnchorDate] = useState(todayIso());
-  const [cadence, setCadence] = useState(/** @type {import("@budget/engine").Cadence} */ ("fortnightly"));
-  const [isPrimary, setIsPrimary] = useState(false);
-  const [error, setError] = useState(/** @type {string | null} */ (null));
-
-  useEffect(() => {
-    if (!open) return;
-    setPersonId(schedule?.personId ?? people[0]?.id ?? "");
-    setAnchorDate(schedule?.anchorDate ?? todayIso());
-    setCadence(schedule?.cadence ?? "fortnightly");
-    setIsPrimary(schedule?.isPrimary ?? false);
-    setError(null);
-  }, [open, schedule, people]);
-
-  // Computed entirely client-side — @budget/engine is pure and zero-I/O, so
-  // there's no reason to round-trip to the API just to preview what the
-  // operator hasn't saved yet (phases/04-accounts-people.md wants this
-  // preview live "as the operator types").
-  const preview = useMemo(() => {
-    if (!anchorDate) return [];
-    try {
-      return projectPaydays({ anchorDate, cadence }, { from: anchorDate, to: addDaysIso(anchorDate, 3660) }).slice(
-        0,
-        6,
-      );
-    } catch {
-      return [];
-    }
-  }, [anchorDate, cadence]);
-
-  /** @param {import("react").FormEvent} e */
-  async function handleSubmit(e) {
-    e.preventDefault();
-    setError(null);
-    if (!schedule && !personId) {
-      setError("Choose a person.");
-      return;
-    }
-    // Always includes `personId`, even when editing — the PATCH schema
-    // (zod/pay-schedules.js) has no such field, so Zod's default "strip
-    // unknown keys" behaviour drops it there; one uniform shape here instead
-    // of a create/update union.
-    const data = { personId, anchorDate, cadence, isPrimary };
-    try {
-      await onSubmit(data);
-      onOpenChange(false);
-    } catch (err) {
-      setError(/** @type {Error} */ (err).message);
-    }
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>{schedule ? "Edit pay schedule" : "Add pay schedule"}</DialogTitle>
-          <DialogDescription>Any known payday — the rest of the series is derived from it.</DialogDescription>
-        </DialogHeader>
-        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-          {!schedule ? (
-            <FieldRow label="Person" htmlFor="schedule-person">
-              <Select value={personId} onValueChange={setPersonId}>
-                <SelectTrigger id="schedule-person" className="w-full">
-                  <SelectValue placeholder="Choose a person" />
-                </SelectTrigger>
-                <SelectContent>
-                  {people.map((p) => (
-                    <SelectItem key={p.id} value={p.id}>
-                      {p.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </FieldRow>
-          ) : null}
-          <FieldRow label="Anchor date" htmlFor="schedule-anchor" hint="Any payday you know for certain.">
-            <Input
-              id="schedule-anchor"
-              type="date"
-              value={anchorDate}
-              onChange={(e) => setAnchorDate(e.target.value)}
-            />
-          </FieldRow>
-          <FieldRow label="Cadence" htmlFor="schedule-cadence">
-            <Select value={cadence} onValueChange={(value) => setCadence(/** @type {import("@budget/engine").Cadence} */ (value))}>
-              <SelectTrigger id="schedule-cadence" className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {CADENCES.map((c) => (
-                  <SelectItem key={c} value={c}>
-                    {CADENCE_LABELS[c]}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </FieldRow>
-          <FieldRow
-            label="Primary schedule"
-            htmlFor="schedule-primary"
-            hint="The schedule that defines your household's transfer cycle. Only one may be set."
-          >
-            <Switch id="schedule-primary" checked={isPrimary} onCheckedChange={setIsPrimary} />
-          </FieldRow>
-          {preview.length > 0 ? (
-            <FieldRow label="Next paydays">
-              <div className="flex flex-wrap gap-1.5">
-                {preview.map((d) => (
-                  <Badge key={d} variant="outline">
-                    {formatIsoDate(d, locale)}
-                  </Badge>
-                ))}
-              </div>
-            </FieldRow>
-          ) : null}
-          {error ? <p className="text-sm text-negative">{error}</p> : null}
-          <DialogFooter>
-            <Button type="submit" disabled={submitting}>
-              {submitting ? "Saving…" : "Save"}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function PaySchedulesPanel() {
-  const { locale } = useSettings();
-  const queryClient = useQueryClient();
-  const [formOpen, setFormOpen] = useState(false);
-  const [editing, setEditing] = useState(/** @type {PaySchedule | null} */ (null));
-
-  const peopleQuery = usePeopleQuery();
-  const schedulesQuery = useQuery({
-    queryKey: ["pay-schedules"],
-    queryFn: async () => {
-      const res = await api["pay-schedules"].$get();
-      if (!res.ok) throw new Error(await readApiError(res));
-      return (await res.json()).paySchedules;
-    },
-  });
-
-  const createMutation = useMutation({
-    mutationFn: async (/** @type {PayScheduleFormData} */ data) => {
-      const res = await api["pay-schedules"].$post({ json: data });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["pay-schedules"] });
-      toast.success("Pay schedule added.");
-    },
-  });
-
-  const updateMutation = useMutation({
-    mutationFn: async (/** @type {{ id: string, data: PayScheduleFormData }} */ { id, data }) => {
-      const res = await api["pay-schedules"][":id"].$patch({ param: { id }, json: data });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["pay-schedules"] });
-      toast.success("Pay schedule updated.");
-    },
-  });
-
-  const archiveMutation = useMutation({
-    mutationFn: async (/** @type {string} */ id) => {
-      const res = await api["pay-schedules"][":id"].$delete({ param: { id } });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["pay-schedules"] });
-      toast.success("Pay schedule archived.");
-    },
-    onError: (err) => toast.error(err.message),
-  });
-
-  useEffect(
-    () =>
-      registerCommands([
-        {
-          id: "pay-schedules:add",
-          group: "Actions",
-          label: "Add pay schedule",
-          icon: CalendarClockIcon,
-          run: () => {
-            setEditing(null);
-            setFormOpen(true);
-          },
-        },
-      ]),
-    [],
-  );
-
-  const people = peopleQuery.data ?? [];
-  const schedules = schedulesQuery.data ?? [];
-
-  /** @param {string} personId */
-  function personName(personId) {
-    return people.find((p) => p.id === personId)?.name ?? "Unknown person";
-  }
-
-  /** @param {{ anchorDate: string, cadence: import("@budget/engine").Cadence }} schedule */
-  function nextPayday(schedule) {
-    try {
-      const from = todayIso();
-      const [next] = projectPaydays(schedule, { from, to: addDaysIso(from, 400) });
-      return next ?? null;
-    } catch {
-      return null;
-    }
-  }
-
-  return (
-    <div className="flex flex-col gap-4">
-      <div className="flex justify-end">
-        <Button
-          onClick={() => {
-            setEditing(null);
-            setFormOpen(true);
-          }}
-          disabled={people.length === 0}
-          title={people.length === 0 ? "Add a person first." : undefined}
-        >
-          <PlusIcon />
-          Add pay schedule
-        </Button>
-      </div>
-
-      {schedules.length === 0 ? (
-        <EmptyState
-          icon={CalendarClockIcon}
-          title="No pay schedules yet"
-          description="Add one known payday per person — the rest of the series, including any 27-payday years, is derived from it."
-        />
-      ) : (
-        <DataList>
-          {schedules.map((schedule) => {
-            const next = nextPayday(schedule);
-            return (
-              <DataListRow
-                key={schedule.id}
-                primary={
-                  <span className="flex items-center gap-2">
-                    {personName(schedule.personId)}
-                    {schedule.isPrimary ? <Badge variant="secondary">Primary</Badge> : null}
-                  </span>
-                }
-                secondary={`${CADENCE_LABELS[schedule.cadence]} · anchored ${formatIsoDate(schedule.anchorDate, locale)}${next ? ` · next ${formatIsoDate(next, locale)}` : ""}`}
-                trailing={
-                  <div className="flex items-center gap-1">
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => {
-                        setEditing(schedule);
-                        setFormOpen(true);
-                      }}
-                    >
-                      Edit
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="text-negative"
-                      onClick={() => archiveMutation.mutate(schedule.id)}
-                    >
-                      Archive
-                    </Button>
-                  </div>
-                }
-              />
-            );
-          })}
-        </DataList>
-      )}
-
-      <PayScheduleFormDialog
-        open={formOpen}
-        onOpenChange={setFormOpen}
-        schedule={editing}
-        people={people}
-        submitting={createMutation.isPending || updateMutation.isPending}
-        onSubmit={async (data) => {
-          if (editing) {
-            await updateMutation.mutateAsync({ id: editing.id, data });
-          } else {
-            await createMutation.mutateAsync(data);
-          }
-        }}
-      />
-    </div>
-  );
-}
-
-const SETTINGS_TABS = /** @type {const} */ ([
-  { value: "users", path: "/settings/users", label: "Users" },
-  { value: "devices", path: "/settings/devices", label: "My devices" },
-  { value: "sessions", path: "/settings/sessions", label: "My sessions" },
-  { value: "invites", path: "/settings/invites", label: "Pending invites" },
-  { value: "people", path: "/settings/people", label: "People" },
-  { value: "pay-schedules", path: "/settings/pay-schedules", label: "Pay schedules" },
+const ADMIN_TABS = /** @type {const} */ ([
+  { value: "users", path: "/admin/users", label: "Users" },
+  { value: "devices", path: "/admin/devices", label: "My devices" },
+  { value: "sessions", path: "/admin/sessions", label: "My sessions" },
+  { value: "invites", path: "/admin/invites", label: "Pending invites" },
+  { value: "people", path: "/admin/people", label: "People" },
 ]);
 
 /**
- * One page, six tabs, each with its own route so every sub-screen is
- * directly linkable — People and Pay schedules are the two phase 04 adds;
- * Users/Devices/Sessions/Invites are phase 03's, moved here unchanged. See
- * the "a later phase may grow a general /settings landing page" comment
- * this replaces in lib/nav.js.
+ * One page, five tabs, each with its own route so every sub-screen is
+ * directly linkable — People is phase 04's; Users/Devices/Sessions/Invites
+ * are phase 03's, moved here unchanged.
+ *
+ * This was "/settings" for phases 03–04, which was never what it held: it
+ * is user and household administration, and the operator-facing preference
+ * that "settings" implies (theme) now lives in the sidebar's own Settings
+ * menu. Pay schedules were a sixth tab and have moved to /income, where the
+ * cadence they define is actually read. Old /settings/* links redirect
+ * (see router.jsx).
  */
-export function SettingsPage() {
+export function AdminPage() {
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const { refresh } = useAuth();
-  const activeTab = SETTINGS_TABS.find((t) => t.path === pathname)?.value ?? "users";
+  const activeTab = ADMIN_TABS.find((t) => t.path === pathname)?.value ?? "users";
 
   async function signOut() {
     await api.auth.logout.$post();
@@ -985,8 +891,8 @@ export function SettingsPage() {
   return (
     <>
       <PageHeader
-        title="Settings"
-        description="Users, devices, sessions, people and pay schedules."
+        title="Admin"
+        description="Users, devices, sessions, invites and the people in your household."
         actions={
           <>
             {/* The importer is a full-page workflow rather than a seventh
@@ -1010,12 +916,12 @@ export function SettingsPage() {
           <Tabs
             value={activeTab}
             onValueChange={(value) => {
-              const tab = SETTINGS_TABS.find((t) => t.value === value);
+              const tab = ADMIN_TABS.find((t) => t.value === value);
               if (tab) navigate({ to: tab.path });
             }}
           >
             <TabsList>
-              {SETTINGS_TABS.map((tab) => (
+              {ADMIN_TABS.map((tab) => (
                 <TabsTrigger key={tab.value} value={tab.value}>
                   {tab.label}
                 </TabsTrigger>
@@ -1025,7 +931,10 @@ export function SettingsPage() {
               <UsersPanel />
             </TabsContent>
             <TabsContent value="devices">
-              <DevicesPanel />
+              <div className="flex flex-col gap-8">
+                <DevicesPanel />
+                <RecoveryPasswordPanel />
+              </div>
             </TabsContent>
             <TabsContent value="sessions">
               <SessionsPanel />
@@ -1035,9 +944,6 @@ export function SettingsPage() {
             </TabsContent>
             <TabsContent value="people">
               <PeoplePanel />
-            </TabsContent>
-            <TabsContent value="pay-schedules">
-              <PaySchedulesPanel />
             </TabsContent>
           </Tabs>
         </CardContent>

@@ -1,5 +1,14 @@
-import { useCallback } from "react";
-import { Chart } from "@/components/chart.jsx";
+import { useMemo } from "react";
+import { Cell, Pie, PieChart } from "recharts";
+import {
+  Chart,
+  ChartLegend,
+  ChartLegendContent,
+  ChartTooltip,
+  MoneyTooltip,
+  SERIES,
+  useChartMotion,
+} from "@/components/chart.jsx";
 import { Money } from "@/components/money.jsx";
 import { formatMoney } from "@/lib/format-money.js";
 import { LG, useMediaQuery } from "@/lib/use-media-query.js";
@@ -26,117 +35,74 @@ export function accountName(accounts, accountId) {
 }
 
 /**
- * Income -> stages -> destinations. Desktop only: a sankey at 375px is
- * illegible, so mobile gets <AllocationProportionBar> instead.
+ * The division of income, as one slice per destination.
  *
- * @param {{ result: AllocationResult, accounts: FlowAccount[], lines: FlowLine[], height?: number, heading?: import("react").ReactNode }} props
+ * This replaced a sankey of income → stages → destinations. Stages are an
+ * evaluation ORDER — they are how `pct_of_remaining` and `sweep` resolve
+ * against what is left at each step (packages/engine/src/allocation.js) —
+ * not a category anybody budgets by, so a diagram whose whole middle column
+ * was stages spent most of its ink on a fact nobody was asking it for. The
+ * question this panel answers is where the money ends up, and a pie answers
+ * exactly that and nothing else.
+ *
+ * Negative and zero flows are dropped: a slice cannot have negative area,
+ * and a line that resolved negative is already called out by the invariant
+ * indicator. Dropping it keeps the chart honest rather than blank.
+ *
+ * @param {{
+ *   result: AllocationResult,
+ *   accounts: FlowAccount[],
+ *   height?: number,
+ *   heading?: import("react").ReactNode,
+ * }} props
  */
-export function AllocationSankey({ result, accounts, lines, height = 300, heading = "Where the money goes" }) {
+export function AllocationPie({ result, accounts, height = 300, heading = "Where the money goes" }) {
   const { currency, locale } = useSettings();
+  const motion = useChartMotion();
 
-  const option = useCallback(
-    /** @param {import("@/components/chart.jsx").ChartTokens} tokens */
-    (tokens) => {
-      /** @type {Map<string, string>} */
-      const labels = new Map();
-      /** @type {{ name: string, itemStyle: { color: string | undefined } }[]} */
-      const nodes = [];
-      /** @type {{ source: string, target: string, value: number }[]} */
-      const links = [];
+  const { slices, config } = useMemo(() => {
+    /** @type {{ name: string, value: number, fill: string }[]} */
+    const rows = [];
 
-      const push = (/** @type {string} */ name, /** @type {string} */ label, /** @type {string | undefined} */ color) => {
-        if (labels.has(name)) return;
-        labels.set(name, label);
-        nodes.push({ name, itemStyle: { color } });
-      };
+    for (const transfer of result.transfers) {
+      if (transfer.perMonthCents <= 0) continue;
+      rows.push({
+        name: accountName(accounts, transfer.accountId),
+        value: transfer.perMonthCents / 100,
+        // `?? SERIES[0]` only to satisfy `noUncheckedIndexedAccess` — the
+        // modulo already guarantees the index is in range.
+        fill: SERIES[rows.length % SERIES.length] ?? SERIES[0],
+      });
+    }
 
-      push("income", "Income", tokens.series[0]);
+    if (result.unallocatedPerMonthCents > 0) {
+      rows.push({
+        name: "Unallocated",
+        value: result.unallocatedPerMonthCents / 100,
+        fill: "var(--text-subtle)",
+      });
+    }
 
-      const resolvedById = new Map(result.lines.map((l) => [l.lineId, l]));
-      for (const [index, stage] of result.stages.entries()) {
-        const stageNode = `stage-${stage.stage}`;
-        push(stageNode, `Stage ${stage.stage}`, tokens.series[(index + 1) % tokens.series.length]);
-        if (stage.subtotalPerMonthCents > 0) {
-          links.push({ source: "income", target: stageNode, value: stage.subtotalPerMonthCents / 100 });
-        }
+    // Keyed by the displayed name, which is what the tooltip and legend look
+    // a slice up by. Deliberately carries no `color`: a custom property
+    // named after an account would have to be a valid CSS identifier, and
+    // account names are free text. The colour is on the <Cell> instead.
+    /** @type {import("@/components/ui/chart.jsx").ChartConfig} */
+    const byName = {};
+    for (const row of rows) byName[row.name] = { label: row.name };
 
-        /** @type {Map<string, number>} */
-        const perAccount = new Map();
-        for (const line of lines.filter((l) => l.stage === stage.stage)) {
-          const resolved = resolvedById.get(line.id);
-          if (!resolved) continue;
-          perAccount.set(line.accountId, (perAccount.get(line.accountId) ?? 0) + resolved.perMonthCents);
-        }
-        for (const [accountId, cents] of perAccount) {
-          const accountNode = `account-${accountId}`;
-          push(accountNode, accountName(accounts, accountId), tokens.series[3 % tokens.series.length]);
-          // Sankey cannot draw a negative flow. A line that resolved negative
-          // is already called out by the invariant indicator; dropping it here
-          // keeps the diagram honest rather than blank.
-          if (cents > 0) links.push({ source: stageNode, target: accountNode, value: cents / 100 });
-        }
-      }
-
-      if (result.unallocatedPerMonthCents > 0) {
-        push("unallocated", "Unallocated", tokens.series[4 % tokens.series.length]);
-        links.push({ source: "income", target: "unallocated", value: result.unallocatedPerMonthCents / 100 });
-      }
-
-      /** @param {string} name */
-      const labelOf = (name) => labels.get(name) ?? name;
-
-      // A stage whose lines all resolved negative has no drawable flow; the
-      // invariant indicator has already said so, and leaving the node in
-      // just stacks an orphan label over the destination column.
-      const connected = new Set(links.flatMap((l) => [l.source, l.target]));
-      const drawnNodes = nodes.filter((n) => connected.has(n.name));
-
-      return {
-        tooltip: {
-          trigger: "item",
-          /** @param {{ dataType?: string, name: string, value: number, data: { source?: string, target?: string } }} params */
-          formatter: (params) => {
-            const money = formatMoney(Math.round(params.value * 100), { currency, locale });
-            if (params.dataType === "edge") {
-              return `${labelOf(params.data.source ?? "")} → ${labelOf(params.data.target ?? "")}<br/>${money}/month`;
-            }
-            return `${labelOf(params.name)}<br/>${money}/month`;
-          },
-        },
-        series: [
-          {
-            type: "sankey",
-            emphasis: { focus: "adjacency" },
-            nodeWidth: 12,
-            left: 8,
-            right: 110,
-            top: 8,
-            bottom: 8,
-            label: {
-              color: tokens.text,
-              /** @param {{ name: string }} params */
-              formatter: (params) => labelOf(params.name),
-            },
-            lineStyle: { curveness: 0.5, opacity: 0.25, color: "gradient" },
-            data: drawnNodes,
-            links,
-          },
-        ],
-      };
-    },
-    [result, accounts, lines, currency, locale],
-  );
+    return { slices: rows, config: byName };
+  }, [result, accounts]);
 
   return (
     <div className="flex flex-col gap-3">
       {heading ? <h3 className="text-sm font-semibold text-text">{heading}</h3> : null}
-      {/* The table view is the sankey's whole content as rows: every
+      {/* The table view is the pie's whole content as rows: every
           destination and what reaches it. It is also what a screen reader
-          gets instead of a canvas that says nothing at all. */}
+          gets instead of a graphic that says nothing at all. */}
       <Chart
-        option={option}
         height={height}
-        ariaLabel={`Flow diagram: income divided across ${result.stages.length} stages into ${result.transfers.length} destinations.`}
+        ariaLabel={`Income divided across ${slices.length} destinations, per month.`}
         dataTable={{
           caption: "What reaches each destination, per month",
           columns: ["Destination", "Per month"],
@@ -150,15 +116,29 @@ export function AllocationSankey({ result, accounts, lines, height = 300, headin
               : []),
           ],
         }}
-        empty={result.stages.length === 0}
-        emptyTitle="No stages yet"
-      />
+        empty={slices.length === 0}
+        emptyTitle="Nothing allocated yet"
+        emptyDescription="Add an allocation line and its share of income appears here."
+        config={config}
+      >
+        <PieChart>
+          <ChartTooltip content={<MoneyTooltip nameKey="name" hideLabel />} />
+          {/* A donut, not a full pie: the hole is what lets the slice labels
+              breathe at this size, and nothing is being read off the centre. */}
+          <Pie data={slices} dataKey="value" nameKey="name" innerRadius="45%" outerRadius="75%" {...motion}>
+            {slices.map((slice) => (
+              <Cell key={slice.name} fill={slice.fill} stroke="var(--surface)" strokeWidth={2} />
+            ))}
+          </Pie>
+          <ChartLegend content={<ChartLegendContent nameKey="name" />} />
+        </PieChart>
+      </Chart>
     </div>
   );
 }
 
 /**
- * The mobile answer to the sankey: one proportion bar plus the list. Widths
+ * The narrow-screen answer: one proportion bar plus the list. Widths
  * are the engine's own monthly cents used as flex weights — no percentage
  * maths of this screen's own.
  *
@@ -207,19 +187,22 @@ export function AllocationProportionBar({ result, accounts, heading = "Where the
 
 /**
  * Whichever of the two the viewport calls for, with only that one in the DOM.
- * `hidden lg:block` on the sankey would be simpler and is wrong: echarts
- * initialises inside `display: none` at 0x0 and logs "Can't get DOM width or
- * height" instead of drawing anything. `useMediaQuery` reads `matches`
+ * `hidden lg:block` on the pie would be simpler and is wrong: a chart
+ * measures its container, and inside `display: none` that container is 0x0 —
+ * so it mounts and draws nothing. `useMediaQuery` reads `matches`
  * synchronously on the first render, so this still costs no layout shift
  * (phases/10-dashboard.md "no layout shift on load").
  *
- * @param {{ result: AllocationResult, accounts: FlowAccount[], lines: FlowLine[], heading?: import("react").ReactNode }} props
+ * Both halves now say the same thing — the division of income by
+ * destination — where the desktop half used to say something else entirely.
+ *
+ * @param {{ result: AllocationResult, accounts: FlowAccount[], heading?: import("react").ReactNode }} props
  */
-export function AllocationFlow({ result, accounts, lines, heading }) {
+export function AllocationFlow({ result, accounts, heading }) {
   const isDesktop = useMediaQuery(LG);
 
   return isDesktop ? (
-    <AllocationSankey result={result} accounts={accounts} lines={lines} heading={heading} />
+    <AllocationPie result={result} accounts={accounts} heading={heading} />
   ) : (
     <AllocationProportionBar result={result} accounts={accounts} heading={heading} />
   );

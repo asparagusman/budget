@@ -33,3 +33,46 @@ export const loginVerifySchema = z.object({
 });
 
 /** @typedef {z.infer<typeof loginVerifySchema>} LoginVerifyInput */
+
+// The recovery password.
+//
+// Sixteen characters minimum, and no symbol-soup rule. This secret is written
+// down once or kept in a password manager — it is not typed daily — so length
+// is the only thing that buys real entropy, while a "must contain a symbol"
+// rule mostly buys `Passw0rd!`. The two distinct-class check below rejects
+// only the degenerate cases (sixteen a's, sixteen 1s) without pushing anyone
+// towards a shorter, cleverer password.
+//
+// It is also NOT a way in to the app. See users.recoveryPasswordHash: a
+// session opened with it reaches only the screens that mint a new-device
+// invite, so the thing an attacker gets by phishing it is the ability to ask
+// the household for a passkey.
+export const RECOVERY_PASSWORD_MIN_LENGTH = 16;
+
+const characterClasses = (/** @type {string} */ value) =>
+  [/[a-z]/, /[A-Z]/, /[0-9]/, /[^a-zA-Z0-9]/].filter((pattern) => pattern.test(value)).length;
+
+const recoveryPassword = z
+  .string()
+  .min(RECOVERY_PASSWORD_MIN_LENGTH, `Use at least ${RECOVERY_PASSWORD_MIN_LENGTH} characters.`)
+  .max(200)
+  .refine((value) => value.trim().length >= RECOVERY_PASSWORD_MIN_LENGTH, {
+    message: "Leading or trailing spaces do not count towards the length.",
+  })
+  .refine((value) => characterClasses(value) >= 2, {
+    message: "Mix at least two of: lower case, upper case, digits, symbols.",
+  });
+
+// PUT /auth/recovery-password — set or replace it. Only ever accepted on a
+// passkey session, so there is no current-password field: proving you hold a
+// passkey is a stronger claim than knowing the password you are replacing.
+export const setRecoveryPasswordSchema = z.object({ password: recoveryPassword });
+
+/** @typedef {z.infer<typeof setRecoveryPasswordSchema>} SetRecoveryPasswordInput */
+
+// POST /auth/login/password — the break-glass sign-in. Usernameless, like
+// the passkey flow: there is at most one recovery password in the household,
+// so the password itself identifies the user.
+export const passwordLoginSchema = z.object({ password: z.string().min(1).max(200) });
+
+/** @typedef {z.infer<typeof passwordLoginSchema>} PasswordLoginInput */

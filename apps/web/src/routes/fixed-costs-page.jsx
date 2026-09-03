@@ -1,119 +1,72 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { addDaysIso, annualise, projectInstances, toCents } from "@budget/engine";
+import { addDaysIso } from "@budget/engine";
 import {
   AlertTriangleIcon,
   CalendarClockIcon,
-  ChevronDownIcon,
-  ChevronRightIcon,
   PencilIcon,
   PlusIcon,
   ReceiptIcon,
+  SaveIcon,
   TagIcon,
-  Trash2Icon,
+  XIcon,
 } from "lucide-react";
 import { toast } from "sonner";
-import { Badge } from "@/components/ui/badge.jsx";
 import { Button } from "@/components/ui/button.jsx";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog.jsx";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog.jsx";
 import { Input } from "@/components/ui/input.jsx";
-import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/components/ui/input-group.jsx";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select.jsx";
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet.jsx";
-import { Textarea } from "@/components/ui/textarea.jsx";
-import { Chart } from "@/components/chart.jsx";
+import { BillDetailSheet } from "@/components/bill-detail-sheet.jsx";
+import { BillsBalanceCurve } from "@/components/bills-balance-curve.jsx";
+import { CategoryGroup } from "@/components/fixed-costs-table.jsx";
 import { DataList, DataListRow } from "@/components/data-list.jsx";
 import { EmptyState } from "@/components/empty-state.jsx";
-import { FieldRow } from "@/components/field-row.jsx";
 import { Money } from "@/components/money.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
 import { StatTile } from "@/components/stat-tile.jsx";
+import { useConfirm } from "@/components/confirm-dialog.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
 import { registerCommands } from "@/lib/commands.js";
-import { AMOUNT_MODEL_LABELS, AMOUNT_MODELS, CADENCES, CADENCE_LABELS, MONTH_LABELS } from "@/lib/constants.js";
-import { formatIsoDate, todayIso } from "@/lib/dates.js";
-import { formatMoney } from "@/lib/format-money.js";
+import { CADENCE_LABELS } from "@/lib/constants.js";
+import { todayIso } from "@/lib/dates.js";
+import {
+  billToDraft,
+  blankDraft,
+  draftError,
+  draftFigures,
+  draftSignature,
+  draftToPayload,
+  historySpread,
+  isBlankGhost,
+} from "@/lib/fixed-costs-draft.js";
 import { useSettings } from "@/lib/settings.jsx";
+import { useUnsavedGuard } from "@/lib/use-unsaved-guard.js";
 
-/** @import { AmountModel, Cadence, Cents } from "@budget/engine" */
+/** @import { Cents, PaySchedule, WindowFigures } from "@budget/engine" */
+/** @import { Bill, DraftBill } from "@/lib/fixed-costs-draft.js" */
 /** @typedef {{ id: string, name: string }} Person */
 /** @typedef {{ id: string, name: string, type: string, isIncomeLanding: boolean }} Account */
 /** @typedef {{ id: string, name: string, kind: "fixed" | "variable", isEssential: boolean, colour: string | null, sortOrder: number }} CostCategory */
-/** @typedef {{ id: string, billId: string, effectiveFrom: string, newAmountCents: Cents, note: string | null }} StepChange */
-/** @typedef {{
- *   id: string, categoryId: string, name: string, ownerPersonId: string | null, paidFromAccountId: string | null,
- *   baseAmountCents: Cents, frequency: Cadence, anchorDate: string, amountModel: AmountModel,
- *   escalationPct: number | null, rollingWindow: number | null, notes: string | null, sortOrder: number,
- *   seasonalFactors: Record<string, number>, stepChanges: StepChange[]
- * }} Bill */
-/** @typedef {{ id: string, billId: string, dueDate: string, expectedCents: Cents | null, actualCents: Cents | null, isOverride: boolean, paidOn: string | null, note: string | null }} RecentInstance */
-/** @typedef {Bill & { recentInstances: RecentInstance[] }} BillDetail */
+/** @typedef {WindowFigures & { billId: string, categoryId: string, perPayCents: Cents | null }} ServerBillFigures */
 /** @typedef {{ categoryId: string, name: string, perYearCents: Cents, perMonthCents: Cents, perPayCents: Cents | null, billCount: number }} CategorySummary */
-/** @typedef {{ window: { from: string, to: string }, contribution: { perPayCents: Cents | null, perMonthCents: Cents, perYearCents: Cents }, byCategory: CategorySummary[], billCount: number, warnings: { code: string, message: string, billId?: string }[] }} FixedCostsSummary */
-/** @typedef {{ categoryId: string, name: string, ownerPersonId: string | null, paidFromAccountId: string | null, baseAmountCents: Cents, frequency: Cadence, anchorDate: string, amountModel: AmountModel, escalationPct: number | null, rollingWindow: number | null, notes: string | null }} BillFormData */
-
-/** @param {number} months */
-function windowFromToday(months) {
-  const from = todayIso();
-  return { from, to: addDaysIso(from, Math.round(months * 30.4375)) };
-}
+/** @typedef {{ window: { from: string, to: string }, contribution: { perPayCents: Cents | null, perMonthCents: Cents, perYearCents: Cents }, byBill: ServerBillFigures[], byCategory: CategorySummary[], billCount: number, warnings: { code: string, message: string, billId?: string }[] }} FixedCostsSummary */
 
 /**
- * Bill row -> the engine's pure `Bill` shape, for the list-row display math
- * that runs client-side (see the module comment below on why).
+ * Four years to the day — 1461 days is exactly 4 × 365.25, so annualising a
+ * window total introduces no rounding of its own and a $90 monthly bill reads
+ * as $1080.00 rather than $1080.74.
  *
- * @param {Bill} bill
+ * It is also the window `apps/api/src/lib/allocation.js` averages the
+ * fixed-cost total over. Those were different lengths before, which meant an
+ * escalating or seasonal bill quietly contributed one figure here and another
+ * to the allocation that deducts it.
  */
-function toEngineBillClient(bill) {
-  return {
-    id: bill.id,
-    baseAmountCents: bill.baseAmountCents,
-    frequency: bill.frequency,
-    anchorDate: bill.anchorDate,
-    amountModel: bill.amountModel,
-    escalationPct: bill.escalationPct ?? undefined,
-    rollingWindow: bill.rollingWindow ?? undefined,
-    seasonalFactors: bill.seasonalFactors,
-    stepChanges: bill.stepChanges.map((s) => ({ effectiveFrom: s.effectiveFrom, newAmountCents: s.newAmountCents })),
-  };
-}
+const CONTRIBUTION_WINDOW_DAYS = 1461;
 
-/**
- * The list row's "amount + cadence" and "next due date" columns, computed
- * client-side via @budget/engine's pure `projectInstances` — the same
- * "compute locally from data already on the page" pattern as settings-
- * page.jsx's pay-schedule preview, rather than a server round trip for a
- * non-headline display figure. Run with no history, so a `rolling_average`
- * bill shows its step-adjusted base here; the history-aware figure is what
- * the bill's own detail view (which loads real history) shows.
- *
- * @param {Bill} bill
- * @param {string} today
- */
-function nextDueAndAmount(bill, today) {
-  try {
-    const engineBill = toEngineBillClient(bill);
-    const [next] = projectInstances(engineBill, { from: today, to: addDaysIso(today, 400) }, []);
-    return next ? { nextDueDate: next.dueDate, currentAmountCents: next.expectedCents } : { nextDueDate: null, currentAmountCents: bill.baseAmountCents };
-  } catch {
-    return { nextDueDate: null, currentAmountCents: bill.baseAmountCents };
-  }
-}
-
-/** @param {Person[]} people @param {string | null} personId */
-function personName(people, personId) {
-  if (personId === null) return "Shared";
-  return people.find((p) => p.id === personId)?.name ?? "Unknown person";
-}
+/** The balance curve's own horizon — see `<BillsBalanceCurve>` for why it is
+ * deliberately shorter than the contribution window. */
+const CURVE_WINDOW_DAYS = 365;
 
 /**
  * @param {{
@@ -182,14 +135,14 @@ function CategoryManagerDialog({ open, onOpenChange, categories, submitting, onC
                 }
                 trailing={
                   renaming?.id === cat.id ? null : (
-                    <div className="flex items-center gap-1">
+                    <span className="flex items-center gap-1">
                       <Button size="sm" variant="ghost" onClick={() => setRenaming({ id: cat.id, name: cat.name })}>
                         Rename
                       </Button>
                       <Button size="sm" variant="ghost" className="text-negative" onClick={() => onArchive(cat.id)}>
                         Archive
                       </Button>
-                    </div>
+                    </span>
                   )
                 }
               />
@@ -202,920 +155,34 @@ function CategoryManagerDialog({ open, onOpenChange, categories, submitting, onC
 }
 
 /**
- * @param {{
- *   open: boolean, onOpenChange: (open: boolean) => void, bill: Bill | null, categories: CostCategory[],
- *   people: Person[], accounts: Account[], submitting: boolean, onSubmit: (data: BillFormData) => Promise<void>,
- * }} props
- */
-function BillFormDialog({ open, onOpenChange, bill, categories, people, accounts, submitting, onSubmit }) {
-  const incomeLandingId = accounts.find((a) => a.isIncomeLanding)?.id ?? "";
-  const [categoryId, setCategoryId] = useState("");
-  const [name, setName] = useState("");
-  const [ownerPersonId, setOwnerPersonId] = useState(/** @type {string} */ (""));
-  const [paidFromAccountId, setPaidFromAccountId] = useState("");
-  const [amount, setAmount] = useState("");
-  const [frequency, setFrequency] = useState(/** @type {Cadence} */ ("monthly"));
-  const [anchorDate, setAnchorDate] = useState(todayIso());
-  const [amountModel, setAmountModel] = useState(/** @type {AmountModel} */ ("flat"));
-  const [escalationPct, setEscalationPct] = useState("");
-  const [rollingWindow, setRollingWindow] = useState("3");
-  const [notes, setNotes] = useState("");
-  const [error, setError] = useState(/** @type {string | null} */ (null));
-
-  useEffect(() => {
-    if (!open) return;
-    setCategoryId(bill?.categoryId ?? categories[0]?.id ?? "");
-    setName(bill?.name ?? "");
-    setOwnerPersonId(bill?.ownerPersonId ?? "");
-    setPaidFromAccountId(bill?.paidFromAccountId ?? incomeLandingId);
-    setAmount(bill ? String(bill.baseAmountCents / 100) : "");
-    setFrequency(bill?.frequency ?? "monthly");
-    setAnchorDate(bill?.anchorDate ?? todayIso());
-    setAmountModel(bill?.amountModel ?? "flat");
-    setEscalationPct(bill?.escalationPct != null ? String(bill.escalationPct) : "");
-    setRollingWindow(bill?.rollingWindow != null ? String(bill.rollingWindow) : "3");
-    setNotes(bill?.notes ?? "");
-    setError(null);
-    // Deliberately excludes `incomeLandingId`/`categories`: re-running this
-    // whenever the accounts/categories lists refetch would blow away
-    // whatever the operator has already picked.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, bill]);
-
-  /** @param {import("react").FormEvent} e */
-  async function handleSubmit(e) {
-    e.preventDefault();
-    setError(null);
-    if (!categoryId) {
-      setError("Choose a category.");
-      return;
-    }
-    if (!name.trim()) {
-      setError("Enter a name.");
-      return;
-    }
-    if (amount.trim() === "") {
-      setError("Enter an amount.");
-      return;
-    }
-    if (amountModel === "escalating" && escalationPct.trim() === "") {
-      setError("Escalating bills need an escalation percentage.");
-      return;
-    }
-    if (amountModel === "rolling_average" && rollingWindow.trim() === "") {
-      setError("Rolling-average bills need a window size.");
-      return;
-    }
-    try {
-      await onSubmit({
-        categoryId,
-        name: name.trim(),
-        ownerPersonId: ownerPersonId || null,
-        paidFromAccountId: paidFromAccountId || null,
-        baseAmountCents: toCents(Number(amount)),
-        frequency,
-        anchorDate,
-        amountModel,
-        escalationPct: amountModel === "escalating" ? Number(escalationPct) : null,
-        rollingWindow: amountModel === "rolling_average" ? Number(rollingWindow) : null,
-        notes: notes.trim() || null,
-      });
-      onOpenChange(false);
-    } catch (err) {
-      setError(/** @type {Error} */ (err).message);
-    }
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>{bill ? "Edit bill" : "Add bill"}</DialogTitle>
-          <DialogDescription>A recurring cost that behaves like the real bill, not a flat spreadsheet row.</DialogDescription>
-        </DialogHeader>
-        <form onSubmit={handleSubmit} className="flex max-h-[70vh] flex-col gap-4 overflow-y-auto pr-1">
-          <FieldRow label="Category" htmlFor="bill-category" required>
-            <Select value={categoryId} onValueChange={setCategoryId}>
-              <SelectTrigger id="bill-category" className="w-full">
-                <SelectValue placeholder="Choose a category" />
-              </SelectTrigger>
-              <SelectContent>
-                {categories.map((cat) => (
-                  <SelectItem key={cat.id} value={cat.id}>
-                    {cat.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </FieldRow>
-          <FieldRow label="Name" htmlFor="bill-name" required>
-            <Input id="bill-name" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
-          </FieldRow>
-          <div className="grid grid-cols-2 gap-3">
-            <FieldRow label="Owner" htmlFor="bill-owner" hint="Optional.">
-              <Select value={ownerPersonId || "shared"} onValueChange={(v) => setOwnerPersonId(v === "shared" ? "" : v)}>
-                <SelectTrigger id="bill-owner" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="shared">Shared</SelectItem>
-                  {people.map((p) => (
-                    <SelectItem key={p.id} value={p.id}>
-                      {p.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </FieldRow>
-            <FieldRow label="Paid from" htmlFor="bill-account">
-              <Select value={paidFromAccountId || "none"} onValueChange={(v) => setPaidFromAccountId(v === "none" ? "" : v)}>
-                <SelectTrigger id="bill-account" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">Not set</SelectItem>
-                  {accounts.map((a) => (
-                    <SelectItem key={a.id} value={a.id}>
-                      {a.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </FieldRow>
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <FieldRow label="Amount" htmlFor="bill-amount" required>
-              <InputGroup>
-                <InputGroupAddon>
-                  <InputGroupText>$</InputGroupText>
-                </InputGroupAddon>
-                <InputGroupInput id="bill-amount" type="number" step="0.01" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} />
-              </InputGroup>
-            </FieldRow>
-            <FieldRow label="Cadence" htmlFor="bill-frequency">
-              <Select value={frequency} onValueChange={(v) => setFrequency(/** @type {Cadence} */ (v))}>
-                <SelectTrigger id="bill-frequency" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {CADENCES.map((c) => (
-                    <SelectItem key={c} value={c}>
-                      {CADENCE_LABELS[c]}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </FieldRow>
-          </div>
-          <FieldRow label="Anchor date" htmlFor="bill-anchor" hint="A known due date — the series is derived from it.">
-            <Input id="bill-anchor" type="date" value={anchorDate} onChange={(e) => setAnchorDate(e.target.value)} />
-          </FieldRow>
-          <FieldRow label="Amount model" htmlFor="bill-model" hint="How this bill's amount actually behaves.">
-            <Select value={amountModel} onValueChange={(v) => setAmountModel(/** @type {AmountModel} */ (v))}>
-              <SelectTrigger id="bill-model" className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {AMOUNT_MODELS.map((m) => (
-                  <SelectItem key={m} value={m}>
-                    {AMOUNT_MODEL_LABELS[m]}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </FieldRow>
-          {amountModel === "escalating" ? (
-            <FieldRow label="Escalation" htmlFor="bill-escalation" required hint="Percent per year, compounding from the anchor date.">
-              <InputGroup>
-                <InputGroupInput id="bill-escalation" type="number" step="0.1" inputMode="decimal" value={escalationPct} onChange={(e) => setEscalationPct(e.target.value)} />
-                <InputGroupAddon align="inline-end">
-                  <InputGroupText>% p.a.</InputGroupText>
-                </InputGroupAddon>
-              </InputGroup>
-            </FieldRow>
-          ) : null}
-          {amountModel === "rolling_average" ? (
-            <FieldRow label="Window" htmlFor="bill-window" required hint="How many past actuals to average.">
-              <Input id="bill-window" type="number" step="1" min="1" inputMode="numeric" value={rollingWindow} onChange={(e) => setRollingWindow(e.target.value)} />
-            </FieldRow>
-          ) : null}
-          {amountModel === "seasonal" ? (
-            <p className="text-xs text-text-muted">Set the 12 monthly factors from the bill's own detail view after saving.</p>
-          ) : null}
-          <FieldRow label="Notes" htmlFor="bill-notes" hint="Optional.">
-            <Textarea id="bill-notes" value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} />
-          </FieldRow>
-          {error ? <p className="text-sm text-negative">{error}</p> : null}
-          <DialogFooter>
-            <Button type="submit" disabled={submitting}>
-              {submitting ? "Saving…" : "Save"}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-/**
- * @param {{ open: boolean, onOpenChange: (open: boolean) => void, stepChange: StepChange | null, submitting: boolean, onSubmit: (data: { effectiveFrom: string, newAmountCents: Cents, note: string | null }) => Promise<void>, onDelete: (() => void) | null }} props
- */
-function StepChangeFormDialog({ open, onOpenChange, stepChange, submitting, onSubmit, onDelete }) {
-  const [effectiveFrom, setEffectiveFrom] = useState(todayIso());
-  const [amount, setAmount] = useState("");
-  const [note, setNote] = useState("");
-  const [error, setError] = useState(/** @type {string | null} */ (null));
-
-  useEffect(() => {
-    if (!open) return;
-    setEffectiveFrom(stepChange?.effectiveFrom ?? todayIso());
-    setAmount(stepChange ? String(stepChange.newAmountCents / 100) : "");
-    setNote(stepChange?.note ?? "");
-    setError(null);
-  }, [open, stepChange]);
-
-  /** @param {import("react").FormEvent} e */
-  async function handleSubmit(e) {
-    e.preventDefault();
-    setError(null);
-    if (amount.trim() === "") {
-      setError("Enter the new amount.");
-      return;
-    }
-    try {
-      await onSubmit({ effectiveFrom, newAmountCents: toCents(Number(amount)), note: note.trim() || null });
-      onOpenChange(false);
-    } catch (err) {
-      setError(/** @type {Error} */ (err).message);
-    }
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>{stepChange ? "Edit step change" : "Add step change"}</DialogTitle>
-          <DialogDescription>A new base amount from this date forward — replaces the bill's base, not a modifier on top of it.</DialogDescription>
-        </DialogHeader>
-        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-          <FieldRow label="Effective from" htmlFor="step-from">
-            <Input id="step-from" type="date" value={effectiveFrom} onChange={(e) => setEffectiveFrom(e.target.value)} />
-          </FieldRow>
-          <FieldRow label="New amount" htmlFor="step-amount" required>
-            <InputGroup>
-              <InputGroupAddon>
-                <InputGroupText>$</InputGroupText>
-              </InputGroupAddon>
-              <InputGroupInput id="step-amount" type="number" step="0.01" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} />
-            </InputGroup>
-          </FieldRow>
-          <FieldRow label="Note" htmlFor="step-note" hint="Optional.">
-            <Input id="step-note" value={note} onChange={(e) => setNote(e.target.value)} />
-          </FieldRow>
-          {error ? <p className="text-sm text-negative">{error}</p> : null}
-          <DialogFooter className={onDelete ? "sm:justify-between!" : undefined}>
-            {onDelete ? (
-              <Button type="button" variant="ghost" className="text-negative" onClick={onDelete}>
-                Delete
-              </Button>
-            ) : null}
-            <Button type="submit" disabled={submitting}>
-              {submitting ? "Saving…" : "Save"}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-/** @param {{ bill: BillDetail }} props */
-function StepChangesPanel({ bill }) {
-  const { locale } = useSettings();
-  const queryClient = useQueryClient();
-  const [form, setForm] = useState(/** @type {{ stepChange: StepChange | null } | null} */ (null));
-
-  function invalidate() {
-    queryClient.invalidateQueries({ queryKey: ["bill-detail", bill.id] });
-    queryClient.invalidateQueries({ queryKey: ["bills"] });
-    queryClient.invalidateQueries({ queryKey: ["fixed-costs-summary"] });
-  }
-
-  const createMutation = useMutation({
-    mutationFn: async (/** @type {{ effectiveFrom: string, newAmountCents: Cents, note: string | null }} */ data) => {
-      const res = await api.bills[":id"]["step-changes"].$post({ param: { id: bill.id }, json: data });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return res.json();
-    },
-    onSuccess: invalidate,
-  });
-
-  const updateMutation = useMutation({
-    mutationFn: async (/** @type {{ id: string, data: { effectiveFrom: string, newAmountCents: Cents, note: string | null } }} */ { id, data }) => {
-      const res = await api["bill-step-changes"][":id"].$patch({ param: { id }, json: data });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return res.json();
-    },
-    onSuccess: invalidate,
-  });
-
-  const deleteMutation = useMutation({
-    mutationFn: async (/** @type {string} */ id) => {
-      const res = await api["bill-step-changes"][":id"].$delete({ param: { id } });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return res.json();
-    },
-    onSuccess: invalidate,
-    onError: (err) => toast.error(err.message),
-  });
-
-  return (
-    <div className="flex flex-col gap-3">
-      <div className="flex items-center justify-between">
-        <h4 className="text-sm font-semibold text-text">Step changes</h4>
-        <Button size="sm" variant="outline" onClick={() => setForm({ stepChange: null })}>
-          <PlusIcon />
-          Add
-        </Button>
-      </div>
-      {bill.stepChanges.length === 0 ? (
-        <p className="text-sm text-text-muted">None — the base amount applies throughout.</p>
-      ) : (
-        <DataList>
-          {bill.stepChanges.map((sc) => (
-            <DataListRow
-              key={sc.id}
-              onClick={() => setForm({ stepChange: sc })}
-              primary={<Money value={sc.newAmountCents} />}
-              secondary={`from ${formatIsoDate(sc.effectiveFrom, locale)}${sc.note ? ` · ${sc.note}` : ""}`}
-            />
-          ))}
-        </DataList>
-      )}
-      <StepChangeFormDialog
-        open={form !== null}
-        onOpenChange={(open) => !open && setForm(null)}
-        stepChange={form?.stepChange ?? null}
-        submitting={createMutation.isPending || updateMutation.isPending}
-        onSubmit={async (data) => {
-          if (form?.stepChange) {
-            await updateMutation.mutateAsync({ id: form.stepChange.id, data });
-          } else {
-            await createMutation.mutateAsync(data);
-          }
-        }}
-        onDelete={
-          form?.stepChange
-            ? () => {
-                if (form.stepChange) deleteMutation.mutate(form.stepChange.id);
-                setForm(null);
-              }
-            : null
-        }
-      />
-    </div>
-  );
-}
-
-/** @param {{ bill: BillDetail }} props */
-function SeasonalFactorEditor({ bill }) {
-  const queryClient = useQueryClient();
-  const [factors, setFactors] = useState(() => MONTH_LABELS.map((_, i) => String(bill.seasonalFactors?.[i + 1] ?? 1)));
-  const [deriving, setDeriving] = useState(false);
-  const [error, setError] = useState(/** @type {string | null} */ (null));
-
-  const saveMutation = useMutation({
-    mutationFn: async () => {
-      const res = await api.bills[":id"]["seasonal-factors"].$put({
-        param: { id: bill.id },
-        json: { factors: factors.map((f) => Number(f) || 0) },
-      });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return res.json();
-    },
-    onSuccess: () => {
-      toast.success("Seasonal factors saved.");
-      queryClient.invalidateQueries({ queryKey: ["bill-detail", bill.id] });
-      queryClient.invalidateQueries({ queryKey: ["bills"] });
-      queryClient.invalidateQueries({ queryKey: ["fixed-costs-summary"] });
-    },
-    onError: (err) => toast.error(err.message),
-  });
-
-  // Computes each month's mean actual ÷ the overall mean (1.0 for months
-  // with no data) and only fills the editor's fields — it never calls the
-  // save mutation itself (phases/06-fixed-costs.md "'Derive from history'
-  // ... presents them for the operator to accept or edit. It never writes
-  // them directly.").
-  async function deriveFromHistory() {
-    setDeriving(true);
-    setError(null);
-    try {
-      const res = await api.bills[":id"].history.$get({ param: { id: bill.id }, query: { periods: "36" } });
-      if (!res.ok) throw new Error(await readApiError(res));
-      const { slots } = /** @type {{ slots: { dueDate: string, actualCents: Cents | null }[] }} */ (await res.json());
-
-      /** @type {Cents[][]} */
-      const byMonth = Array.from({ length: 12 }, () => []);
-      for (const slot of slots) {
-        if (slot.actualCents === null) continue;
-        const month = Number(slot.dueDate.slice(5, 7));
-        byMonth[month - 1]?.push(slot.actualCents);
-      }
-      const means = byMonth.map((list) => (list.length > 0 ? list.reduce((a, b) => a + b, 0) / list.length : null));
-      const withData = means.filter((m) => m !== null);
-      if (withData.length === 0) {
-        setError("No entered history yet — enter some actuals first.");
-        return;
-      }
-      const overallMean = withData.reduce((a, b) => a + b, 0) / withData.length;
-      setFactors(means.map((m) => (m === null ? "1" : (m / overallMean).toFixed(4))));
-      toast.success("Factors derived from history — review, then save.");
-    } catch (err) {
-      setError(/** @type {Error} */ (err).message);
-    } finally {
-      setDeriving(false);
-    }
-  }
-
-  return (
-    <div className="flex flex-col gap-3 rounded-(--radius-card) bg-surface-muted p-4">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h4 className="text-sm font-semibold text-text">Seasonal factors</h4>
-        <Button size="sm" variant="outline" onClick={deriveFromHistory} disabled={deriving}>
-          {deriving ? "Deriving…" : "Derive from history"}
-        </Button>
-      </div>
-      {/* No table view: the twelve editable month fields directly below
-          this bar chart are the same figures, in the same order. */}
-      <Chart
-        height={120}
-        ariaLabel={`Seasonal factor per month for ${bill.name}, shown as bars. The same twelve values are editable below.`}
-        option={(tokens) => ({
-          xAxis: { type: "category", data: MONTH_LABELS.map((m) => m.slice(0, 3)) },
-          yAxis: { type: "value" },
-          series: [{ type: "bar", data: factors.map((f) => Number(f) || 0), itemStyle: { color: tokens.series[0], borderRadius: [4, 4, 0, 0] } }],
-        })}
-      />
-      <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
-        {MONTH_LABELS.map((label, i) => (
-          <FieldRow key={label} label={label.slice(0, 3)} htmlFor={`bill-${bill.id}-factor-${i}`}>
-            <Input
-              id={`bill-${bill.id}-factor-${i}`}
-              type="number"
-              step="0.01"
-              inputMode="decimal"
-              value={factors[i]}
-              onChange={(e) => setFactors((prev) => prev.map((v, idx) => (idx === i ? e.target.value : v)))}
-            />
-          </FieldRow>
-        ))}
-      </div>
-      {error ? <p className="text-sm text-negative">{error}</p> : null}
-      <Button size="sm" className="self-start" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>
-        {saveMutation.isPending ? "Saving…" : "Save factors"}
-      </Button>
-    </div>
-  );
-}
-
-/** Which stored instances a `rolling_average` bill is currently averaging —
- * the most recent `rollingWindow` non-null actuals, same selection rule as
- * `computeExpectedCents` (packages/engine/src/bills.js), read here from
- * `recentInstances` rather than recomputed.
- *
- * @param {{ bill: BillDetail }} props
- */
-function RollingAveragePreview({ bill }) {
-  const { locale } = useSettings();
-  const withActuals = bill.recentInstances
-    .filter((i) => i.actualCents !== null)
-    .sort((a, b) => (a.dueDate < b.dueDate ? 1 : -1));
-  const windowSize = bill.rollingWindow ?? 0;
-  const used = withActuals.slice(0, windowSize);
-
-  return (
-    <div className="flex flex-col gap-2 rounded-(--radius-card) bg-surface-muted p-4">
-      <h4 className="text-sm font-semibold text-text">Rolling average — window of {windowSize}</h4>
-      {used.length < windowSize ? (
-        <p className="text-xs text-text-muted">
-          Only {used.length} of {windowSize} needed actuals entered — falling back to the step-adjusted base until there's enough history.
-        </p>
-      ) : null}
-      {used.length === 0 ? (
-        <p className="text-sm text-text-muted">No actuals entered yet.</p>
-      ) : (
-        <ul className="flex flex-col gap-1 text-sm">
-          {used.map((i) => (
-            <li key={i.id} className="flex items-center justify-between">
-              <span className="text-text-muted">{formatIsoDate(i.dueDate, locale)}</span>
-              <Money value={/** @type {Cents} */ (i.actualCents)} />
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-/**
- * A stored row whose date no longer lines up with the bill's current
- * schedule — never auto-deleted (phases/06-fixed-costs.md "Orphaned
- * instances"), but the operator can explicitly discard one here, then
- * re-enter it correctly via "Enter bill history" ("realign or delete").
- * Widens the window well past the balance-curve/summary default so a
- * long-ago anchor change still surfaces its orphans.
- *
- * @param {{ bill: BillDetail }} props
- */
-function OrphanedInstancesPanel({ bill }) {
-  const { locale } = useSettings();
-  const queryClient = useQueryClient();
-
-  const orphansQuery = useQuery({
-    queryKey: ["bill-instances", "orphans", bill.id],
-    queryFn: async () => {
-      const res = await api["bill-instances"].$get({ query: { from: "2000-01-01", to: "2100-01-01" } });
-      if (!res.ok) throw new Error(await readApiError(res));
-      /** @type {{ instances: { billId: string, dueDate: string, expectedCents: Cents | null, actualCents: Cents | null, id: string | null, isOrphan: boolean }[] }} */
-      const { instances } = await res.json();
-      return instances.filter((i) => i.billId === bill.id && i.isOrphan);
-    },
-  });
-
-  const deleteMutation = useMutation({
-    mutationFn: async (/** @type {string} */ id) => {
-      const res = await api["bill-instances"][":id"].$delete({ param: { id } });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["bill-instances"] });
-      toast.success("Orphaned instance deleted.");
-    },
-    onError: (err) => toast.error(err.message),
-  });
-
-  const orphans = orphansQuery.data ?? [];
-  if (orphans.length === 0) return null;
-
-  return (
-    <div className="flex flex-col gap-2 rounded-(--radius-card) bg-negative-soft p-4">
-      <div className="flex items-start gap-2 text-sm text-negative">
-        <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
-        <p>
-          {orphans.length} stored instance{orphans.length === 1 ? "" : "s"} no longer line up with this bill's schedule — real history,
-          kept, never auto-deleted. Delete one to realign, then re-enter it via "Enter bill history".
-        </p>
-      </div>
-      <ul className="flex flex-col divide-y divide-border">
-        {orphans.map((o) => (
-          <li key={o.dueDate} className="flex items-center justify-between gap-3 py-2 text-sm">
-            <span className="text-text">
-              {formatIsoDate(o.dueDate, locale)} · <Money value={o.actualCents ?? o.expectedCents ?? 0} />
-            </span>
-            <Button
-              size="sm"
-              variant="ghost"
-              className="text-negative"
-              disabled={o.id === null}
-              onClick={() => o.id && deleteMutation.mutate(o.id)}
-            >
-              Delete
-            </Button>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-/**
- * @param {{
- *   billId: string | null, onOpenChange: (open: boolean) => void, categories: CostCategory[], people: Person[],
- *   onEdit: (bill: Bill) => void, onArchive: (id: string) => void, onEnterHistory: (billId: string) => void,
- * }} props
- */
-function BillDetailSheet({ billId, onOpenChange, categories, people, onEdit, onArchive, onEnterHistory }) {
-  const detailQuery = useQuery({
-    queryKey: ["bill-detail", billId],
-    queryFn: async () => {
-      const res = await api.bills[":id"].$get({ param: { id: /** @type {string} */ (billId) } });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return /** @type {BillDetail} */ ((await res.json()).bill);
-    },
-    enabled: billId !== null,
-  });
-
-  const bill = detailQuery.data ?? null;
-  const category = bill ? categories.find((c) => c.id === bill.categoryId) : null;
-
-  return (
-    <Sheet open={billId !== null} onOpenChange={onOpenChange}>
-      <SheetContent side="bottom" className="max-h-[85vh] overflow-y-auto">
-        <SheetHeader>
-          <SheetTitle>{bill?.name ?? "Bill"}</SheetTitle>
-          <SheetDescription>{category?.name ?? ""}</SheetDescription>
-        </SheetHeader>
-        {bill ? (
-          <div className="flex flex-col gap-6 px-4 pb-6">
-            <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-3">
-              <div>
-                <p className="text-xs text-text-subtle">Amount</p>
-                <p className="font-medium text-text">
-                  <Money value={bill.baseAmountCents} /> · {CADENCE_LABELS[bill.frequency]}
-                </p>
-              </div>
-              <div>
-                <p className="text-xs text-text-subtle">Owner</p>
-                <p className="font-medium text-text">{personName(people, bill.ownerPersonId)}</p>
-              </div>
-              <div>
-                <p className="text-xs text-text-subtle">Model</p>
-                <p className="font-medium text-text">{AMOUNT_MODEL_LABELS[bill.amountModel]}</p>
-              </div>
-            </div>
-            {bill.notes ? <p className="text-sm text-text-muted">{bill.notes}</p> : null}
-
-            <OrphanedInstancesPanel bill={bill} />
-
-            {bill.amountModel === "seasonal" ? <SeasonalFactorEditor bill={bill} /> : null}
-            {bill.amountModel === "rolling_average" ? <RollingAveragePreview bill={bill} /> : null}
-
-            <StepChangesPanel bill={bill} />
-
-            <div className="flex flex-wrap gap-2 border-t border-border pt-4">
-              <Button onClick={() => onEnterHistory(bill.id)}>
-                <CalendarClockIcon />
-                Enter bill history
-              </Button>
-              <Button variant="outline" onClick={() => onEdit(bill)}>
-                <PencilIcon />
-                Edit bill
-              </Button>
-              <Button variant="ghost" className="text-negative" onClick={() => onArchive(bill.id)}>
-                <Trash2Icon />
-                Archive
-              </Button>
-            </div>
-          </div>
-        ) : null}
-      </SheetContent>
-    </Sheet>
-  );
-}
-
-/**
- * @param {{
- *   category: CostCategory, bills: Bill[], summary: CategorySummary | undefined, people: Person[],
- *   payCadenceLabel: string | null, today: string, onOpenBill: (id: string) => void,
- * }} props
- */
-function CategoryGroupDesktop({ category, bills, summary, people, payCadenceLabel, today, onOpenBill }) {
-  return (
-    <div className="flex flex-col gap-2">
-      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-        <h3 className="text-sm font-semibold text-text-muted">{category.name}</h3>
-        {summary ? (
-          <div className="flex items-center gap-4 text-xs text-text-muted">
-            <span>
-              {summary.billCount} bill{summary.billCount === 1 ? "" : "s"}
-            </span>
-            {summary.perPayCents != null ? (
-              <span>
-                Per pay{payCadenceLabel ? ` (${payCadenceLabel})` : ""}: <Money value={summary.perPayCents} className="font-medium text-text" />
-              </span>
-            ) : null}
-            <span>
-              Per month: <Money value={summary.perMonthCents} className="font-medium text-text" />
-            </span>
-            <span>
-              Per year: <Money value={summary.perYearCents} className="font-medium text-text" />
-            </span>
-          </div>
-        ) : null}
-      </div>
-      <div className="overflow-x-auto rounded-(--radius-card) bg-surface shadow-(--shadow-card)">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-border text-left text-xs text-text-muted">
-              <th className="px-4 py-3 font-medium">Name</th>
-              <th className="px-4 py-3 font-medium">Owner</th>
-              <th className="px-4 py-3 font-medium">Amount</th>
-              <th className="px-4 py-3 font-medium">Next due</th>
-              <th className="px-4 py-3 font-medium">Annual</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-border">
-            {bills.map((bill) => {
-              const { nextDueDate, currentAmountCents } = nextDueAndAmount(bill, today);
-              return (
-                <tr key={bill.id}>
-                  <td className="px-4 py-3 text-text">
-                    <button type="button" className="text-left hover:underline" onClick={() => onOpenBill(bill.id)}>
-                      {bill.name}
-                    </button>
-                    {bill.amountModel !== "flat" ? (
-                      <Badge variant="secondary" className="ml-2">
-                        {AMOUNT_MODEL_LABELS[bill.amountModel]}
-                      </Badge>
-                    ) : null}
-                  </td>
-                  <td className="px-4 py-3 text-text-muted">{personName(people, bill.ownerPersonId)}</td>
-                  <td className="px-4 py-3 text-text">
-                    <Money value={currentAmountCents} /> <span className="text-text-subtle">/{CADENCE_LABELS[bill.frequency].toLowerCase()}</span>
-                  </td>
-                  <td className="px-4 py-3 text-text-muted">{nextDueDate ? formatIsoDate(nextDueDate, "en-AU") : "—"}</td>
-                  <td className="px-4 py-3 text-text-muted">
-                    <Money value={annualise(currentAmountCents, bill.frequency)} />
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-/**
- * @param {{ category: CostCategory, bills: Bill[], summary: CategorySummary | undefined, today: string, onOpenBill: (id: string) => void }} props
- */
-function CategoryGroupMobile({ category, bills, summary, today, onOpenBill }) {
-  const [open, setOpen] = useState(true);
-  return (
-    <div className="flex flex-col gap-2">
-      <button
-        type="button"
-        data-touch-target
-        aria-expanded={open}
-        className="flex items-center justify-between gap-2 text-left"
-        onClick={() => setOpen((o) => !o)}
-      >
-        <span className="flex items-center gap-1 text-sm font-semibold text-text-muted">
-          {open ? <ChevronDownIcon className="size-4" /> : <ChevronRightIcon className="size-4" />}
-          {category.name}
-        </span>
-        {summary ? (
-          <span className="text-xs text-text-muted">
-            <Money value={summary.perMonthCents} className="font-medium text-text" />
-            /mo
-          </span>
-        ) : null}
-      </button>
-      {open ? (
-        <DataList>
-          {bills.map((bill) => {
-            const { nextDueDate, currentAmountCents } = nextDueAndAmount(bill, today);
-            return (
-              <DataListRow
-                key={bill.id}
-                onClick={() => onOpenBill(bill.id)}
-                primary={
-                  <span className="flex items-center gap-2">
-                    {bill.name}
-                    {bill.amountModel !== "flat" ? <Badge variant="secondary">{AMOUNT_MODEL_LABELS[bill.amountModel]}</Badge> : null}
-                  </span>
-                }
-                secondary={`${CADENCE_LABELS[bill.frequency]}${nextDueDate ? ` · next ${formatIsoDate(nextDueDate, "en-AU")}` : ""}`}
-                trailing={<Money value={currentAmountCents} />}
-              />
-            );
-          })}
-        </DataList>
-      ) : null}
-    </div>
-  );
-}
-
-/** @param {{ date: string, balanceCents: Cents, event: "payday" | "bill" }[]} points */
-function balanceCurveOption(points) {
-  return (/** @type {import("@/components/chart.jsx").ChartTokens} */ tokens) => ({
-    xAxis: { type: "category", data: points.map((p) => p.date) },
-    yAxis: { type: "value" },
-    series: [
-      {
-        type: "line",
-        name: "Balance",
-        data: points.map((p) => p.balanceCents / 100),
-        smooth: true,
-        showSymbol: false,
-        lineStyle: { color: tokens.series[0], width: 2 },
-        areaStyle: { color: tokens.accentSoft },
-      },
-      {
-        type: "scatter",
-        name: "Bill due",
-        data: points.map((p) => (p.event === "bill" ? p.balanceCents / 100 : null)),
-        symbolSize: 8,
-        itemStyle: { color: tokens.series[3] },
-      },
-    ],
-  });
-}
-
-/**
- * Insight only, visibly separate from the contribution figure and unable to
- * alter it (phases/06-fixed-costs.md "What this phase must not do") —
- * collapsed by default, and its query only runs once expanded.
- *
- * @param {{ window: { from: string, to: string } }} props
- */
-function BalanceCurvePanel({ window }) {
-  const { currency, locale } = useSettings();
-  const [open, setOpen] = useState(false);
-  const [openingDollars, setOpeningDollars] = useState("0");
-
-  const curveQuery = useQuery({
-    queryKey: ["fixed-costs-balance-curve", window.from, window.to, openingDollars],
-    queryFn: async () => {
-      const res = await api["fixed-costs"]["balance-curve"].$get({
-        query: { from: window.from, to: window.to, opening: String(toCents(Number(openingDollars) || 0)) },
-      });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return /** @type {{ points: { date: string, balanceCents: Cents, event: "payday" | "bill" }[], requiredOpeningBalanceCents: Cents }} */ (
-        await res.json()
-      );
-    },
-    enabled: open,
-  });
-
-  const points = curveQuery.data?.points ?? [];
-  const lowest = points.reduce(
-    /** @param {typeof points[number] | null} min */ (min, p) => (min === null || p.balanceCents < min.balanceCents ? p : min),
-    null,
-  );
-
-  return (
-    <div className="rounded-(--radius-card) bg-surface shadow-(--shadow-card)">
-      <button type="button" className="flex w-full items-center justify-between gap-2 p-5 text-left" onClick={() => setOpen((o) => !o)}>
-        <div>
-          <h3 className="font-semibold text-text">Balance curve</h3>
-          <p className="text-xs text-text-muted">Insight only — never changes the contribution above.</p>
-        </div>
-        {open ? <ChevronDownIcon className="size-5 text-text-muted" /> : <ChevronRightIcon className="size-5 text-text-muted" />}
-      </button>
-      {open ? (
-        <div className="flex flex-col gap-4 border-t border-border p-5">
-          <FieldRow label="Starting balance" htmlFor="curve-opening" className="max-w-40">
-            <InputGroup>
-              <InputGroupAddon>
-                <InputGroupText>$</InputGroupText>
-              </InputGroupAddon>
-              <InputGroupInput id="curve-opening" type="number" step="0.01" inputMode="decimal" value={openingDollars} onChange={(e) => setOpeningDollars(e.target.value)} />
-            </InputGroup>
-          </FieldRow>
-          <Chart
-            loading={curveQuery.isLoading}
-            empty={points.length === 0}
-            emptyTitle="No projection yet"
-            height={260}
-            ariaLabel={
-              lowest
-                ? `Projected bills-account balance across ${points.length} events, dipping lowest on ${formatIsoDate(lowest.date, locale)} at ${formatMoney(lowest.balanceCents, { currency, locale })}.`
-                : "Projected bills-account balance over time."
-            }
-            dataTable={{
-              caption: "Projected balance after each payday and bill",
-              columns: ["Date", "Event", "Balance"],
-              rows: points.map((point) => [
-                formatIsoDate(point.date, locale),
-                point.event === "bill" ? "Bill due" : "Payday",
-                formatMoney(point.balanceCents, { currency, locale }),
-              ]),
-            }}
-            option={balanceCurveOption(points)}
-          />
-          {curveQuery.data && lowest ? (
-            <p className="text-sm text-text-muted">
-              At this contribution the account dips lowest on {formatIsoDate(lowest.date, locale)}, reaching{" "}
-              <Money value={lowest.balanceCents} className="font-medium text-text" />. An opening balance of{" "}
-              <Money value={curveQuery.data.requiredOpeningBalanceCents} className="font-medium text-text" /> keeps it above your buffer.
-            </p>
-          ) : null}
-          {curveQuery.error ? <p className="text-sm text-negative">{/** @type {Error} */ (curveQuery.error).message}</p> : null}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-/**
  * Bills that know how they actually behave — seasonal, escalating, rolling-
- * average — instead of a flat spreadsheet row, plus the calendar and balance
- * curve that come from projecting them. The average stays the answer; the
- * simulation is insight only (phases/06-fixed-costs.md "Objective").
+ * average — instead of a flat spreadsheet row, plus the balance curve that
+ * comes from projecting them. The average stays the answer; the simulation is
+ * insight only (phases/06-fixed-costs.md "Objective").
+ *
+ * The table edits in place. Reaching a bill's amount used to mean opening its
+ * detail sheet and then its form — two menus deep to change one figure — so
+ * the list itself is now the editor, with one ghost row per category standing
+ * in for the old "Add bill" button. Only the data a row has no width for
+ * (entered history, twelve seasonal factors, step changes) still lives behind
+ * a modal.
  */
 export function FixedCostsPage() {
   const navigate = useNavigate();
+  const confirm = useConfirm();
   const queryClient = useQueryClient();
-  const window = useMemo(() => windowFromToday(12), []);
+  const { locale } = useSettings();
   const today = useMemo(todayIso, []);
+  const contributionWindow = useMemo(
+    () => ({ from: today, to: addDaysIso(today, CONTRIBUTION_WINDOW_DAYS) }),
+    [today],
+  );
+  const curveWindow = useMemo(() => ({ from: today, to: addDaysIso(today, CURVE_WINDOW_DAYS) }), [today]);
 
   const [categoryManagerOpen, setCategoryManagerOpen] = useState(false);
-  const [billForm, setBillForm] = useState(/** @type {{ bill: Bill | null } | null} */ (null));
   const [detailBillId, setDetailBillId] = useState(/** @type {string | null} */ (null));
+  const [editing, setEditing] = useState(false);
+  const [drafts, setDrafts] = useState(/** @type {DraftBill[]} */ ([]));
 
   const categoriesQuery = useQuery({
     queryKey: ["cost-categories", "fixed"],
@@ -1163,9 +230,9 @@ export function FixedCostsPage() {
   });
 
   const summaryQuery = useQuery({
-    queryKey: ["fixed-costs-summary", window.from, window.to],
+    queryKey: ["fixed-costs-summary", contributionWindow.from, contributionWindow.to],
     queryFn: async () => {
-      const res = await api["fixed-costs"].summary.$get({ query: window });
+      const res = await api["fixed-costs"].summary.$get({ query: contributionWindow });
       if (!res.ok) throw new Error(await readApiError(res));
       return /** @type {FixedCostsSummary} */ (await res.json());
     },
@@ -1189,12 +256,181 @@ export function FixedCostsPage() {
   const payCadenceLabel = primarySchedule ? CADENCE_LABELS[primarySchedule.cadence] : null;
   const dueSoonCount = dueSoonQuery.data?.length ?? 0;
   const warnings = summary?.warnings ?? [];
+  const incomeLandingId = accounts.find((a) => a.isIncomeLanding)?.id ?? "";
+
+  const billsById = useMemo(() => new Map(bills.map((b) => [b.id, b])), [bills]);
 
   function invalidateBills() {
     queryClient.invalidateQueries({ queryKey: ["bills"] });
     queryClient.invalidateQueries({ queryKey: ["fixed-costs-summary"] });
     queryClient.invalidateQueries({ queryKey: ["bill-instances"] });
+    queryClient.invalidateQueries({ queryKey: ["fixed-costs-balance-curve"] });
   }
+
+  // ---------------------------------------------------------------- edit mode
+
+  /** @param {string | null} focusCategoryId a category to open with a fresh ghost row */
+  function beginEdit(focusCategoryId = null) {
+    const seeded = bills.map(billToDraft);
+    if (focusCategoryId) seeded.push(blankDraft(focusCategoryId, incomeLandingId));
+    setDrafts(seeded);
+    setEditing(true);
+  }
+
+  function leaveEdit() {
+    setDrafts([]);
+    setEditing(false);
+  }
+
+  // Always exactly one blank ghost per category, replenished as soon as the
+  // operator starts typing into the last one — the spreadsheet behaviour the
+  // old "Add bill" dialog replaced with a modal.
+  useEffect(() => {
+    if (!editing) return;
+    setDrafts((prev) => {
+      const missing = categories.filter(
+        (cat) => !prev.some((d) => d.categoryId === cat.id && d.billId === null && isBlankGhost(d)),
+      );
+      if (missing.length === 0) return prev;
+      return [...prev, ...missing.map((cat) => blankDraft(cat.id, incomeLandingId))];
+    });
+  }, [editing, drafts, categories, incomeLandingId]);
+
+  /** @param {string} key @param {Partial<DraftBill>} patch */
+  function changeDraft(key, patch) {
+    setDrafts((prev) => prev.map((d) => (d.key === key ? { ...d, ...patch } : d)));
+  }
+
+  /** @param {string} key */
+  function toggleRemove(key) {
+    setDrafts((prev) =>
+      prev.flatMap((d) => {
+        if (d.key !== key) return [d];
+        // A ghost has nothing on the server to archive, so removing it just
+        // drops the row.
+        if (d.billId === null) return [];
+        return [{ ...d, removed: !d.removed }];
+      }),
+    );
+  }
+
+  const dirty = useMemo(() => {
+    if (!editing) return false;
+    return drafts.some((d) => {
+      if (d.billId === null) return !isBlankGhost(d);
+      if (d.removed) return true;
+      const bill = billsById.get(d.billId);
+      return bill ? draftSignature(d) !== draftSignature(billToDraft(bill)) : false;
+    });
+  }, [editing, drafts, billsById]);
+
+  const changeCount = useMemo(() => {
+    if (!editing) return 0;
+    return drafts.filter((d) => {
+      if (d.billId === null) return !isBlankGhost(d);
+      if (d.removed) return true;
+      const bill = billsById.get(d.billId);
+      return bill ? draftSignature(d) !== draftSignature(billToDraft(bill)) : false;
+    }).length;
+  }, [editing, drafts, billsById]);
+
+  // ------------------------------------------------------------------- figures
+
+  const serverFigures = useMemo(
+    () => new Map((summary?.byBill ?? []).map((f) => [f.billId, f])),
+    [summary],
+  );
+
+  /**
+   * At rest the rows print the server's own per-bill figures; while editing
+   * they print `draftFigures`, which is the same `billWindowFigures` over the
+   * same window and the same entered history. Two modes, one computation — so
+   * saving an edit does not move a number that was already correct.
+   *
+   * @type {Map<string, WindowFigures | null>}
+   */
+  const figuresByKey = useMemo(() => {
+    /** @type {Map<string, WindowFigures | null>} */
+    const map = new Map();
+    if (!editing) {
+      for (const [billId, figures] of serverFigures) map.set(billId, figures);
+      return map;
+    }
+    // `billsContribution` only reads the schedule for its per-pay figure, so a
+    // placeholder is safe when no primary schedule is set — the same
+    // convention `computeContribution` uses on the server, and `perPayCents`
+    // is discarded below in that case.
+    /** @type {PaySchedule} */
+    const schedule = primarySchedule
+      ? { anchorDate: primarySchedule.anchorDate, cadence: primarySchedule.cadence }
+      : { anchorDate: contributionWindow.from, cadence: "monthly" };
+    for (const draft of drafts) {
+      const bill = draft.billId ? billsById.get(draft.billId) : null;
+      map.set(
+        draft.key,
+        draftFigures(
+          draft,
+          { seasonalFactors: bill?.seasonalFactors, stepChanges: bill?.stepChanges, history: bill?.history },
+          contributionWindow,
+          schedule,
+        ),
+      );
+    }
+    return map;
+  }, [editing, drafts, serverFigures, billsById, contributionWindow, primarySchedule]);
+
+  /**
+   * The rows each category renders. At rest they come straight from the loaded
+   * bills; while editing, from the drafts — including the ghost rows, which
+   * have no bill behind them yet.
+   */
+  const rowsByCategory = useMemo(() => {
+    const source = editing ? drafts : bills.map(billToDraft);
+    /** @type {Map<string, import("@/components/fixed-costs-table.jsx").BillRow[]>} */
+    const map = new Map();
+    for (const draft of source) {
+      const bill = draft.billId ? (billsById.get(draft.billId) ?? null) : null;
+      const list = map.get(draft.categoryId) ?? [];
+      list.push({
+        draft,
+        bill,
+        figures: figuresByKey.get(draft.key) ?? null,
+        spread: bill ? historySpread(bill.history) : null,
+        error: editing ? draftError(draft) : null,
+      });
+      map.set(draft.categoryId, list);
+    }
+    return map;
+  }, [editing, drafts, bills, billsById, figuresByKey]);
+
+  /**
+   * A category's subtotal is the sum of the rows printed under it — never a
+   * separately-pooled computation, so the two cannot disagree
+   * (phases/06-fixed-costs.md "Category subtotals are derived"). While editing
+   * that means it tracks the unsaved rows, which is the point: a change to one
+   * bill moves its category before it is committed.
+   *
+   * @param {import("@/components/fixed-costs-table.jsx").BillRow[]} rows
+   */
+  function groupTotals(rows) {
+    let perPayCents = 0;
+    let perMonthCents = 0;
+    let perYearCents = 0;
+    for (const row of rows) {
+      if (!row.figures || row.draft.removed) continue;
+      perPayCents += row.figures.perPayCents;
+      perMonthCents += row.figures.perMonthCents;
+      perYearCents += row.figures.perYearCents;
+    }
+    return { perPayCents: primarySchedule ? perPayCents : null, perMonthCents, perYearCents };
+  }
+
+  const invalidRows = useMemo(
+    () => [...rowsByCategory.values()].flat().filter((row) => row.error !== null).length,
+    [rowsByCategory],
+  );
+
+  // ------------------------------------------------------------------ mutations
 
   const createCategory = useMutation({
     mutationFn: async (/** @type {string} */ name) => {
@@ -1203,7 +439,7 @@ export function FixedCostsPage() {
       return res.json();
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["cost-categories", "fixed"] }),
-    onError: (err) => toast.error(err.message),
+    onError: (/** @type {Error} */ err) => toast.error(err.message),
   });
 
   const renameCategory = useMutation({
@@ -1213,7 +449,7 @@ export function FixedCostsPage() {
       return res.json();
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["cost-categories", "fixed"] }),
-    onError: (err) => toast.error(err.message),
+    onError: (/** @type {Error} */ err) => toast.error(err.message),
   });
 
   const archiveCategory = useMutation({
@@ -1222,32 +458,11 @@ export function FixedCostsPage() {
       if (!res.ok) throw new Error(await readApiError(res));
       return res.json();
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["cost-categories", "fixed"] }),
-    onError: (err) => toast.error(err.message),
-  });
-
-  const createBill = useMutation({
-    mutationFn: async (/** @type {BillFormData} */ data) => {
-      const res = await api.bills.$post({ json: data });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return res.json();
-    },
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["cost-categories", "fixed"] });
       invalidateBills();
-      toast.success("Bill added.");
     },
-  });
-
-  const updateBill = useMutation({
-    mutationFn: async (/** @type {{ id: string, data: BillFormData }} */ { id, data }) => {
-      const res = await api.bills[":id"].$patch({ param: { id }, json: data });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return res.json();
-    },
-    onSuccess: () => {
-      invalidateBills();
-      toast.success("Bill updated.");
-    },
+    onError: (/** @type {Error} */ err) => toast.error(err.message),
   });
 
   const archiveBill = useMutation({
@@ -1259,22 +474,126 @@ export function FixedCostsPage() {
     onSuccess: () => {
       invalidateBills();
       toast.success("Bill archived.");
-      setDetailBillId(null);
     },
-    onError: (err) => toast.error(err.message),
+    onError: (/** @type {Error} */ err) => toast.error(err.message),
+  });
+
+  /**
+   * One Save for the whole table: create the ghosts that were filled in,
+   * patch the rows that changed, archive the rows that were struck out.
+   *
+   * Sequential rather than parallel, and it stops at the first failure — at
+   * household scale the round trips are cheap, and "row 4 was rejected" is
+   * information the operator can act on, where a handful of simultaneous
+   * rejections is not.
+   */
+  const saveAll = useMutation({
+    mutationFn: async () => {
+      /** @type {DraftBill[]} */
+      const creates = [];
+      /** @type {DraftBill[]} */
+      const updates = [];
+      /** @type {DraftBill[]} */
+      const archives = [];
+
+      for (const draft of drafts) {
+        if (draft.billId === null) {
+          if (!isBlankGhost(draft)) creates.push(draft);
+          continue;
+        }
+        if (draft.removed) {
+          archives.push(draft);
+          continue;
+        }
+        const bill = billsById.get(draft.billId);
+        if (bill && draftSignature(draft) !== draftSignature(billToDraft(bill))) updates.push(draft);
+      }
+
+      /** @param {DraftBill} draft @param {Response} res */
+      const failing = async (draft, res) => new Error(`${draft.name || "New bill"}: ${await readApiError(res)}`);
+
+      for (const draft of creates) {
+        const res = await api.bills.$post({ json: draftToPayload(draft) });
+        if (!res.ok) throw await failing(draft, res);
+      }
+      for (const draft of updates) {
+        const res = await api.bills[":id"].$patch({
+          param: { id: /** @type {string} */ (draft.billId) },
+          json: draftToPayload(draft),
+        });
+        if (!res.ok) throw await failing(draft, res);
+      }
+      for (const draft of archives) {
+        const res = await api.bills[":id"].$delete({ param: { id: /** @type {string} */ (draft.billId) } });
+        if (!res.ok) throw await failing(draft, res);
+      }
+
+      return { created: creates.length, updated: updates.length, archived: archives.length };
+    },
+    onSuccess: ({ created, updated, archived }) => {
+      invalidateBills();
+      leaveEdit();
+      const parts = [
+        created > 0 ? `${created} added` : null,
+        updated > 0 ? `${updated} updated` : null,
+        archived > 0 ? `${archived} archived` : null,
+      ].filter((p) => p !== null);
+      toast.success(parts.length > 0 ? `Bills saved — ${parts.join(", ")}.` : "Nothing changed.");
+    },
+    // Deliberately stays in edit mode with the drafts intact: whatever the
+    // server rejected is still on screen to fix.
+    onError: (/** @type {Error} */ err) => toast.error(err.message),
+  });
+
+  async function handleSave() {
+    const archiving = drafts.filter((d) => d.billId !== null && d.removed);
+    if (archiving.length > 0) {
+      const ok = await confirm({
+        title: `Archive ${archiving.length} bill${archiving.length === 1 ? "" : "s"}?`,
+        description:
+          "They leave the contribution, the calendar and the balance curve. Their entered history is kept, and nothing else on this table is affected.",
+        confirmLabel: "Save and archive",
+      });
+      if (!ok) return;
+    }
+    saveAll.mutate();
+  }
+
+  async function handleCancel() {
+    if (dirty) {
+      const ok = await confirm({
+        title: "Discard these edits?",
+        description: `${changeCount} unsaved change${changeCount === 1 ? "" : "s"} on this table would be lost.`,
+        confirmLabel: "Discard",
+        cancelLabel: "Keep editing",
+      });
+      if (!ok) return;
+    }
+    leaveEdit();
+  }
+
+  useUnsavedGuard(dirty && !saveAll.isPending, {
+    title: "Leave with unsaved bills?",
+    description: "The edits on the Fixed Costs table haven't been saved yet, and leaving discards them.",
   });
 
   useEffect(
     () =>
       registerCommands([
         {
+          id: "fixed-costs:edit",
+          group: "Actions",
+          label: "Edit bills",
+          keywords: "inline table amount model cadence",
+          icon: PencilIcon,
+          run: () => beginEdit(),
+        },
+        {
           id: "fixed-costs:add-bill",
           group: "Actions",
           label: "Add bill",
           icon: PlusIcon,
-          run: () => {
-            setBillForm({ bill: null });
-          },
+          run: () => beginEdit(categories[0]?.id ?? null),
         },
         {
           id: "fixed-costs:manage-categories",
@@ -1289,7 +608,7 @@ export function FixedCostsPage() {
           label: "Enter bill history",
           icon: CalendarClockIcon,
           run: () => {
-            if (bills[0]) navigate({ to: "/costs/fixed/$billId/history", params: { billId: bills[0].id } });
+            if (bills[0]) setDetailBillId(bills[0].id);
           },
         },
         {
@@ -1300,27 +619,65 @@ export function FixedCostsPage() {
           run: () => navigate({ to: "/calendar" }),
         },
       ]),
-    [bills, navigate],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [bills, categories, navigate, incomeLandingId],
   );
 
   const isLoading = categoriesQuery.isLoading || billsQuery.isLoading;
+  const populatedCategories = editing
+    ? categories
+    : categories.filter((cat) => (rowsByCategory.get(cat.id) ?? []).length > 0);
 
   return (
     <>
       <PageHeader
+        sticky
         title="Fixed Costs"
-        description="Bills that know how they actually behave — seasonal, escalating, rolling-average — not just an amount times a frequency."
+        description={
+          editing ? (
+            dirty ? (
+              <span className="text-text">
+                {changeCount} unsaved change{changeCount === 1 ? "" : "s"}
+                {invalidRows > 0 ? (
+                  <span className="text-negative">
+                    {" · "}
+                    {invalidRows} row{invalidRows === 1 ? "" : "s"} need attention
+                  </span>
+                ) : null}
+              </span>
+            ) : (
+              "Edit any cell. A bill's history, seasonal factors and step changes are behind its name."
+            )
+          ) : (
+            "Bills that know how they actually behave — seasonal, escalating, rolling-average — not just an amount times a frequency."
+          )
+        }
         actions={
-          <>
-            <Button variant="outline" onClick={() => setCategoryManagerOpen(true)}>
-              <TagIcon />
-              Categories
-            </Button>
-            <Button onClick={() => setBillForm({ bill: null })} disabled={categories.length === 0}>
-              <PlusIcon />
-              Add bill
-            </Button>
-          </>
+          editing ? (
+            <>
+              <Button variant="ghost" onClick={handleCancel} disabled={saveAll.isPending}>
+                <XIcon />
+                {dirty ? "Cancel" : "Done"}
+              </Button>
+              {dirty ? (
+                <Button onClick={handleSave} disabled={saveAll.isPending || invalidRows > 0}>
+                  <SaveIcon />
+                  {saveAll.isPending ? "Saving…" : `Save ${changeCount} change${changeCount === 1 ? "" : "s"}`}
+                </Button>
+              ) : null}
+            </>
+          ) : (
+            <>
+              <Button variant="outline" onClick={() => setCategoryManagerOpen(true)}>
+                <TagIcon />
+                Categories
+              </Button>
+              <Button onClick={() => beginEdit()} disabled={categories.length === 0}>
+                <PencilIcon />
+                Edit
+              </Button>
+            </>
+          )
         }
       />
 
@@ -1343,10 +700,17 @@ export function FixedCostsPage() {
           <StatTile
             className="col-span-2"
             label={`Bills contribution${payCadenceLabel ? ` (${payCadenceLabel})` : " per month"}`}
-            value={summary.contribution.perPayCents != null ? <Money value={summary.contribution.perPayCents} /> : <Money value={summary.contribution.perMonthCents} />}
+            value={
+              summary.contribution.perPayCents != null ? (
+                <Money value={summary.contribution.perPayCents} />
+              ) : (
+                <Money value={summary.contribution.perMonthCents} />
+              )
+            }
             sparkline={
               <p className="text-xs text-text-muted">
-                <Money value={summary.contribution.perMonthCents} /> / month · <Money value={summary.contribution.perYearCents} /> / year
+                <Money value={summary.contribution.perMonthCents} /> / month ·{" "}
+                <Money value={summary.contribution.perYearCents} /> / year
               </p>
             }
           />
@@ -1366,38 +730,42 @@ export function FixedCostsPage() {
         </div>
       ) : null}
 
-      {!isLoading && categories.length > 0 && bills.length === 0 ? (
+      {!isLoading && !editing && categories.length > 0 && bills.length === 0 ? (
         <EmptyState
           icon={ReceiptIcon}
           title="No bills yet"
           description="Add every recurring cost the household actually pays — electricity, rent, insurance, subscriptions."
           action={
-            <Button onClick={() => setBillForm({ bill: null })}>
+            <Button onClick={() => beginEdit(categories[0]?.id ?? null)}>
               <PlusIcon />
               Add bill
             </Button>
           }
         />
       ) : (
-        categories
-          .filter((cat) => bills.some((b) => b.categoryId === cat.id))
-          .map((cat) => {
-            const categoryBills = bills.filter((b) => b.categoryId === cat.id);
-            const categorySummary = summary?.byCategory.find((c) => c.categoryId === cat.id);
-            return (
-              <div key={cat.id}>
-                <div className="hidden md:block">
-                  <CategoryGroupDesktop category={cat} bills={categoryBills} summary={categorySummary} people={people} payCadenceLabel={payCadenceLabel} today={today} onOpenBill={setDetailBillId} />
-                </div>
-                <div className="md:hidden">
-                  <CategoryGroupMobile category={cat} bills={categoryBills} summary={categorySummary} today={today} onOpenBill={setDetailBillId} />
-                </div>
-              </div>
-            );
-          })
+        populatedCategories.map((cat) => {
+          const rows = rowsByCategory.get(cat.id) ?? [];
+          return (
+            <CategoryGroup
+              key={cat.id}
+              category={cat}
+              rows={rows}
+              totals={groupTotals(rows)}
+              payCadenceLabel={payCadenceLabel}
+              editing={editing}
+              people={people}
+              accounts={accounts}
+              locale={locale}
+              onChange={changeDraft}
+              onRemove={toggleRemove}
+              onOpenBill={setDetailBillId}
+              onAddBill={(categoryId) => setDrafts((prev) => [...prev, blankDraft(categoryId, incomeLandingId)])}
+            />
+          );
+        })
       )}
 
-      <BalanceCurvePanel window={window} />
+      <BillsBalanceCurve window={curveWindow} />
 
       <CategoryManagerDialog
         open={categoryManagerOpen}
@@ -1413,34 +781,23 @@ export function FixedCostsPage() {
         onArchive={(id) => archiveCategory.mutate(id)}
       />
 
-      <BillFormDialog
-        open={billForm !== null}
-        onOpenChange={(open) => !open && setBillForm(null)}
-        bill={billForm?.bill ?? null}
-        categories={categories}
-        people={people}
-        accounts={accounts}
-        submitting={createBill.isPending || updateBill.isPending}
-        onSubmit={async (data) => {
-          if (billForm?.bill) {
-            await updateBill.mutateAsync({ id: billForm.bill.id, data });
-          } else {
-            await createBill.mutateAsync(data);
-          }
-        }}
-      />
-
       <BillDetailSheet
         billId={detailBillId}
         onOpenChange={(open) => !open && setDetailBillId(null)}
         categories={categories}
         people={people}
-        onEdit={(bill) => {
-          setDetailBillId(null);
-          setBillForm({ bill });
+        onArchive={async (id) => {
+          const ok = await confirm({
+            title: `Archive ${bills.find((b) => b.id === id)?.name ?? "this bill"}?`,
+            description:
+              "It leaves the contribution, the calendar and the balance curve. Its instances and history are kept.",
+            confirmLabel: "Archive",
+          });
+          if (ok) {
+            setDetailBillId(null);
+            archiveBill.mutate(id);
+          }
         }}
-        onArchive={(id) => archiveBill.mutate(id)}
-        onEnterHistory={(billId) => navigate({ to: "/costs/fixed/$billId/history", params: { billId } })}
       />
     </>
   );

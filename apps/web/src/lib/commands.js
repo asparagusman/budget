@@ -7,6 +7,7 @@ import { useSyncExternalStore } from "react";
  *   label: string,
  *   keywords?: string,
  *   icon?: import("lucide-react").LucideIcon,
+ *   shortcut?: string,
  *   run: () => void,
  * }} Command
  */

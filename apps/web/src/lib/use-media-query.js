@@ -21,9 +21,9 @@ function listFor(query) {
  *
  * Reach for it only when the two branches must not both exist in the DOM.
  * Plain responsive classes are the default answer and cost nothing; this is
- * for the cases where rendering the hidden branch is actively wrong — an
- * echarts canvas inside `display: none` initialises at 0x0 and logs "Can't
- * get DOM width or height" instead of drawing.
+ * for the cases where rendering the hidden branch is actively wrong — a
+ * chart measures its container, and inside `display: none` that container
+ * is 0x0, so it mounts and draws nothing.
  *
  * @param {string} query
  */

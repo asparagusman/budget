@@ -1,4 +1,4 @@
-import { addDaysIso, daysBetween, equivalent, resolveCycle, sumCents } from "@budget/engine";
+import { addDaysIso, ALLOCATION_SECTIONS, daysBetween, equivalent, resolveCycle, sumCents } from "@budget/engine";
 import { allocationVersions, people } from "@budget/schema";
 import { eq } from "drizzle-orm";
 import {
@@ -172,59 +172,47 @@ function rollUpVariable(context) {
 }
 
 /**
- * The hero card's three figures, grouped by what each allocation line's BASIS
- * says the money is — the only classification the operator actually entered.
- * `from_fixed_costs` means "the whole fixed-cost total" and `from_variable_
- * essentials` means "the whole essentials total"; everything else is money the
- * household chose to send somewhere, which is why the third group is named for
- * that rather than assumed to be saving (some of it is giving, some of it is
- * the prize pool).
+ * The hero card's figures, grouped by the three SECTIONS — Bills & Essentials,
+ * Save Invest & Give, Leftover. They are the headings the spreadsheet has, and
+ * they are stages 1/2/3 named, so one tile per section covers every line
+ * exactly once and the tiles sum to gross.
  *
- * Percentages are the engine's own per-line `actualPct` summed, never a ratio
- * computed here — all three share one base (gross), so summing them is
- * addition, not a second percentage rule. Cadence conversion happens once on
- * each group's monthly total rather than per line, so a group never drifts a
- * cent from the lines it contains.
+ * There is no capping and no "N smaller categories" tile: three sections is
+ * three tiles at every width. A per-line `category` grouping lived here, could
+ * produce arbitrarily many groups, and had to fall back to grouping by BASIS
+ * when no line happened to be named — both paths are gone with the field, and
+ * with them the "Allocated out" tile that existed only because the app had no
+ * name for the group it was describing (todo.md `[P10-2]`).
+ *
+ * Every figure comes from the engine's own `StageResult` — nothing here
+ * re-derives a percentage or converts a cadence, so a tile cannot disagree
+ * with the section it names on /allocation.
  *
  * @param {import("@budget/engine").AllocationResult} result
- * @param {{ id: string, basis: import("@budget/engine").Basis }[]} lines
+ * @param {{ stage: number }[]} lines
  * @param {AllocationContext} context
  */
 function buildBreakdown(result, lines, context) {
-  const resolvedById = new Map(result.lines.map((l) => [l.lineId, l]));
-
-  /** @param {(basis: import("@budget/engine").Basis) => boolean} match */
-  const groupOf = (match) => {
-    /** @type {Cents[]} */
-    const monthly = [];
-    /** @type {number[]} */
-    const pcts = [];
-    for (const line of lines) {
-      if (!match(line.basis)) continue;
-      const resolved = resolvedById.get(line.id);
-      if (!resolved) continue;
-      monthly.push(resolved.perMonthCents);
-      if (resolved.actualPct !== null) pcts.push(resolved.actualPct);
-    }
-    const perMonthCents = sumCents(monthly);
+  return ALLOCATION_SECTIONS.map((section) => {
+    const stage = result.stages.find((s) => s.stage === section.stage) ?? null;
     return {
-      perMonthCents,
-      perPayCents: context.hasPrimaryPaySchedule
-        ? equivalent(perMonthCents, "monthly", context.payCadence)
-        : null,
-      pctOfGross: pcts.length > 0 ? pcts.reduce((a, b) => a + b, 0) : null,
-      lineCount: monthly.length,
+      key: section.key,
+      label: section.name,
+      perMonthCents: stage?.subtotalPerMonthCents ?? 0,
+      // The engine already converted this subtotal with the same cadence.
+      // Nulling it when there is no primary pay schedule is the repo-wide
+      // convention for a per-pay figure with no period to be per.
+      perPayCents: context.hasPrimaryPaySchedule ? stage?.subtotalPerPayCents ?? 0 : null,
+      pctOfGross: stage?.actualPct ?? null,
+      goalPct: stage?.goalPct ?? null,
+      // Whether that goal was set on the section or summed from its lines —
+      // the same distinction /allocation draws, so the two screens describe
+      // one figure the same way.
+      goalSource: stage?.goalSource ?? null,
+      fidelity: stage?.fidelity ?? null,
+      lineCount: lines.filter((line) => line.stage === section.stage).length,
     };
-  };
-
-  return [
-    { key: "bills", ...groupOf((basis) => basis === "from_fixed_costs") },
-    { key: "spending", ...groupOf((basis) => basis === "from_variable_essentials") },
-    {
-      key: "allocated",
-      ...groupOf((basis) => basis !== "from_fixed_costs" && basis !== "from_variable_essentials"),
-    },
-  ];
+  });
 }
 
 /**
@@ -314,14 +302,12 @@ export async function loadDashboard(db, on) {
           grossPerMonthCents: allocation.grossPerMonthCents,
           grossPerPayCents,
           transfers: result.transfers,
-          // The engine's own `StageResult`s, each carrying the pay-period
-          // equivalent of its subtotal so no component has to convert one.
-          stages: result.stages.map((stage) => ({
-            ...stage,
-            subtotalPerPayCents: context.hasPrimaryPaySchedule
-              ? equivalent(stage.subtotalPerMonthCents, "monthly", context.payCadence)
-              : null,
-          })),
+          // The engine's own `StageResult`s, passed through untouched — they
+          // already carry per-month, per-pay and per-week. Whether the pay
+          // figures mean anything is `grossPerPayCents`/`setup.paySchedule`'s
+          // job to say; blanking them here only broke the engine's own type
+          // for every component that takes an `AllocationResult`.
+          stages: result.stages,
           // Stage, label and destination per line — what the flow diagram
           // needs to draw income -> stage -> account, the same shape
           // /allocation draws it from.
