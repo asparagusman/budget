@@ -70,6 +70,31 @@ describe("loadDashboard, against the endpoints that own each figure", () => {
     expect(dashboard.bills.contributionPerMonthCents).not.toBe(30_000);
   });
 
+  // The dashboard shows the bills contribution twice: once as a standing
+  // transfer (the plan's figure) and once in the Upcoming card's footer
+  // (/costs/fixed's figure). todo.md `[P10-12]` is that those two were both
+  // per-pay and disagreed. They disagree because the plan converts monthly to
+  // per-pay with nominal cadence arithmetic (x 12/26) while /costs/fixed
+  // divides the window total by the paydays actually in the window, and 1461
+  // days holds 105 real paydays against 104.35 nominal fortnights.
+  //
+  // The footer states a monthly figure now, and these two assertions are the
+  // whole reason that is safe: monthly, the two agree to the cent, and per
+  // pay they do not. If a later change makes the per-pay figures equal, the
+  // second assertion fails and the footer can go back to being per pay.
+  it("agrees with the plan on the bills contribution per month, and not per pay", async () => {
+    const line = await db.query.allocationLines.findFirst({
+      where: (l, { and: andCol, eq: eqCol }) =>
+        andCol(eqCol(l.versionId, HOUSEHOLD_IDS.activeVersion), eqCol(l.basis, "from_fixed_costs")),
+    });
+    const resolved = dashboard.allocation.resolvedLines.find(
+      (/** @type {any} */ r) => r.lineId === line?.id,
+    );
+
+    expect(resolved.perMonthCents).toBe(dashboard.bills.contributionPerMonthCents);
+    expect(resolved.perPayCents).not.toBe(dashboard.bills.contributionPerPayCents);
+  });
+
   it("reports the transfers, stages and resolved lines /allocation computes", async () => {
     const versionId = dashboard.allocation.versionId;
     const computed = await get(app, `/allocation/compute?versionId=${versionId}&on=${ON}`);

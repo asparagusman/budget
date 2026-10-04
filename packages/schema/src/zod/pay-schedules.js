@@ -27,10 +27,3 @@ export const updatePayScheduleSchema = z
   });
 
 /** @typedef {z.infer<typeof updatePayScheduleSchema>} UpdatePayScheduleInput */
-
-export const previewPayScheduleQuerySchema = z.object({
-  from: isoDate,
-  to: isoDate,
-});
-
-/** @typedef {z.infer<typeof previewPayScheduleQuerySchema>} PreviewPayScheduleQuery */

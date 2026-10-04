@@ -1,8 +1,7 @@
-import { mustAt, projectPaydays } from "@budget/engine";
+import { mustAt } from "@budget/engine";
 import {
   createPayScheduleSchema,
   paySchedules,
-  previewPayScheduleQuerySchema,
   updatePayScheduleSchema,
 } from "@budget/schema";
 import { zValidator } from "@hono/zod-validator";
@@ -120,27 +119,5 @@ export function createPaySchedulesRoutes({ db }) {
         entityId: id,
       });
       return c.json({ ok: true });
-    })
-
-    // IsoDate[] via the engine's projectPaydays — no payday list is ever
-    // stored, this derives it live from anchorDate + cadence (phases/
-    // 04-accounts-people.md "Semantics worth stating plainly").
-    .get(
-      "/:id/preview",
-      zValidator("query", previewPayScheduleQuerySchema, handleValidation),
-      async (c) => {
-        const id = c.req.param("id");
-        const { from, to } = c.req.valid("query");
-
-        const schedule = await db.query.paySchedules.findFirst({
-          where: (p, { eq: eqCol }) => eqCol(p.id, id),
-        });
-        if (!schedule) {
-          return c.json({ error: { code: "not_found", message: "Pay schedule not found." } }, 404);
-        }
-
-        const paydays = projectPaydays({ anchorDate: schedule.anchorDate, cadence: schedule.cadence }, { from, to });
-        return c.json({ paydays });
-      },
-    );
+    });
 }

@@ -7,6 +7,18 @@ import { cn } from "@/lib/utils.js";
 /** @import { AllocationResult, Cadence } from "@budget/engine" */
 
 /**
+ * A plan can land on exactly zero unallocated and still be wrong — stage 3
+ * sweeping a negative remainder reconciles perfectly. Green has to mean "this
+ * is fine", not just "the arithmetic closed". Exported so a summary elsewhere
+ * can't disagree with the indicator about what "balanced" means.
+ *
+ * @param {AllocationResult} result
+ */
+export function isBalanced(result) {
+  return result.unallocatedPerMonthCents === 0 && result.lines.every((l) => l.perMonthCents >= 0);
+}
+
+/**
  * The guard the spreadsheet never had. Its own total check read 97% and stayed
  * silently broken because one row had no formula, so non-zero has to feel
  * wrong immediately (phases/08-allocation.md "The invariant indicator").
@@ -26,10 +38,7 @@ import { cn } from "@/lib/utils.js";
 export function UnallocatedIndicator({ result, payCadence, hasPrimaryPaySchedule, footer }) {
   const cents = result.unallocatedPerMonthCents;
   const negativeLines = result.lines.filter((l) => l.perMonthCents < 0);
-  // A plan can land on exactly zero unallocated and still be wrong — stage 3
-  // sweeping a negative remainder reconciles perfectly. Green has to mean
-  // "this is fine", not just "the arithmetic closed".
-  const balanced = cents === 0 && negativeLines.length === 0;
+  const balanced = isBalanced(result);
   const zeroUnallocated = cents === 0;
 
   return (

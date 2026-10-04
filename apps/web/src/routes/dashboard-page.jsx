@@ -4,18 +4,12 @@ import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { addDaysIso, daysBetween } from "@budget/engine";
 import {
   AlertTriangleIcon,
-  ArrowLeftRightIcon,
   ArrowRightIcon,
   BanknoteIcon,
   CalendarDaysIcon,
   CheckCircle2Icon,
   ChevronLeftIcon,
   ChevronRightIcon,
-  ReceiptIcon,
-  ShieldIcon,
-  SparklesIcon,
-  TargetIcon,
-  TrendingUpIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge.jsx";
@@ -41,8 +35,7 @@ import { GoodLifeFidelity } from "@/components/good-life-fidelity.jsx";
 import { Money } from "@/components/money.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
 import { QuickBalanceSheet } from "@/components/quick-balance-sheet.jsx";
-import { StatTile } from "@/components/stat-tile.jsx";
-import { UnallocatedIndicator } from "@/components/unallocated-indicator.jsx";
+import { UnallocatedIndicator, isBalanced } from "@/components/unallocated-indicator.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
 import { registerCommands } from "@/lib/commands.js";
@@ -102,14 +95,13 @@ import { cn } from "@/lib/utils.js";
 // (phases/10-dashboard.md "Warnings strip").
 const MAX_VISIBLE_WARNINGS = 3;
 
-// A tile's NAME comes from the API now, because on a plan with categories it
-// is the household's own word and no map here could know it. Only these hints
+// A group's NAME comes from the API, because on a plan with categories it is
+// the household's own word and no map here could know it. Only these hints
 // stay: they belong to the three groups the server falls back to when no line
-// carries a category. A category tile needs no hint of ours — the household
-// named it, and its own goal is the more useful second line.
+// carries a category, keyed by `ALLOCATION_SECTIONS[].key`. Shown only where a
+// group carries no goal — where it does, the fidelity badge is the more useful
+// sentence.
 /** @type {Record<string, string>} */
-// Keyed by `ALLOCATION_SECTIONS[].key`. Shown only where a section carries no
-// goal — where it does, the fidelity badge is the more useful sentence.
 const BREAKDOWN_HINTS = {
   needs: "Fixed bills and variable essentials",
   saving: "Saving, investing, giving, buffer",
@@ -123,7 +115,6 @@ const BREAKDOWN_HINTS = {
  *
  * @param {{
  *   title: import("react").ReactNode,
- *   icon?: import("lucide-react").LucideIcon,
  *   to?: string,
  *   toLabel?: string,
  *   aside?: import("react").ReactNode,
@@ -131,7 +122,7 @@ const BREAKDOWN_HINTS = {
  *   children: import("react").ReactNode,
  * }} props
  */
-function Card({ title, icon: Icon, to, toLabel = "View", aside, className, children }) {
+function Card({ title, to, toLabel = "View", aside, className, children }) {
   return (
     <section
       className={cn(
@@ -144,10 +135,7 @@ function Card({ title, icon: Icon, to, toLabel = "View", aside, className, child
           down to "Standing trans…" loses more than dropping to two lines
           does. */}
       <header className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
-        <h2 className="flex min-w-0 items-center gap-2 text-sm font-semibold text-text">
-          {Icon ? <Icon className="size-4 shrink-0 text-text-subtle" aria-hidden="true" /> : null}
-          <span className="truncate">{title}</span>
-        </h2>
+        <h2 className="min-w-0 truncate text-sm font-semibold text-text">{title}</h2>
         <div className="flex shrink-0 items-center gap-2">
           {aside}
           {to ? (
@@ -167,84 +155,136 @@ function Card({ title, icon: Icon, to, toLabel = "View", aside, className, child
 }
 
 /**
- * Which cycle is on screen, what is running, and how to step between them. The
- * dates come from the engine's `resolveCycle` via the API — this only formats
+ * Which cycle is on screen, what is running, how to step between them, and the
+ * three facts that answer "are we okay this cycle?": what falls due soon, what
+ * is next, and whether the plan balances. The dates come from the engine's
+ * `resolveCycle` via the API and every figure is the API's — this only formats
  * them (phases/10-dashboard.md "Cycle banner").
  *
- * @param {{ data: DashboardData, onMove: (on: string) => void, isToday: boolean, onToday: () => void }} props
+ * @param {{
+ *   data: DashboardData,
+ *   result: import("@budget/engine").AllocationResult | null,
+ *   onMove: (on: string) => void,
+ *   isToday: boolean,
+ *   onToday: () => void,
+ * }} props
  */
-function CycleBanner({ data, onMove, isToday, onToday }) {
+function CycleBanner({ data, result, onMove, isToday, onToday }) {
   const { locale } = useSettings();
-  const { cycle, variant } = data;
+  const { cycle, variant, bills } = data;
   const hasDiagnostic = variant.diagnostics.length > 0;
 
   return (
     <div
       className={cn(
-        "flex flex-col gap-3 rounded-(--radius-card) p-5 shadow-(--shadow-card) sm:flex-row sm:items-center sm:justify-between",
+        "flex flex-col gap-4 rounded-(--radius-card) p-5 shadow-(--shadow-card)",
         hasDiagnostic ? "bg-warning-soft" : "bg-surface",
       )}
     >
-      <div className="min-w-0">
-        <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-base font-semibold text-text">
-          {cycle ? (
-            <span>{formatIsoDateRange(cycle.cycleStart, addDaysIso(cycle.cycleEnd, -1), locale)}</span>
-          ) : (
-            <span className="text-text-muted">No pay cycle yet</span>
-          )}
-          {variant.name ? (
-            <Badge variant="secondary">{variant.name}</Badge>
-          ) : (
-            <Badge variant="outline">no variant in effect</Badge>
-          )}
-          {data.allocation?.hasDraft ? (
-            <Link to="/allocation" data-touch-target className="inline-flex items-center">
-              <Badge variant="outline" className="text-warning">
-                unapplied draft
-              </Badge>
-            </Link>
-          ) : null}
-        </p>
-        <p className="mt-0.5 text-xs text-text-muted">
-          {cycle ? (
-            <>
-              {cycle.daysRemaining === 0
-                ? "Last day of this cycle"
-                : `${cycle.daysRemaining} day${cycle.daysRemaining === 1 ? "" : "s"} to go`}
-              {" · "}
-              {CADENCE_LABELS[cycle.payCadence].toLowerCase()} pay
-              {" · resolved from the schedule on "}
-              {formatIsoDate(data.on, locale)}
-            </>
-          ) : (
-            <>Set a primary pay schedule and the whole screen lines up to your paydays.</>
-          )}
-        </p>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-base font-semibold text-text">
+            {cycle ? (
+              <span>{formatIsoDateRange(cycle.cycleStart, addDaysIso(cycle.cycleEnd, -1), locale)}</span>
+            ) : (
+              <span className="text-text-muted">No pay cycle yet</span>
+            )}
+            {variant.name ? (
+              <Badge variant="secondary">{variant.name}</Badge>
+            ) : (
+              <Badge variant="outline">no variant in effect</Badge>
+            )}
+            {data.allocation?.hasDraft ? (
+              <Link to="/allocation" data-touch-target className="inline-flex items-center">
+                <Badge variant="outline" className="text-warning">
+                  unapplied draft
+                </Badge>
+              </Link>
+            ) : null}
+          </p>
+          <p className="mt-0.5 text-xs text-text-muted">
+            {cycle ? (
+              <>
+                {cycle.daysRemaining === 0
+                  ? "Last day of this cycle"
+                  : `${cycle.daysRemaining} day${cycle.daysRemaining === 1 ? "" : "s"} to go`}
+                {" · "}
+                {CADENCE_LABELS[cycle.payCadence].toLowerCase()} pay
+              </>
+            ) : (
+              <>Set a primary pay schedule and the whole screen lines up to your paydays.</>
+            )}
+          </p>
+        </div>
+
+        <div className="flex shrink-0 items-center gap-1">
+          <Button
+            size="icon"
+            variant="ghost"
+            aria-label="Previous cycle"
+            disabled={!cycle}
+            onClick={() => cycle && onMove(cycle.previousOn)}
+          >
+            <ChevronLeftIcon />
+          </Button>
+          <Button size="sm" variant={isToday ? "ghost" : "secondary"} onClick={onToday} disabled={isToday}>
+            Today
+          </Button>
+          <Button
+            size="icon"
+            variant="ghost"
+            aria-label="Next cycle"
+            disabled={!cycle}
+            onClick={() => cycle && onMove(cycle.nextOn)}
+          >
+            <ChevronRightIcon />
+          </Button>
+        </div>
       </div>
 
-      <div className="flex shrink-0 items-center gap-1">
-        <Button
-          size="icon"
-          variant="ghost"
-          aria-label="Previous cycle"
-          disabled={!cycle}
-          onClick={() => cycle && onMove(cycle.previousOn)}
-        >
-          <ChevronLeftIcon />
-        </Button>
-        <Button size="sm" variant={isToday ? "ghost" : "secondary"} onClick={onToday} disabled={isToday}>
-          Today
-        </Button>
-        <Button
-          size="icon"
-          variant="ghost"
-          aria-label="Next cycle"
-          disabled={!cycle}
-          onClick={() => cycle && onMove(cycle.nextOn)}
-        >
-          <ChevronRightIcon />
-        </Button>
-      </div>
+      {cycle ? (
+        <dl className="grid grid-cols-2 gap-x-6 gap-y-3 border-t border-border pt-4 sm:grid-cols-3">
+          <div className="min-w-0">
+            <dt className="text-xs text-text-muted">Bills due, next {bills.dueSoonDays} days</dt>
+            <dd className="mt-0.5 text-lg font-semibold text-text tabular-nums">
+              <Money value={bills.dueNext14DaysCents} />
+            </dd>
+          </div>
+          {result ? (
+            <div className="min-w-0">
+              <dt className="text-xs text-text-muted">Unallocated</dt>
+              <dd className="mt-0.5 text-lg font-semibold tabular-nums">
+                {isBalanced(result) ? (
+                  <span className="inline-flex items-center gap-1.5 text-positive">
+                    <CheckCircle2Icon className="size-4 shrink-0" aria-hidden="true" />
+                    Balanced
+                  </span>
+                ) : (
+                  <Link to="/allocation" className="text-negative underline underline-offset-2">
+                    <Money value={result.unallocatedPerMonthCents} signed />
+                    <span className="ml-1 text-xs font-medium text-text-muted">/month</span>
+                  </Link>
+                )}
+              </dd>
+            </div>
+          ) : null}
+          <div className="col-span-2 min-w-0 sm:col-span-1">
+            <dt className="text-xs text-text-muted">Next bill</dt>
+            <dd className="mt-0.5 flex min-w-0 items-baseline gap-2 text-sm font-medium text-text">
+              {bills.nextDue ? (
+                <>
+                  <span className="truncate">{bills.nextDue.billName}</span>
+                  <span className="shrink-0 text-xs font-normal text-text-muted">
+                    {relativeDayLabel(daysBetween(data.on, bills.nextDue.dueDate))}
+                  </span>
+                </>
+              ) : (
+                <span className="text-text-muted">Nothing coming up</span>
+              )}
+            </dd>
+          </div>
+        </dl>
+      ) : null}
     </div>
   );
 }
@@ -305,7 +345,7 @@ function HeroCard({ data }) {
     allocation !== null && variant.id !== null && allocation.incomeVariantId !== variant.id;
 
   return (
-    <Card title="Income this cycle" icon={BanknoteIcon} to="/income">
+    <Card title="Income this cycle" to="/income">
       {incomePerPayCents === null && incomePerMonthCents === null ? (
         // Day one, or a date the schedule doesn't cover. A giant em-dash where
         // the headline figure goes reads as a rendering fault rather than as
@@ -319,7 +359,7 @@ function HeroCard({ data }) {
         </p>
       ) : (
         <div>
-          <p className="text-4xl font-bold tracking-tight text-text tabular-nums sm:text-5xl">
+          <p className="text-3xl font-bold tracking-tight text-text tabular-nums sm:text-4xl">
             {/* Tweened: stepping between pay cycles is the dashboard's
                 one recalculation, and watching the headline travel is how
                 the operator sees that the cycle actually moved. */}
@@ -359,56 +399,48 @@ function HeroCard({ data }) {
       ) : null}
 
       {allocation ? (
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        // Plain columns, not tiles: a card inside a card is two surfaces
+        // competing for one idea.
+        <dl className="grid grid-cols-1 gap-x-6 gap-y-5 border-t border-border pt-5 sm:grid-cols-2 lg:grid-cols-3">
           {allocation.breakdown.map((group, index) => {
             const hint = BREAKDOWN_HINTS[group.key] ?? null;
             return (
-              <StatTile
-                key={group.key}
-                className="bg-surface-muted shadow-none"
-                label={group.label}
-                value={
-                  <span className="text-2xl tabular-nums">
-                    {group.perPayCents !== null ? (
-                      <Money value={group.perPayCents} tween />
-                    ) : (
-                      <Money value={group.perMonthCents} tween />
-                    )}
+              <div key={group.key}>
+                <dt className="text-sm font-medium text-text-muted">{group.label}</dt>
+                <dd className="mt-1">
+                  <span className="text-2xl font-semibold tracking-tight text-text tabular-nums">
+                    <Money value={group.perPayCents ?? group.perMonthCents} tween />
                   </span>
-                }
-                sparkline={
-                  <>
-                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-border">
-                      <div
-                        className="h-full rounded-full"
-                        style={{
-                          width: `${Math.max(0, Math.min(100, group.pctOfGross ?? 0))}%`,
-                          backgroundColor: `var(--chart-line-${(index % 5) + 1})`,
-                        }}
-                      />
-                    </div>
-                    <p className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-text-muted">
-                      <span>{group.pctOfGross !== null ? `${group.pctOfGross.toFixed(1)}% of income` : "—"}</span>
-                      {/* The goal, where the household set one, said the way
-                          it asked for it: what you're doing, against what you
-                          meant to. Where there is no goal the tile keeps the
-                          hint it always had. */}
-                      {group.fidelity !== null ? (
-                        <FidelityBadge fidelity={group.fidelity} goalPct={group.goalPct} />
-                      ) : hint !== null ? (
-                        <span className="text-text-subtle">· {hint}</span>
-                      ) : (
-                        <span className="text-text-subtle">
-                          · {group.lineCount} {group.lineCount === 1 ? "line" : "lines"}
-                        </span>
-                      )}
-                    </p>
-                  </>
-                }
-              />
+                  <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-border">
+                    <div
+                      className="h-full rounded-full"
+                      style={{
+                        width: `${Math.max(0, Math.min(100, group.pctOfGross ?? 0))}%`,
+                        backgroundColor: `var(--chart-line-${(index % 5) + 1})`,
+                      }}
+                    />
+                  </div>
+                  <p className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-text-muted">
+                    <span>{group.pctOfGross !== null ? `${group.pctOfGross.toFixed(1)}% of income` : "—"}</span>
+                    {/* The goal, where the household set one, said the way
+                        it asked for it: what you're doing, against what you
+                        meant to. Where there is no goal the group keeps the
+                        hint it always had. */}
+                    {group.fidelity !== null ? (
+                      <FidelityBadge fidelity={group.fidelity} goalPct={group.goalPct} />
+                    ) : hint !== null ? (
+                      <span>· {hint}</span>
+                    ) : (
+                      <span>
+                        · {group.lineCount} {group.lineCount === 1 ? "line" : "lines"}
+                      </span>
+                    )}
+                  </p>
+                </dd>
+              </div>
             );
           })}
-        </div>
+        </dl>
       ) : incomePerPayCents !== null || incomePerMonthCents !== null ? (
         <p className="text-sm text-text-muted">
           Build an allocation to see how this income splits across bills, spending and everything else.
@@ -442,7 +474,7 @@ function TransfersCard({ data, accounts }) {
 
   if (!allocation) {
     return (
-      <Card title="Standing transfers" icon={ArrowLeftRightIcon} to="/allocation">
+      <Card title="Standing transfers" to="/allocation">
         <p className="text-sm text-text-muted">
           No plan is active yet, so there are no transfer amounts to set up.
         </p>
@@ -453,13 +485,8 @@ function TransfersCard({ data, accounts }) {
   return (
     <Card
       title="Standing transfers"
-      icon={ArrowLeftRightIcon}
+     
       to="/allocation"
-      aside={
-        <span className="text-xs text-text-subtle">
-          {allocation.transfers.length} order{allocation.transfers.length === 1 ? "" : "s"}
-        </span>
-      }
     >
       <ul className="flex flex-col divide-y divide-border">
         {allocation.transfers.map((transfer) => (
@@ -487,7 +514,7 @@ function TransfersCard({ data, accounts }) {
         ))}
       </ul>
       <p className="text-xs text-text-subtle">
-        Per {cadenceLabel}. Tap an amount to copy it exactly as the bank wants it.
+        Per {cadenceLabel}. Tap an amount to copy it.
       </p>
     </Card>
   );
@@ -502,19 +529,13 @@ function TransfersCard({ data, accounts }) {
  */
 function UpcomingCard({ data }) {
   const { locale } = useSettings();
-  const { bills, cycle } = data;
-  const cadenceLabel = cycle ? CADENCE_LABELS[cycle.payCadence].toLowerCase() : "month";
+  const { bills } = data;
 
   return (
     <Card
       title="Upcoming bills"
-      icon={ReceiptIcon}
+     
       to="/costs/fixed"
-      aside={
-        <span className="text-xs text-text-subtle">
-          next {bills.dueSoonDays} days: <Money value={bills.dueNext14DaysCents} className="font-medium text-text" />
-        </span>
-      }
     >
       {bills.upcoming.length === 0 ? (
         <p className="text-sm text-text-muted">
@@ -540,10 +561,23 @@ function UpcomingCard({ data }) {
           ))}
         </ul>
       )}
-      {bills.contributionPerPayCents !== null ? (
+      {/* Per month, deliberately, while everything else on this card and the
+          one above it is per pay. The bills row in Standing transfers is this
+          same contribution — a `from_fixed_costs` line IS
+          `fixedTotalPerMonthCents` — but the plan converts it to per-pay with
+          nominal cadence arithmetic (× 12/26) while this figure divides the
+          window total by the paydays actually in the window. Over 1461 days
+          that is 104.35 nominal fortnights against 105 real paydays, so the
+          two per-pay figures land about $13 apart for a reason no reader can
+          see from the screen. The monthly figures agree to the cent, so per
+          month is the one cadence in which this card can match both
+          /costs/fixed, which owns the number, and /allocation, which spends
+          it (`[P10-12]`).
+      */}
+      {bills.billCount > 0 ? (
         <p className="text-xs text-text-subtle">
-          Fixed Costs sets aside <Money value={bills.contributionPerPayCents} className="font-medium text-text" /> a{" "}
-          {cadenceLabel} across every bill — the average it takes to always have them covered.
+          Fixed Costs sets aside <Money value={bills.contributionPerMonthCents} className="font-medium text-text" /> a
+          month across every bill.
         </p>
       ) : null}
     </Card>
@@ -581,7 +615,7 @@ function NetWorthCard({ data, onUpdateBalance }) {
   return (
     <Card
       title="Net worth"
-      icon={TrendingUpIcon}
+     
       to="/accounts"
       aside={
         <Button size="sm" variant="ghost" onClick={onUpdateBalance}>
@@ -670,7 +704,7 @@ function MojoCard({ mojo }) {
   const periods = mojo.periodsToNextThreshold;
 
   return (
-    <Card title={mojo.name} icon={ShieldIcon} to="/goals">
+    <Card title={mojo.name} to="/goals">
       <div>
         <p className="text-3xl font-bold tracking-tight text-text tabular-nums">
           {mojo.monthsCovered !== null ? mojo.monthsCovered.toFixed(1) : "—"}
@@ -684,21 +718,21 @@ function MojoCard({ mojo }) {
       </div>
       {mojo.nextThresholdMonths !== null ? (
         <p className="rounded-(--radius-control) bg-surface-muted p-3 text-sm text-text">
-          Next marker is{" "}
+          Next marker:{" "}
           <strong>
-            {mojo.nextThresholdMonths} month{mojo.nextThresholdMonths === 1 ? "" : "s"} of cover
+            {mojo.nextThresholdMonths} month{mojo.nextThresholdMonths === 1 ? "" : "s"}
           </strong>
           {periods !== null ? (
             <>
-              {" — about "}
+              {" in about "}
               {periods} {periods === 1 ? singular : plural}
               {mojo.approxMonthsToNextThreshold !== null
                 ? ` (${mojo.approxMonthsToNextThreshold} month${mojo.approxMonthsToNextThreshold === 1 ? "" : "s"})`
                 : ""}
-              {mojo.nextThresholdEta ? `, landing ${formatIsoDate(mojo.nextThresholdEta, locale)}` : ""}.
+              {mojo.nextThresholdEta ? `, ${formatIsoDate(mojo.nextThresholdEta, locale)}` : ""}.
             </>
           ) : (
-            <> — nothing is being contributed to it, so it never arrives.</>
+            <>, but nothing is being contributed, so it never arrives.</>
           )}
         </p>
       ) : (
@@ -732,7 +766,7 @@ function GoalsCard({ goals }) {
   const { locale } = useSettings();
 
   return (
-    <Card title="Goals" icon={TargetIcon} to="/goals">
+    <Card title="Goals" to="/goals">
       {goals.length === 0 ? (
         <p className="text-sm text-text-muted">
           No goals yet. Pick a savings account and say what it&apos;s for — you&apos;ll get an ETA at your current
@@ -798,7 +832,7 @@ function GoodLifeCard({ data }) {
   const cadenceLabel = cycle ? CADENCE_LABELS[cycle.payCadence].toLowerCase() : "month";
 
   return (
-    <Card title="The good life" icon={SparklesIcon} to="/costs/variable">
+    <Card title="The good life" to="/costs/variable">
       <p className="text-sm text-text">
         {allocation ? (
           <GoodLifeFidelity
@@ -866,11 +900,7 @@ function SetupPath({ setup }) {
   const doneCount = steps.filter((s) => s.done).length;
 
   return (
-    <Card title="Getting set up" icon={CalendarDaysIcon} aside={<span className="text-xs text-text-subtle">{doneCount} of {steps.length}</span>}>
-      <p className="text-sm text-text-muted">
-        This screen answers &ldquo;where are we right now?&rdquo; once it has something to work from. Five steps, in
-        order — each one makes the next one useful.
-      </p>
+    <Card title="Getting set up" aside={<span className="text-xs text-text-subtle">{doneCount} of {steps.length}</span>}>
       <ol className="flex flex-col gap-1">
         {steps.map((step, index) => (
           <li key={step.to}>
@@ -909,17 +939,18 @@ function SetupPath({ setup }) {
 function DashboardSkeleton() {
   return (
     <>
-      <Skeleton className="h-22 rounded-(--radius-card)" />
+      <Skeleton className="h-36 rounded-(--radius-card)" />
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-6 lg:items-start">
         <Skeleton className="h-64 rounded-(--radius-card) lg:col-span-4" />
-        <Skeleton className="h-40 rounded-(--radius-card) lg:col-span-2" />
+        <Skeleton className="h-64 rounded-(--radius-card) lg:col-span-2" />
         <Skeleton className="h-80 rounded-(--radius-card) lg:col-span-4" />
         <Skeleton className="h-80 rounded-(--radius-card) lg:col-span-2" />
+      </div>
+      <div className="mt-4 grid grid-cols-1 gap-6 lg:grid-cols-6 lg:items-start">
         <Skeleton className="h-72 rounded-(--radius-card) lg:col-span-4" />
         <Skeleton className="h-72 rounded-(--radius-card) lg:col-span-2" />
-        <Skeleton className="h-48 rounded-(--radius-card) lg:col-span-2" />
-        <Skeleton className="h-48 rounded-(--radius-card) lg:col-span-2" />
-        <Skeleton className="h-48 rounded-(--radius-card) lg:col-span-2" />
+        <Skeleton className="h-48 rounded-(--radius-card) lg:col-span-3" />
+        <Skeleton className="h-48 rounded-(--radius-card) lg:col-span-3" />
       </div>
     </>
   );
@@ -932,8 +963,10 @@ function DashboardSkeleton() {
  * (phases/10-dashboard.md).
  *
  * The card order in the DOM is the MOBILE order — most-checked first — and
- * `lg:order-*` rearranges it into the desktop grid, so the phone gets the
- * priority order for free rather than through a second markup tree.
+ * `lg:order-*` rearranges the first grid for desktop (income beside the
+ * standing orders, the flow beside what is due), so the phone gets the
+ * priority order for free rather than through a second markup tree. The second
+ * grid is already in reading order on both.
  */
 export function DashboardPage() {
   const navigate = useNavigate();
@@ -1041,10 +1074,7 @@ export function DashboardPage() {
 
   return (
     <>
-      <PageHeader
-        title="Overview"
-        description="Where you are right now. Every figure links to the screen that owns it."
-      />
+      <PageHeader title="Overview" />
 
       {dashboardQuery.isLoading ? (
         <DashboardSkeleton />
@@ -1056,6 +1086,7 @@ export function DashboardPage() {
         <>
           <CycleBanner
             data={data}
+            result={result}
             onMove={moveTo}
             isToday={on === today}
             onToday={() => moveTo(today)}
@@ -1064,6 +1095,27 @@ export function DashboardPage() {
           <WarningsStrip warnings={data.warnings} />
 
           {data.setup.complete ? null : <SetupPath setup={data.setup} />}
+
+          {/* The full indicator only when there is something to say: a
+              balanced plan is already one word in the banner. An unbalanced
+              one is the loudest thing on the screen, so it sits above the
+              grid where it can't be scrolled past. */}
+          {result && cycle && !isBalanced(result) ? (
+            <UnallocatedIndicator
+              result={result}
+              payCadence={cycle.payCadence}
+              hasPrimaryPaySchedule
+              footer={
+                <Link
+                  to="/allocation"
+                  data-touch-target
+                  className="mt-1 inline-flex items-center self-start rounded-(--radius-control) text-xs font-medium text-text-muted underline underline-offset-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent)"
+                >
+                  Open allocation <span aria-hidden="true">→</span>
+                </Link>
+              }
+            />
+          ) : null}
 
           {/* data-stagger fades and lifts each card ~30ms after the last,
               so the dashboard assembles instead of appearing as one slab.
@@ -1075,60 +1127,46 @@ export function DashboardPage() {
               <HeroCard data={data} />
             </div>
 
-            <div className="lg:order-4 lg:col-span-2">
+            <div className="lg:order-2 lg:col-span-2">
               <TransfersCard data={data} accounts={data.accounts} />
             </div>
 
-            {result && cycle ? (
-              <div className="lg:order-2 lg:col-span-2">
-                <UnallocatedIndicator
-                  result={result}
-                  payCadence={cycle.payCadence}
-                  hasPrimaryPaySchedule
-                  footer={
-                    <Link
-                      to="/allocation"
-                      data-touch-target
-                      className="mt-1 inline-flex items-center self-start rounded-(--radius-control) text-xs font-medium text-text-muted underline underline-offset-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent)"
-                    >
-                      Open allocation <span aria-hidden="true">→</span>
-                    </Link>
-                  }
-                />
-              </div>
-            ) : null}
-
-            <div className="lg:order-6 lg:col-span-2">
+            <div className="lg:order-4 lg:col-span-2">
               <UpcomingCard data={data} />
-            </div>
-
-            {data.mojo ? (
-              <div className="lg:order-7 lg:col-span-2">
-                <MojoCard mojo={data.mojo} />
-              </div>
-            ) : null}
-
-            <div className="lg:order-5 lg:col-span-4">
-              <NetWorthCard data={data} onUpdateBalance={() => setBalanceFor({ accountId: null })} />
-            </div>
-
-            <div className="lg:order-8 lg:col-span-2">
-              <GoalsCard goals={data.goals} />
-            </div>
-
-            <div className="lg:order-9 lg:col-span-2">
-              <GoodLifeCard data={data} />
             </div>
 
             {result && data.allocation ? (
               <div className="lg:order-3 lg:col-span-4">
-                <Card title="Where the money goes" icon={ArrowLeftRightIcon} to="/allocation">
+                <Card title="Where the money goes" to="/allocation">
                   {/* `lines` is gone with the sankey: slices are keyed by
                       destination, which the result's own transfers carry. */}
                   <AllocationFlow result={result} accounts={data.accounts} heading={null} />
                 </Card>
               </div>
             ) : null}
+          </div>
+
+          {/* The slower-moving half: where the household is heading rather
+              than what the cycle needs. A wider gap than the grids' own
+              separates the two so they read as two groups. */}
+          <div className="mt-4 grid grid-cols-1 gap-6 lg:grid-cols-6 lg:items-start">
+            <div className={data.mojo ? "lg:col-span-4" : "lg:col-span-6"}>
+              <NetWorthCard data={data} onUpdateBalance={() => setBalanceFor({ accountId: null })} />
+            </div>
+
+            {data.mojo ? (
+              <div className="lg:col-span-2">
+                <MojoCard mojo={data.mojo} />
+              </div>
+            ) : null}
+
+            <div className="lg:col-span-3">
+              <GoalsCard goals={data.goals} />
+            </div>
+
+            <div className="lg:col-span-3">
+              <GoodLifeCard data={data} />
+            </div>
           </div>
         </>
       ) : null}
