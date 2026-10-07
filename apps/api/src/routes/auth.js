@@ -17,7 +17,7 @@ import {
 } from "@budget/schema";
 import { mustAt } from "@budget/engine";
 import { zValidator } from "@hono/zod-validator";
-import { count, eq } from "drizzle-orm";
+import { and, count, eq, gt, isNull, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { writeAuditLog } from "../lib/audit.js";
 import { putChallenge, takeChallenge } from "../lib/challenge-store.js";
@@ -35,11 +35,37 @@ import {
 import { handleValidation } from "../lib/validation.js";
 import { getRpConfig } from "../lib/webauthn.js";
 
+// User verification (a PIN, a fingerprint, a face) is REQUIRED, and asked for
+// as such. @simplewebauthn/server's verify calls require it by default, so
+// asking for only "preferred" let an authenticator skip it — a security key
+// with no PIN set — and then fail at /verify with a generic "could not
+// verify". Asking for what is checked makes the browser and authenticator
+// deal with it up front, where they can prompt for a PIN. The verify calls
+// below pass `requireUserVerification: true` explicitly so the two halves
+// cannot drift apart again on a library default.
 /** @type {import("@simplewebauthn/server").AuthenticatorSelectionCriteria} */
-const AUTHENTICATOR_SELECTION = { residentKey: "required", userVerification: "preferred" };
+const AUTHENTICATOR_SELECTION = { residentKey: "required", userVerification: "required" };
+
+const INVALID_INVITE = {
+  code: "invalid_invite",
+  message: "This invite is invalid, expired or already used.",
+};
 
 /**
- * @param {import("@budget/schema").Db} db
+ * Thrown inside registration's transaction to roll it back and answer 400:
+ * the passkey verified, but what authorized the ceremony at /options no
+ * longer holds by /verify.
+ */
+class RegistrationRefused extends Error {
+  /** @param {{ code: string, message: string }} error */
+  constructor(error) {
+    super(error.message);
+    this.error = error;
+  }
+}
+
+/**
+ * @param {import("@budget/schema").Db | import("@budget/schema").Tx} db
  */
 async function countUsers(db) {
   const [row] = await db.select({ value: count() }).from(usersTable);
@@ -177,20 +203,16 @@ export function createAuthRoutes({ db, env }) {
       }
 
       if (invite.purpose === "new_device") {
-        const targetUserId = /** @type {string} */ (invite.targetUserId);
-        const targetUser = await db.query.users.findFirst({
-          where: (u, { eq: eqCol }) => eqCol(u.id, targetUserId),
-        });
-        if (!targetUser) {
-          return c.json(
-            {
-              error: {
-                code: "invalid_invite",
-                message: "This invite is invalid, expired or already used.",
-              },
-            },
-            400,
-          );
+        const targetUserId = invite.targetUserId;
+        const targetUser = targetUserId
+          ? await db.query.users.findFirst({
+              where: (u, { eq: eqCol }) => eqCol(u.id, targetUserId),
+            })
+          : undefined;
+        // A deactivated user gets no new passkey: deactivation has to mean
+        // the same thing at the door as it does to a session already inside.
+        if (!targetUser || !targetUser.isActive) {
+          return c.json({ error: INVALID_INVITE }, 400);
         }
         const existing = await db.query.credentials.findMany({
           where: (cred, { eq: eqCol }) => eqCol(cred.userId, targetUser.id),
@@ -271,6 +293,7 @@ export function createAuthRoutes({ db, env }) {
           expectedChallenge: challenge.challenge,
           expectedOrigin: origin,
           expectedRPID: rpID,
+          requireUserVerification: true,
         });
       } catch (err) {
         console.error("Registration verification failed:", err);
@@ -286,73 +309,108 @@ export function createAuthRoutes({ db, env }) {
       }
 
       const { credential } = verification.registrationInfo;
+      const { inviteId, targetUserId, displayName } = challenge;
+      const userAgent = c.req.header("user-agent");
 
-      let userId = challenge.targetUserId;
-      if (!userId) {
-        const createdUsers = await db
-          .insert(usersTable)
-          .values({ displayName: /** @type {string} */ (challenge.displayName) })
-          .returning();
-        userId = mustAt(createdUsers, 0, "created user").id;
+      // Everything the ceremony writes lands together or not at all.
+      // Bootstrap is why: the user row is what closes bootstrap (the users
+      // table is no longer empty), so a user written without its credential
+      // leaves a household nobody can sign in to and nobody can set up again.
+      let registered;
+      try {
+        registered = await db.transaction(async (tx) => {
+          if (inviteId) {
+            // Consumed in the same statement that checks it. /options only
+            // proved the invite was good when the ceremony STARTED; two
+            // ceremonies opened on one link must not both finish.
+            const consumed = await tx
+              .update(invitesTable)
+              .set({ consumedAt: sql`now()` })
+              .where(
+                and(
+                  eq(invitesTable.id, inviteId),
+                  isNull(invitesTable.consumedAt),
+                  gt(invitesTable.expiresAt, sql`now()`),
+                ),
+              )
+              .returning({ id: invitesTable.id });
+            if (consumed.length === 0) throw new RegistrationRefused(INVALID_INVITE);
+          } else if ((await countUsers(tx)) > 0) {
+            // A bootstrap ceremony that someone else's beat to /verify.
+            throw new RegistrationRefused({
+              code: "bootstrap_closed",
+              message: "This household is already set up. Ask a member for an invite.",
+            });
+          }
+
+          /** @type {typeof usersTable.$inferSelect | undefined} */
+          let user;
+          if (targetUserId) {
+            user = await tx.query.users.findFirst({
+              where: (u, { eq: eqCol }) => eqCol(u.id, targetUserId),
+            });
+          } else if (displayName) {
+            const created = await tx.insert(usersTable).values({ displayName }).returning();
+            user = mustAt(created, 0, "created user");
+          }
+          // A `new_device` target deactivated since /options. (A new user was
+          // just created active, and /options never pins a register challenge
+          // with neither a target nor a display name.)
+          if (!user?.isActive) throw new RegistrationRefused(INVALID_INVITE);
+
+          await tx.insert(credentialsTable).values({
+            userId: user.id,
+            credentialId: credential.id,
+            publicKey: Buffer.from(credential.publicKey),
+            counter: credential.counter,
+            transports: credential.transports ?? null,
+            deviceName: guessDeviceName(userAgent),
+          });
+          const { token, session } = await createSession(tx, { userId: user.id, userAgent });
+          return { user, token, session };
+        });
+      } catch (err) {
+        if (err instanceof RegistrationRefused) return c.json({ error: err.error }, 400);
+        throw err;
+      }
+      const { user, token, session } = registered;
+      setSessionCookie(c, token);
+
+      if (!targetUserId) {
         await writeAuditLog(db, {
-          actorId: userId,
+          actorId: user.id,
           action: "user.bootstrap",
           entityType: "user",
-          entityId: userId,
+          entityId: user.id,
         });
       }
-
-      await db.insert(credentialsTable).values({
-        userId,
-        credentialId: credential.id,
-        publicKey: Buffer.from(credential.publicKey),
-        counter: credential.counter,
-        transports: credential.transports ?? null,
-        deviceName: guessDeviceName(c.req.header("user-agent")),
-      });
       await writeAuditLog(db, {
-        actorId: userId,
+        actorId: user.id,
         action: "credential.register",
         entityType: "credential",
         entityId: credential.id,
       });
-
-      if (challenge.inviteId) {
-        await db
-          .update(invitesTable)
-          .set({ consumedAt: new Date() })
-          .where(eq(invitesTable.id, challenge.inviteId));
+      if (inviteId) {
         await writeAuditLog(db, {
-          actorId: userId,
+          actorId: user.id,
           action: "invite.consume",
           entityType: "invite",
-          entityId: challenge.inviteId,
+          entityId: inviteId,
         });
       }
-
-      const { token, session } = await createSession(db, {
-        userId,
-        userAgent: c.req.header("user-agent"),
-      });
-      setSessionCookie(c, token);
       await writeAuditLog(db, {
-        actorId: userId,
+        actorId: user.id,
         action: "auth.login",
         entityType: "session",
         entityId: session.id,
       });
 
-      const user = await db.query.users.findFirst({
-        where: (u, { eq: eqCol }) => eqCol(u.id, /** @type {string} */ (userId)),
-      });
-      return c.json({
-        user: user ? { id: user.id, displayName: user.displayName, email: user.email } : null,
-      });
+      return c.json({ user: { id: user.id, displayName: user.displayName, email: user.email } });
       },
     )
 
     .post("/login/options", rateLimit("login"), async (c) => {
-      const options = await generateAuthenticationOptions({ rpID, userVerification: "preferred" });
+      const options = await generateAuthenticationOptions({ rpID, userVerification: "required" });
       const flowId = putChallenge({ kind: "login", challenge: options.challenge });
       return c.json({ flowId, options });
     })
@@ -420,6 +478,7 @@ export function createAuthRoutes({ db, env }) {
               credentialRow.transports ?? undefined
             ),
           },
+          requireUserVerification: true,
         });
       } catch (err) {
         console.error("Authentication verification failed:", err);
@@ -553,16 +612,36 @@ export function createAuthRoutes({ db, env }) {
 
       const hash = await hashPassword(c.req.valid("json").password);
       const setAt = new Date();
-      await db
-        .update(usersTable)
-        .set({ recoveryPasswordHash: hash, recoveryPasswordSetAt: setAt })
-        .where(eq(usersTable.id, session.userId));
+      const revokedSessions = await db.transaction(async (tx) => {
+        await tx
+          .update(usersTable)
+          .set({ recoveryPasswordHash: hash, recoveryPasswordSetAt: setAt })
+          .where(eq(usersTable.id, session.userId));
+        // The old password's sessions go with it, as they do on DELETE: the
+        // usual reason to rotate is that the old one got out, and rotating
+        // has to shut the door it already opened, not leave it ajar for the
+        // rest of its hour. The caller is never one of them — this route
+        // answers passkey sessions only.
+        const revoked = await tx
+          .update(sessionsTable)
+          .set({ revokedAt: setAt })
+          .where(
+            and(
+              eq(sessionsTable.userId, session.userId),
+              eq(sessionsTable.authMethod, "recovery_password"),
+              isNull(sessionsTable.revokedAt),
+            ),
+          )
+          .returning({ id: sessionsTable.id });
+        return revoked.length;
+      });
 
       await writeAuditLog(db, {
         actorId: session.userId,
         action: existing ? "auth.recovery_password_replaced" : "auth.recovery_password_set",
         entityType: "user",
         entityId: session.userId,
+        metadata: { revokedSessions },
       });
 
       return c.json({ configured: true, setAt });

@@ -4,6 +4,7 @@ import { Dialog as SheetPrimitive } from "radix-ui"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { XIcon } from "lucide-react"
+import { ScrollArea } from "@/components/scroll-area"
 
 /** @param {import("react").ComponentProps<typeof SheetPrimitive.Root>} props */
 function Sheet({
@@ -67,14 +68,20 @@ const DISMISS_PX = 72;
  * body-wide drag handler turns scrolling them into a coin-flip between
  * panning and dismissing.
  *
+ * `scrollable` puts the children in a <ScrollArea> (overlay scrollbar, see
+ * components/scroll-area.jsx) for a sheet capped with `max-h-*` whose body
+ * can outgrow it. The grabber and the close button stay outside it, so they
+ * are still there once the body has scrolled.
+ *
  * @param {import("react").ComponentProps<typeof SheetPrimitive.Content> &
- *   { side?: 'top' | 'right' | 'bottom' | 'left', showCloseButton?: boolean }} props
+ *   { side?: 'top' | 'right' | 'bottom' | 'left', showCloseButton?: boolean, scrollable?: boolean }} props
  */
 function SheetContent({
   className,
   children,
   side = "right",
   showCloseButton = true,
+  scrollable = false,
   ...props
 }) {
   const closeRef = React.useRef(/** @type {HTMLButtonElement | null} */ (null));
@@ -157,7 +164,17 @@ function SheetContent({
             <span className="h-1 w-10 rounded-full bg-border" />
           </div>
         )}
-        {children}
+        {scrollable ? (
+          // flex-auto + min-h-0: fills a full-height side sheet, and gives up
+          // height inside a `max-h-*` one instead of overflowing it. The
+          // inner column restores the gap-4 the children had as direct
+          // items of this one.
+          <ScrollArea className="min-h-0 flex-auto">
+            <div className="flex flex-col gap-4">{children}</div>
+          </ScrollArea>
+        ) : (
+          children
+        )}
         {showCloseButton && (
           <SheetPrimitive.Close data-slot="sheet-close" asChild>
             <Button ref={closeRef} variant="ghost" className="absolute top-3 right-3" size="icon-sm">

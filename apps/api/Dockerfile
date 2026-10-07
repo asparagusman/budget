@@ -32,6 +32,11 @@ FROM node:22-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 
+# Compose sets TZ (default Australia/Sydney) because the api's "today" is
+# local time. Node's bundled ICU resolves zone names on its own; the system
+# zoneinfo is here so everything else in the container agrees with it.
+RUN apk add --no-cache tzdata
+
 # Stamped by docker-compose from the repo's own APP_VERSION (see
 # infra/README.md); surfaced by GET /health so the operator can tell which
 # build is actually running without shelling into the container.

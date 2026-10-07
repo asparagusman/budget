@@ -1,3 +1,4 @@
+import { CheckIcon } from "lucide-react";
 import { cn } from "@/lib/utils.js";
 
 /**
@@ -21,8 +22,9 @@ import { cn } from "@/lib/utils.js";
  * Deliberately not colour-coded good/bad. Over a savings goal is good news
  * and over a bills goal is bad news, and nothing on this screen knows which a
  * given category is — so a green pill on "20% over" would be a verdict the
- * app is not entitled to. Only exactly on-goal is tinted, because that one is
- * unambiguous whatever the category means.
+ * app is not entitled to. Exactly on-goal gets a check, because that one is
+ * unambiguous whatever the category means — a check, not green: green is
+ * money in.
  *
  * `compact` drops the word "goal" from the visible pill, for the one place
  * that word is redundant: a dense table row whose own Goal % column is two
@@ -46,11 +48,12 @@ export function FidelityBadge({ fidelity, goalPct = null, compact = false, class
   return (
     <span
       className={cn(
-        "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium whitespace-nowrap",
-        onGoal ? "bg-positive-soft text-positive" : "bg-surface-muted text-text-muted",
+        "inline-flex items-center gap-1 rounded-full bg-surface-muted px-2 py-0.5 text-xs font-medium whitespace-nowrap",
+        onGoal ? "text-text" : "text-text-muted",
         className,
       )}
     >
+      {onGoal ? <CheckIcon className="size-3" aria-hidden="true" /> : null}
       <span aria-hidden="true">
         {onGoal ? "on goal" : `${magnitude}% ${direction}${compact ? "" : " goal"}`}
       </span>

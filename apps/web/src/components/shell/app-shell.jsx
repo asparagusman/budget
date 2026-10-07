@@ -3,8 +3,8 @@ import { Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { FileSpreadsheetIcon } from "lucide-react";
 import { Sidebar } from "@/components/shell/sidebar.jsx";
 import { TopBar } from "@/components/shell/topbar.jsx";
-import { BottomNav } from "@/components/shell/bottom-nav.jsx";
 import { Skeleton } from "@/components/ui/skeleton.jsx";
+import { ScrollArea } from "@/components/scroll-area.jsx";
 import { registerCommands } from "@/lib/commands.js";
 
 /**
@@ -27,7 +27,7 @@ function RouteFallback() {
 
 /**
  * The application frame every route renders inside: sidebar on desktop, top
- * bar + bottom nav on mobile, and a centred content column in between. The
+ * bar (with its menu drawer) on mobile, and a centred content column. The
  * page body never scrolls horizontally — a wide table or chart gets its own
  * `overflow-x: auto` container instead.
  *
@@ -43,13 +43,13 @@ export function AppShell() {
   // re-fade the page the operator is reading.
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const navigate = useNavigate();
-  const mainRef = useRef(/** @type {HTMLElement | null} */ (null));
+  const scrollerRef = useRef(/** @type {HTMLDivElement | null} */ (null));
 
-  // <main> is the scroller now, so a navigation has to reset <main>, not the
-  // window — otherwise the next page opens halfway down at the previous
+  // <main>'s viewport is the scroller, so a navigation has to reset it, not
+  // the window — otherwise the next page opens halfway down at the previous
   // page's offset.
   useEffect(() => {
-    mainRef.current?.scrollTo({ top: 0 });
+    scrollerRef.current?.scrollTo({ top: 0 });
   }, [pathname]);
 
   // /import is not in NAV_ITEMS (a one-time migration tool does not earn a
@@ -76,30 +76,36 @@ export function AppShell() {
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <TopBar />
-        {/* The app's one scroll container. `scrollbar-gutter: stable`
-            reserves the track whether or not this page overflows, so a short
-            page and a long one put their content in the same place.
+        {/* The app's one scroll container. Its scrollbar is an overlay, so
+            a short page and a long one put their content in the same place
+            with no gutter to reserve.
 
-            pb-20 clears the fixed bottom nav on mobile; the extra safe-area
-            inset clears the iOS home indicator underneath it. */}
-        <main
-          ref={mainRef}
-          className="flex-1 overflow-y-auto overscroll-contain px-4 pt-4 pb-[calc(5rem+env(safe-area-inset-bottom))] [scrollbar-gutter:stable] md:px-8 md:pt-8 md:pb-8"
+            The safe-area inset clears the iOS home indicator on mobile. */}
+        <ScrollArea
+          as="main"
+          className="min-h-0 flex-1"
+          viewportClassName="overscroll-contain"
+          viewportRef={scrollerRef}
         >
-          <div className="mx-auto w-full max-w-6xl">
-            <div
-              key={pathname}
-              data-motion="route-enter"
-              className="flex w-full min-w-0 animate-route-enter flex-col gap-6"
-            >
-              <Suspense fallback={<RouteFallback />}>
-                <Outlet />
-              </Suspense>
+          <div className="px-4 pt-4 pb-[calc(1rem+env(safe-area-inset-bottom))] md:px-8 md:pt-8 md:pb-8">
+            <div className="mx-auto w-full max-w-6xl">
+              <div
+                key={pathname}
+                data-motion="route-enter"
+                // The gap between a page's top-level blocks. A heading and the
+                // content it names sit much closer than this (see
+                // <PageSection>), so the two intervals read as "same group"
+                // and "next group" rather than one even drip of 24px.
+                className="flex w-full min-w-0 animate-route-enter flex-col gap-6 md:gap-8"
+              >
+                <Suspense fallback={<RouteFallback />}>
+                  <Outlet />
+                </Suspense>
+              </div>
             </div>
           </div>
-        </main>
+        </ScrollArea>
       </div>
-      <BottomNav />
     </div>
   );
 }

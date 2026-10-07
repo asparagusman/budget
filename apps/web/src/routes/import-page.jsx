@@ -17,6 +17,7 @@ import { DatePicker } from "@/components/date-picker.jsx";
 import { EmptyState } from "@/components/empty-state.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
 import { Money } from "@/components/money.jsx";
+import { InlineError } from "@/components/notice.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
 import { ACCOUNT_TYPES, ACCOUNT_TYPE_LABELS, CADENCE_LABELS } from "@/lib/constants.js";
 import { commitImport, fetchImportPreview } from "@/lib/import-api.js";
@@ -108,7 +109,7 @@ function Flag({ flag }) {
       )}
     >
       <Icon
-        className={cn("mt-0.5 size-4 shrink-0", warning ? "text-warning" : "text-text-subtle")}
+        className={cn("mt-0.5 size-4 shrink-0", warning ? "text-warning-strong" : "text-text-subtle")}
         aria-hidden="true"
       />
       <div className="min-w-0">
@@ -144,7 +145,7 @@ function DestinationMapping({ preview, accounts, choices, onChange }) {
       description="The spreadsheet names these as free text. Each one needs an account before anything is imported."
       aside={
         unmapped === 0 ? (
-          <span className="flex items-center gap-1 text-positive">
+          <span className="flex items-center gap-1 text-text-muted">
             <CheckCircle2Icon className="size-3.5" aria-hidden="true" />
             all mapped
           </span>
@@ -261,13 +262,18 @@ function Reconciliation({ result, accounts }) {
           <span aria-hidden="true" className="text-text-subtle">
             →
           </span>
-          <span className={cn("font-medium", matches ? "text-positive" : "text-text")}>
+          <span className="font-medium text-text">
             <Money value={imported} />
           </span>
-          {matches ? (
-            <CheckCircle2Icon className="size-4 text-positive" aria-label="matches the spreadsheet" />
+          {/* No spreadsheet figure ("—") is nothing to reconcile, not a
+              discrepancy — amber "differs" there would invent a problem. */}
+          {spreadsheet === null ? null : matches ? (
+            <CheckCircle2Icon className="size-4 text-text-muted" aria-label="matches the spreadsheet" />
           ) : (
-            <span className="text-xs text-text-muted">differs</span>
+            <span className="flex items-center gap-1 self-center text-xs text-warning-strong">
+              <AlertTriangleIcon className="size-3.5" aria-hidden="true" />
+              differs
+            </span>
           )}
         </span>
         {note ? <p className="w-full text-xs text-text-muted">{note}</p> : null}
@@ -335,12 +341,12 @@ function Reconciliation({ result, accounts }) {
           description={plan.variantName ? `Divides ${plan.variantName}.` : undefined}
           aside={
             plan.reconciles ? (
-              <span className="flex items-center gap-1 text-positive">
+              <span className="flex items-center gap-1 text-text-muted">
                 <CheckCircle2Icon className="size-3.5" aria-hidden="true" />
                 reconciles to income
               </span>
             ) : (
-              <span className="flex items-center gap-1 text-negative">
+              <span className="flex items-center gap-1 text-warning-strong">
                 <AlertTriangleIcon className="size-3.5" aria-hidden="true" />
                 does not reconcile
               </span>
@@ -624,7 +630,7 @@ export function ImportPage() {
             {busy && !preview ? "Reading…" : file ? file.name : "No file chosen."}
           </p>
         </div>
-        {error ? <p className="text-sm text-negative">{error}</p> : null}
+        {error ? <InlineError>{error}</InlineError> : null}
       </Section>
 
       {!preview ? (
@@ -895,8 +901,8 @@ export function ImportPage() {
             </Section>
           ) : null}
 
-          <div className="sticky bottom-[calc(4.5rem+env(safe-area-inset-bottom))] z-10 flex flex-col gap-2 rounded-(--radius-card) bg-surface p-4 shadow-(--shadow-raised) md:bottom-4">
-            {error ? <p className="text-sm text-negative">{error}</p> : null}
+          <div className="sticky bottom-[calc(1rem+env(safe-area-inset-bottom))] z-10 flex flex-col gap-2 rounded-(--radius-card) bg-surface p-4 shadow-(--shadow-raised)">
+            {error ? <InlineError>{error}</InlineError> : null}
             {unmappedCount > 0 ? (
               <p className="text-sm text-text-muted">
                 {unmappedCount} destination{unmappedCount === 1 ? "" : "s"} still need an account.

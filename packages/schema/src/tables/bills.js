@@ -1,4 +1,4 @@
-import { date, integer, numeric, pgEnum, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { boolean, date, integer, numeric, pgEnum, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import { accounts } from "./accounts.js";
 import { costCategories } from "./cost-categories.js";
 import { cadence } from "./pay-schedules.js";
@@ -29,6 +29,14 @@ export const bills = pgTable("bills", {
   // same "anchor + cadence, never a stored occurrence list" rule as pay
   // schedules (phases/04-accounts-people.md).
   anchorDate: date("anchor_date").notNull(),
+  // False while `anchorDate` is a placeholder rather than a real due date.
+  // The source workbook has no due dates at all, so the importer anchors
+  // every bill it creates to one date the operator picked, and the calendar,
+  // the bills buffer, the balance curve and the contribution window are all
+  // computed from it. The dashboard keeps saying so until each one is set
+  // (routes/bills.js flips it on a changed date, or on an explicit confirm).
+  // Defaults to true: a bill entered by hand was entered with its real date.
+  dueDateConfirmed: boolean("due_date_confirmed").notNull().default(true),
   amountModel: amountModel("amount_model").notNull().default("flat"),
   // 'escalating' only — % per year.
   escalationPct: numeric("escalation_pct", { precision: 5, scale: 2, mode: "number" }),

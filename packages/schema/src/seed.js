@@ -498,11 +498,18 @@ async function seed(databaseUrl) {
   const db = createDb(databaseUrl);
   let count = 0;
 
+  // Insert-if-missing, never overwrite. Currency, locale and the bills buffer
+  // are the operator's to change on day one, and an upsert here meant every
+  // later `pnpm db:seed` quietly put them back to the defaults. The seed's
+  // own version marker is bookkeeping rather than a setting, so it alone is
+  // still written through.
   for (const row of seedRows) {
-    await db
-      .insert(settings)
-      .values(row)
-      .onConflictDoUpdate({ target: settings.key, set: { value: row.value } });
+    const insert = db.insert(settings).values(row);
+    if (row.key === "schema_seed_version") {
+      await insert.onConflictDoUpdate({ target: settings.key, set: { value: row.value } });
+    } else {
+      await insert.onConflictDoNothing({ target: settings.key });
+    }
     count++;
   }
 

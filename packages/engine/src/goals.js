@@ -24,6 +24,11 @@ import { periodRate } from "./projections.js";
 /** Resolve a `months_of_expenses` target into cents using current essential
  * burn. An `amount` goal just returns its own target.
  *
+ * Null — not computable — for a months goal while the burn is zero or less,
+ * which means no costs have been recorded yet. Six months of nothing is a
+ * target of $0, and every balance meets that, so the goal read "Reached" on
+ * day one.
+ *
  * @param {Goal} goal
  * @param {Cents} monthlyEssentialBurnCents
  */
@@ -31,6 +36,7 @@ export function resolveTargetCents(goal, monthlyEssentialBurnCents) {
   if (goal.targetMode === "amount") {
     return goal.targetAmountCents ?? 0;
   }
+  if (monthlyEssentialBurnCents <= 0) return null;
   return Math.round(monthlyEssentialBurnCents * (goal.targetMonths ?? 0));
 }
 
@@ -108,16 +114,20 @@ export function goalEta(args) {
 
   const eta = addDaysIso(from, withGrowth.elapsedDays);
 
-  /** @type {number | null} */
-  let aheadBehindDays = null;
-  if (rate !== 0) {
-    const linear = simulate(0);
-    aheadBehindDays = linear.reached
-      ? linear.elapsedDays - withGrowth.elapsedDays
-      : null;
-  } else {
-    aheadBehindDays = 0;
-  }
+  // The no-growth comparison in closed form. Without growth each period adds
+  // exactly the contribution, so the period count is a division — and
+  // simulating it instead cost a period per step whatever growth did: $10 a
+  // fortnight toward $1M at 15% arrives in 31 years with growth, but its
+  // linear twin walked 99,000 periods (and $1 toward $20M took 10 s) just to
+  // say how much sooner. Same `Math.round(periods * daysStep)` as `simulate`,
+  // so the two arrivals are measured in the same days.
+  const linearPeriods = Math.ceil(
+    (targetCents - currentBalanceCents) / contributionPerPayCents,
+  );
+  const aheadBehindDays =
+    rate === 0
+      ? 0
+      : Math.round(linearPeriods * daysStep) - withGrowth.elapsedDays;
 
   return { eta, aheadBehindDays, curve: withGrowth.curve };
 }
@@ -152,7 +162,7 @@ export function goalRequired(args) {
   if (n <= 0) {
     // Target date is now or in the past: whatever shortfall exists is due
     // immediately, expressed as a single period's contribution.
-    perPayCents = Math.max(0, args.targetCents - args.currentBalanceCents);
+    perPayCents = args.targetCents - args.currentBalanceCents;
   } else if (r === 0) {
     perPayCents = Math.round((args.targetCents - args.currentBalanceCents) / n);
   } else {
@@ -162,6 +172,11 @@ export function goalRequired(args) {
       (growth - 1);
     perPayCents = Math.round(c);
   }
+  // Never below zero, on any branch. A goal already met, or one growth alone
+  // will carry to the target, needs nothing — and the formula's negative
+  // answer read as "withdraw $76.92 a fortnight", an instruction this app
+  // never gives.
+  perPayCents = Math.max(0, perPayCents);
 
   const perMonthCents = equivalent(perPayCents, args.payCadence, "monthly");
   const grossPerPayCents = equivalent(

@@ -1,4 +1,5 @@
-import { importCommitFormSchema, importPreviewFormSchema, MAX_IMPORT_UPLOAD_BYTES } from "@budget/schema";
+import { bills, importCommitFormSchema, importPreviewFormSchema, MAX_IMPORT_UPLOAD_BYTES, people } from "@budget/schema";
+import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { makeFixtureWorkbook } from "../lib/import/__fixtures__/make-workbook.js";
@@ -210,6 +211,145 @@ describe("POST /import/commit", () => {
     expect(listed.map((a) => a.name).sort()).toEqual(
       preview.destinations.map((/** @type {any} */ d) => d.raw).sort(),
     );
+  });
+
+  it("dates every bill it creates as a placeholder, and hands over to the dashboard's list", async () => {
+    const body = await json(
+      await commit({ anchorDate: "2026-03-13", selected: allSelected(), destinations: allDestinations(), planVariants: {} }),
+    );
+
+    const stored = await db.query.bills.findMany();
+    expect(stored.length).toBe(7);
+    expect(stored.every((b) => b.anchorDate === "2026-03-13" && b.dueDateConfirmed === false)).toBe(true);
+
+    expect(body.nextSteps.some((/** @type {string} */ s) => s.includes("7 new bills are dated 2026-03-13"))).toBe(true);
+    // Pay schedules moved to /income; the old Settings path must not be sent.
+    expect(body.nextSteps.join(" ")).not.toContain("Settings");
+    expect(body.nextSteps.join(" ")).toContain("Pay schedules on Income");
+    expect(body.nextSteps.at(-1)).toContain("dashboard's setup checklist keeps the list");
+
+    // The list itself, derived from the database as it now stands: the same
+    // one the dashboard shows, so it outlives this page.
+    const keys = body.setup.steps.map((/** @type {any} */ s) => s.key);
+    expect(keys).toContain("due_dates");
+    const dueDates = body.setup.steps.find((/** @type {any} */ s) => s.key === "due_dates");
+    expect(dueDates.label).toBe("Set the real due date of 7 imported bills");
+    expect(dueDates.href).toBe("/costs/fixed");
+    expect(body.setup.steps.find((/** @type {any} */ s) => s.key === "people").done).toBe(true);
+    expect(body.setup.complete).toBe(false);
+  });
+
+  it("reconciles in the workbook's own cadence, with the accounts each transfer went to", async () => {
+    const usual = preview.plans.find((/** @type {any} */ p) => p.name === "Usual");
+    const body = await json(
+      await commit({
+        anchorDate: "2026-03-13",
+        selected: [...allSelected(), ...usual.lines.map((/** @type {any} */ l) => l.key)],
+        destinations: allDestinations(),
+        planVariants: {},
+      }),
+    );
+
+    // No pay schedule exists, which used to mean monthly — and every variant
+    // reading "differs" against the workbook's fortnightly totals.
+    expect(body.hasPrimaryPaySchedule).toBe(false);
+    expect(body.householdPayCadence).toBeNull();
+    expect(body.reconciliation.cadence).toEqual({ payCadence: "fortnightly", source: "workbook" });
+    expect(body.payCadence).toBe("fortnightly");
+    for (const variant of body.reconciliation.variants) {
+      expect(variant.importedPerPayCents, variant.name).toBe(variant.spreadsheetPerPayCents);
+    }
+
+    const [plan] = body.reconciliation.plans;
+    expect(plan.reconciles).toBe(true);
+    // Every imported transfer is labelled with the account it went to, and
+    // with the workbook's own words for it.
+    for (const transfer of plan.importedTransfers) {
+      expect(transfer.accountName).toEqual(expect.any(String));
+      expect(transfer.destinations.length).toBeGreaterThan(0);
+    }
+    const house = plan.importedTransfers.find((/** @type {any} */ t) => t.accountName === "to ubank (House)");
+    expect(house.destinations).toEqual(["to ubank (House)"]);
+    // And the workbook's own transfer list lines up against the same accounts.
+    const sheetHouse = plan.spreadsheetTransfers.find((/** @type {any} */ t) => t.label === "ubank (House)");
+    expect(sheetHouse.accountId).toBe(house.accountId);
+    expect(sheetHouse.accountName).toBe("to ubank (House)");
+  });
+
+  it("re-imports without touching archived rows or anything the operator tuned", async () => {
+    const selection = { anchorDate: "2026-03-13", selected: allSelected(), destinations: allDestinations(), planVariants: {} };
+    await commit(selection);
+
+    // The operator's work since the first import: Power gets a real due date,
+    // an escalation model, a new amount and a place in the list; Water is
+    // archived; and Ada is archived as a person.
+    const power = await db.query.bills.findFirst({ where: eq(bills.name, "Power") });
+    const water = await db.query.bills.findFirst({ where: eq(bills.name, "Water") });
+    const ada = await db.query.people.findFirst({ where: eq(people.name, "Ada") });
+    if (!power || !water || !ada) throw new Error("the first import did not land");
+    await db
+      .update(bills)
+      .set({
+        anchorDate: "2026-04-10",
+        dueDateConfirmed: true,
+        amountModel: "escalating",
+        escalationPct: 3,
+        baseAmountCents: 50_000,
+        sortOrder: 42,
+      })
+      .where(eq(bills.id, power.id));
+    const archivedAt = new Date("2026-03-20T00:00:00Z");
+    await db.update(bills).set({ archivedAt }).where(eq(bills.id, water.id));
+    await db.update(people).set({ archivedAt }).where(eq(people.id, ada.id));
+
+    // The preview says what a re-import would overwrite before anything is written.
+    const again = await json(await post("preview", workbookFile()));
+    expect(again.reimport.matchedCount).toBeGreaterThan(0);
+    expect(again.reimport.rules.some((/** @type {string} */ r) => r.startsWith("Bills: only the amount and the frequency"))).toBe(true);
+    const powerRow = again.preview.bills.find((/** @type {any} */ b) => b.name === "Power");
+    const overwrite = again.reimport.overwrites.find((/** @type {any} */ o) => o.rowKeys.includes(powerRow.key));
+    expect(overwrite.kind).toBe("bill");
+    expect(overwrite.changes).toEqual([{ field: "amount", from: 50_000, to: 42_000 }]);
+    expect(overwrite.message).toBe("Power (Utilities): amount 500.00 → 420.00.");
+    // An archived row is not matched, so it can't be overwritten either.
+    const waterRow = again.preview.bills.find((/** @type {any} */ b) => b.name === "Water");
+    expect(again.reimport.overwrites.some((/** @type {any} */ o) => o.rowKeys.includes(waterRow.key))).toBe(false);
+
+    const res = await commit({ ...selection, anchorDate: "2026-03-27" });
+    expect(res.status).toBe(200);
+
+    // Power took the workbook's amount and kept everything else.
+    const tuned = await db.query.bills.findFirst({ where: eq(bills.id, power.id) });
+    expect(tuned).toMatchObject({
+      baseAmountCents: 42_000,
+      frequency: "quarterly",
+      amountModel: "escalating",
+      escalationPct: 3,
+      anchorDate: "2026-04-10",
+      dueDateConfirmed: true,
+      sortOrder: 42,
+    });
+
+    // The archived Water was left exactly as it was, and a visible one exists.
+    const waters = await db.query.bills.findMany({ where: eq(bills.name, "Water") });
+    expect(waters).toHaveLength(2);
+    const untouched = waters.find((b) => b.id === water.id);
+    expect(untouched?.archivedAt).toEqual(archivedAt);
+    const fresh = waters.find((b) => b.id !== water.id);
+    expect(fresh).toMatchObject({ archivedAt: null, anchorDate: "2026-03-27", dueDateConfirmed: false });
+
+    // Same for the archived person: a new, live Ada rather than income lines
+    // quietly attached to someone nobody can see.
+    const adas = await db.query.people.findMany({ where: eq(people.name, "Ada") });
+    expect(adas.filter((p) => p.archivedAt === null)).toHaveLength(1);
+    const incomeLines = await db.query.incomeLines.findMany({ where: (l, { eq: eqCol }) => eqCol(l.personId, ada.id) });
+    const before = incomeLines.length;
+    expect(before).toBeGreaterThan(0);
+    const liveAda = adas.find((p) => p.archivedAt === null);
+    const liveLines = await db.query.incomeLines.findMany({
+      where: (l, { eq: eqCol }) => eqCol(l.personId, liveAda?.id ?? ""),
+    });
+    expect(liveLines.length).toBe(before);
   });
 
   it("refuses to invent an account for an unmapped destination", async () => {

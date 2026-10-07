@@ -40,13 +40,16 @@ describe("TabsTrigger", () => {
     expect(selected.className).not.toMatch(/(^|\s|:)data-active:/);
   });
 
-  it("gives the selected tab a fill the unselected ones do not have", () => {
+  it("gives the selected tab the app's one 'selected' style", () => {
     renderTabs();
-    // Not an assertion about compiled CSS — about the app deciding that the
-    // selected tab is raised onto `--surface`, the card white the rest of the
-    // app uses. `bg-background` was the generated choice, and it is 1% of
-    // lightness away from the list's own track: applied, and still invisible.
-    expect(screen.getByRole("tab", { name: "General" }).className).toContain("data-[state=active]:bg-surface");
+    // Not an assertion about compiled CSS — about the app deciding that a
+    // selected tab looks like every other selected thing: the soft blue pill
+    // the sidebar uses for the current page. The generated `bg-background`
+    // was 1% of lightness away from the list's own track: applied, and still
+    // invisible.
+    const className = screen.getByRole("tab", { name: "General" }).className;
+    expect(className).toContain("data-[state=active]:bg-accent-brand-soft");
+    expect(className).toContain("data-[state=active]:text-accent-brand");
   });
 
   it("moves the selection when another tab is clicked", async () => {

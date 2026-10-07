@@ -2,6 +2,15 @@ node_modules
 **/node_modules
 **/dist
 .git
+# Secrets. Patterns here match from the context root only, so infra/.env
+# (the symlink compose reads) needs the `**/` form to be excluded too.
 .env
 .env.*
+**/.env
+**/.env.*
 !.env.example
+# Planning docs and the source spreadsheet carry the household's real
+# figures, and nothing in an image needs them.
+.claude
+.impeccable
+**/*.xlsx

@@ -27,5 +27,8 @@ RUN pnpm --filter @budget/web build
 FROM nginx:1.27-alpine AS runtime
 COPY --from=build /repo/apps/web/dist /usr/share/nginx/html
 COPY apps/web/nginx.conf /etc/nginx/conf.d/default.conf
+# A typo in nginx.conf fails the build — while the running web container is
+# still up — instead of crash-looping the new one after it replaced it.
+RUN nginx -t
 
 EXPOSE 80

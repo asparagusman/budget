@@ -32,7 +32,12 @@ export const paySchedules = pgTable(
   },
   (table) => [
     // At most one primary pay schedule — the schedule that defines the
-    // household's transfer cycle (phase 08).
-    uniqueIndex("pay_schedules_primary_unique").on(table.isPrimary).where(sql`${table.isPrimary}`),
+    // household's transfer cycle (phase 08). Live schedules only, for the
+    // reason accounts.js gives for its income-landing index: an archived
+    // primary that still held the slot made every other schedule unable to
+    // become primary, and nothing on screen could reach it.
+    uniqueIndex("pay_schedules_primary_unique")
+      .on(table.isPrimary)
+      .where(sql`${table.isPrimary} AND ${table.archivedAt} IS NULL`),
   ],
 );

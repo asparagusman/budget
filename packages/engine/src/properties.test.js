@@ -162,4 +162,50 @@ describe("computeAllocation property: reconciliation and unallocated", () => {
       expect(result.unallocatedPerMonthCents).toBe(0);
     }
   });
+
+  /** The household shape — injected needs, a saving, a sweep — with needs
+   * that run past gross about half the time. */
+  function randomSweepPlan() {
+    /** @type {AllocationLine[]} */
+    const lines = [
+      { id: "fixed", stage: 1, label: "Fixed", basis: "from_fixed_costs", value: null, goalPct: null, accountId: "bills" },
+      { id: "var", stage: 1, label: "Var", basis: "from_variable_essentials", value: null, goalPct: null, accountId: "everyday" },
+      { id: "save", stage: 2, label: "Save", basis: "pct_of_gross", value: randInt(0, 30), goalPct: null, accountId: "save" },
+      { id: "a", stage: 3, label: "A", basis: "sweep", value: randInt(1, 3), goalPct: null, accountId: "a" },
+      { id: "b", stage: 3, label: "B", basis: "sweep", value: randInt(1, 3), goalPct: null, accountId: "b" },
+    ];
+    return {
+      grossPerMonthCents: toCents(randInt(1000, 20000)),
+      payCadence: mustAt(CADENCES, randInt(0, CADENCES.length - 1)),
+      fixedTotalPerMonthCents: toCents(randInt(0, 15000)),
+      variableEssentialsPerMonthCents: toCents(randInt(0, 5000)),
+      variableNonEssentialPerMonthCents: toCents(randInt(0, 2000)),
+      incomeLandingAccountId: "everyday",
+      lines,
+    };
+  }
+
+  it("never leaves a negative transfer unflagged, over 500 randomised plans", () => {
+    // The final stage always takes everything that's left, so an
+    // over-committed plan is exactly the case a sweep hides: unallocated is
+    // zero and the only symptom is a destination receiving less than nothing.
+    let flagged = 0;
+    for (let i = 0; i < 500; i++) {
+      const result = computeAllocation(randomSweepPlan());
+      expect(result.unallocatedPerMonthCents).toBe(0);
+      const anyNegative =
+        result.transfers.some((t) => t.perMonthCents < 0) || result.lines.some((l) => l.perMonthCents < 0);
+      const deepest = Math.min(0, ...result.stages.map((s) => s.remainingPerMonthCents));
+
+      if (anyNegative || deepest < 0) {
+        flagged++;
+        expect(result.overAllocation).not.toBeNull();
+        expect(result.overAllocation?.shortfallPerMonthCents).toBe(-deepest);
+      } else {
+        expect(result.overAllocation).toBeNull();
+      }
+    }
+    // Otherwise the property above was never actually exercised.
+    expect(flagged).toBeGreaterThan(0);
+  });
 });

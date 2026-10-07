@@ -164,7 +164,19 @@ export function createBillsRoutes({ db }) {
         return c.json({ error: { code: "invalid_bill", message: modelError } }, 400);
       }
 
-      const [updated] = await db.update(bills).set(data).where(eq(bills.id, id)).returning();
+      // An imported bill's due date is a placeholder until the operator says
+      // otherwise (see the column's comment in tables/bills.js). Setting a
+      // different date IS saying otherwise, so it confirms on its own — the
+      // screen sends the whole row on every save, which is why "the body
+      // mentions anchorDate" is not the test, "the date actually changed" is.
+      // An explicit `dueDateConfirmed` covers the placeholder that happened to
+      // be right; an explicit `false` alongside a changed date loses, because
+      // a date someone just typed is not a placeholder.
+      const anchorChanged = data.anchorDate !== undefined && data.anchorDate !== current.anchorDate;
+      const dueDateConfirmed = anchorChanged ? true : data.dueDateConfirmed;
+      const changes = dueDateConfirmed === undefined ? data : { ...data, dueDateConfirmed };
+
+      const [updated] = await db.update(bills).set(changes).where(eq(bills.id, id)).returning();
       if (!updated) {
         return c.json({ error: { code: "not_found", message: "Bill not found." } }, 404);
       }
@@ -174,7 +186,7 @@ export function createBillsRoutes({ db }) {
         action: "bill.update",
         entityType: "bill",
         entityId: id,
-        metadata: data,
+        metadata: changes,
       });
 
       return c.json({ bill: await loadBillWithModifiers(db, id) });

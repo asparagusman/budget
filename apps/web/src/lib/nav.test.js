@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { MOBILE_PRIMARY_PATHS, NAV_ITEMS, pageTitle } from "./nav.js";
+import { NAV_ITEMS, activeNavItem, pageTitle } from "./nav.js";
 
-// One list drives the sidebar, the bottom nav, the "More" sheet and the
-// command palette's Navigation group. Nothing here is arithmetic, and all of
-// it is the kind of thing that breaks silently: a chord that two entries
-// claim, a mobile path that points at no page, a screen whose top bar reads
-// "Budget" because nobody gave it a name.
+// One list drives the sidebar, the mobile menu and the command palette's
+// Navigation group. Nothing here is arithmetic, and all of it is the kind of
+// thing that breaks silently: a chord that two entries claim, a page one
+// level down that highlights nothing, a screen whose top bar reads "Budget"
+// because nobody gave it a name.
 
 describe("NAV_ITEMS", () => {
   it("gives every entry its own `g` chord", () => {
@@ -23,13 +23,30 @@ describe("NAV_ITEMS", () => {
     for (const path of paths) expect(path.startsWith("/")).toBe(true);
   });
 
-  it("keeps the mobile bottom nav to destinations that exist in the list", () => {
-    for (const path of MOBILE_PRIMARY_PATHS) {
-      expect(NAV_ITEMS.some((item) => item.to === path)).toBe(true);
-    }
-    // Everything not pinned to the bar has to be reachable through "More",
-    // which renders the remainder of the same list.
-    expect(NAV_ITEMS.length).toBeGreaterThan(MOBILE_PRIMARY_PATHS.length);
+});
+
+describe("activeNavItem", () => {
+  it("matches a nav page exactly", () => {
+    expect(activeNavItem("/")?.label).toBe("Dashboard");
+    expect(activeNavItem("/costs/variable")?.label).toBe("Variable Costs");
+  });
+
+  it("claims a page one level down for the entry above it", () => {
+    expect(activeNavItem("/costs/fixed/some-bill-id")?.label).toBe("Fixed Costs");
+    // Admin's entry points at its first tab, so its other tabs only match
+    // through `section`.
+    expect(activeNavItem("/admin/devices")?.label).toBe("Admin");
+  });
+
+  it("never lets the dashboard claim everything", () => {
+    // Every path starts with "/", so a prefix rule on it would light the
+    // dashboard up on every page that isn't in the list.
+    expect(activeNavItem("/import")).toBeUndefined();
+    expect(activeNavItem("/nowhere")).toBeUndefined();
+  });
+
+  it("does not mistake a shared prefix for a parent", () => {
+    expect(activeNavItem("/goalsx")).toBeUndefined();
   });
 });
 
@@ -44,6 +61,10 @@ describe("pageTitle", () => {
     // falls back to "Budget" and the operator loses their place.
     expect(pageTitle("/import")).toBe("Import");
     expect(pageTitle("/costs/fixed/some-bill-id")).toBe("Bill history");
+  });
+
+  it("names an admin tab after the section it belongs to", () => {
+    expect(pageTitle("/admin/sessions")).toBe("Admin");
   });
 
   it("prefers the exact nav match over the prefix rule", () => {

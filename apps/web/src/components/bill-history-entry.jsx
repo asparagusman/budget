@@ -11,7 +11,7 @@ import { EmptyState } from "@/components/empty-state.jsx";
 import { ListSkeleton } from "@/components/loading.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
 import { Money } from "@/components/money.jsx";
-import { StatTile } from "@/components/stat-tile.jsx";
+import { Stat, StatGroup } from "@/components/stat-tile.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
 import { formatIsoDate } from "@/lib/dates.js";
@@ -195,11 +195,11 @@ export function BillHistoryEntry({ billId, autoFocus = false, onSaved }) {
       </div>
 
       {stats ? (
-        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-          <StatTile label="Mean" value={<Money value={stats.mean} />} />
-          <StatTile label="Min" value={<Money value={stats.min} />} />
-          <StatTile label="Max" value={<Money value={stats.max} />} />
-          <StatTile
+        <StatGroup aria-label="Bill history summary">
+          <Stat label="Mean" value={<Money value={stats.mean} />} />
+          <Stat label="Min" value={<Money value={stats.min} />} />
+          <Stat label="Max" value={<Money value={stats.max} />} />
+          <Stat
             label="Variance band"
             value={
               <span className="text-lg">
@@ -207,7 +207,7 @@ export function BillHistoryEntry({ billId, autoFocus = false, onSaved }) {
               </span>
             }
           />
-        </div>
+        </StatGroup>
       ) : null}
 
       {historyQuery.isLoading ? (
@@ -215,9 +215,9 @@ export function BillHistoryEntry({ billId, autoFocus = false, onSaved }) {
       ) : slots.length === 0 ? (
         <EmptyState title="No history to show" description="This bill has no derivable due dates in the chosen lookback." />
       ) : (
-        <div className="flex flex-col divide-y divide-border rounded-(--radius-card) bg-surface shadow-(--shadow-card)">
+        <div className="flex flex-col divide-y divide-border overflow-hidden rounded-(--radius-card) bg-surface shadow-(--shadow-card)">
           {slots.map((slot, i) => (
-            <div key={slot.dueDate} className="flex items-center justify-between gap-4 p-4">
+            <div key={slot.dueDate} className="flex items-center justify-between gap-4 px-4 py-2.5">
               <div className="min-w-0">
                 <p className="text-sm font-medium text-text">{slot.label}</p>
                 <p className="text-xs text-text-muted">{formatIsoDate(slot.dueDate, locale)}</p>

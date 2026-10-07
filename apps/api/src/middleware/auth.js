@@ -49,7 +49,9 @@ export function isRecoveryAllowed(path, method) {
 
 /**
  * Applied to the whole app. Every non-allowlisted route requires a live
- * session; on success it sets `userId`/`sessionId` for downstream handlers.
+ * session belonging to an active user (getSessionFromRequest refuses a
+ * deactivated user's); on success it sets `userId`/`sessionId` for
+ * downstream handlers.
  * Left untyped (no explicit `MiddlewareHandler<Env>` return annotation) so
  * `app.use("*", requireAuth(db))` contextually types `c`/`next` from the
  * plain, ungenerified app it's registered on — see lib/app-env.js.

@@ -1,7 +1,8 @@
-import { billsContribution, projectPaydays, requiredOpeningBalanceCents, simulateBalance } from "@budget/engine";
+import { equivalent, projectPaydays, requiredOpeningBalanceCents, simulateBalance } from "@budget/engine";
 import { balanceCurveQuerySchema, fixedCostsSummaryQuerySchema } from "@budget/schema";
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
+import { loadAllocationContext } from "../lib/allocation.js";
 import { getPrimaryPaySchedule } from "../lib/income.js";
 import {
   billFigures,
@@ -102,11 +103,19 @@ export function createFixedCostsRoutes({ db }) {
       const savedOpeningBalance = await resolveOpeningBalance(db);
       const openingBalanceCents = opening ?? savedOpeningBalance.openingBalanceCents;
 
-      const { allInstances } = await projectActiveBills(db, window);
-      // `paySchedule` is confirmed non-null above, so this — unlike
-      // `computeContribution` — always returns a real `perPayCents`; no
-      // null-handling wrapper needed on this path.
-      const { perPayCents } = billsContribution(allInstances, window, paySchedule);
+      const [{ allInstances }, context] = await Promise.all([
+        projectActiveBills(db, window),
+        loadAllocationContext(db, from),
+      ]);
+      // Each payday credits what the plan actually transfers for bills: its
+      // `from_fixed_costs` line is `fixedTotalPerMonthCents`, averaged over
+      // the allocation's own four-year window, then converted to the pay
+      // cadence by `equivalent()` — the engine's `ResolvedLine.perPayCents`
+      // for that line, to the cent. Averaging this curve's own shorter window
+      // instead credited a figure nobody transfers: with a car loan ending
+      // eight months in, $1,107.69 a fortnight against a real $969.23, which
+      // understated the opening balance the account needs by ~$2,077.
+      const perPayCents = equivalent(context.fixedTotalPerMonthCents, "monthly", paySchedule.cadence);
       const paydays = projectPaydays(paySchedule, window);
       const bufferCents = await getBillsBufferCents(db);
 

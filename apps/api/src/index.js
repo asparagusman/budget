@@ -7,7 +7,9 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { loadEnv } from "./env.js";
+import { describeError, handleAppError } from "./lib/db-errors.js";
 import { readMigrationHealth } from "./lib/health.js";
+import { getRpConfig } from "./lib/webauthn.js";
 import { requireAuth } from "./middleware/auth.js";
 import { createAccountsRoutes } from "./routes/accounts.js";
 import { createAllocationRoutes } from "./routes/allocation.js";
@@ -52,12 +54,21 @@ loadDotenv({
 const env = loadEnv();
 const db = createDb(env.DATABASE_URL);
 
+// Every passkey is bound to this RP ID — the hostname in PUBLIC_ORIGIN — for
+// good. Said once at startup, and again on /health, so a mismatch with the
+// address bar shows up in `logs api` rather than only as a passkey prompt
+// that fails without saying why (infra/README.md).
+const rp = getRpConfig(env);
+console.log(`WebAuthn RP ID ${rp.rpID}, origin ${rp.origin}`);
+
 const app = new Hono();
 
 // Method, path, status, duration only — request bodies carry financial data
 // and must never be logged. hono/logger's default format doesn't touch the
-// body at all.
-app.use(logger());
+// body at all. /health is left out: the container healthcheck polls it every
+// 5 seconds, which would bury every real request under ~17,000 lines a day.
+const requestLogger = logger();
+app.use((c, next) => (c.req.path === "/health" ? next() : requestLogger(c, next)));
 
 // Web and API share an origin in production (both sit behind the same
 // tailscale serve hostname), so this is a no-op there. In dev they're on
@@ -71,13 +82,9 @@ app.use(cors({ origin: env.PUBLIC_ORIGIN, credentials: true }));
 // The middleware itself allowlists /health and /auth/*.
 app.use("*", requireAuth(db));
 
-app.onError((err, c) => {
-  console.error(err);
-  return c.json(
-    { error: { code: "internal_error", message: "Something went wrong." } },
-    500,
-  );
-});
+// Never `console.error(err)`: a failed query's error carries its parameters,
+// which are household figures. See lib/db-errors.js.
+app.onError(handleAppError);
 
 app.notFound((c) =>
   c.json({ error: { code: "not_found", message: "Not found." } }, 404),
@@ -98,7 +105,7 @@ const routes = app
       await db.execute(sql`select 1`);
       dbOk = true;
     } catch (err) {
-      console.error("Health check DB probe failed:", err);
+      console.error(`Health check DB probe failed: ${describeError(err)}`);
       dbOk = false;
     }
     const migrations = dbOk
@@ -110,6 +117,10 @@ const routes = app
         ok: dbOk && !migrationsBehind,
         db: dbOk,
         version: env.APP_VERSION,
+        // Reported, not checked: only the browser knows what's in its
+        // address bar. Compare by eye; see the startup log line above.
+        rpId: rp.rpID,
+        origin: rp.origin,
         migrations,
       },
       dbOk && !migrationsBehind ? 200 : 503,

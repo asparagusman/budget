@@ -139,7 +139,7 @@ export function RecoveryPage() {
             <div className="flex items-center gap-2">
               <Input readOnly value={link} onFocus={(e) => e.target.select()} />
               <Button type="button" size="icon" variant="outline" onClick={copy} aria-label="Copy link">
-                {copied ? <CheckIcon className="text-positive" /> : <CopyIcon />}
+                {copied ? <CheckIcon className="text-text-muted" /> : <CopyIcon />}
               </Button>
             </div>
           ) : (
@@ -164,7 +164,7 @@ export function RecoveryPage() {
                     <Button
                       size="icon-sm"
                       variant="ghost"
-                      className="text-negative"
+                      className="text-text-muted hover:text-text"
                       aria-label={`Remove ${credential.deviceName}`}
                       onClick={async () => {
                         const ok = await confirm({

@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { equivalent, resolveVariableBudget, toCents } from "@budget/engine";
 import {
-  AlertTriangleIcon,
   CalendarClockIcon,
   ChevronDownIcon,
   ChevronLeftIcon,
@@ -35,6 +34,7 @@ import {
   ChartTooltip,
   MoneyTooltip,
   SERIES,
+  TOTAL,
   useChartMotion,
   useMoneyTick,
 } from "@/components/chart.jsx";
@@ -45,16 +45,20 @@ import { EmptyState } from "@/components/empty-state.jsx";
 import { PanelSkeleton } from "@/components/loading.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
 import { Money } from "@/components/money.jsx";
+import { InlineError, Notice, NoticeList } from "@/components/notice.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
-import { StatTile } from "@/components/stat-tile.jsx";
+import { PageSection } from "@/components/page-section.jsx";
+import { Stat, StatGroup } from "@/components/stat-tile.jsx";
 import { useConfirm } from "@/components/confirm-dialog.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
 import { registerCommands } from "@/lib/commands.js";
 import { CADENCES, CADENCE_LABELS } from "@/lib/constants.js";
 import { formatIsoDate, todayIso } from "@/lib/dates.js";
+import { colorFor, entityColors } from "@/lib/entity-colors.js";
 import { formatMoney } from "@/lib/format-money.js";
 import { useSettings } from "@/lib/settings.jsx";
+import { ScrollArea } from "@/components/scroll-area.jsx";
 
 /** @import { Cadence, Cents } from "@budget/engine" */
 /** @typedef {{ id: string, name: string, kind: "fixed" | "variable", isEssential: boolean, colour: string | null, sortOrder: number }} CostCategory */
@@ -166,7 +170,7 @@ function CategoryManagerDialog({ open, onOpenChange, categories, submitting, onC
                       <Button size="sm" variant="ghost" onClick={() => setRenaming({ id: cat.id, name: cat.name })}>
                         Rename
                       </Button>
-                      <Button size="sm" variant="ghost" className="text-negative" onClick={() => onArchive(cat.id)}>
+                      <Button size="sm" variant="ghost" className="text-text-muted hover:text-text" onClick={() => onArchive(cat.id)}>
                         Archive
                       </Button>
                     </div>
@@ -269,7 +273,7 @@ function NewBudgetForm({ categoryId, currentCadence, submitting, prefillAmountCe
       <FieldRow label="Note" htmlFor="variable-budget-note" hint="Optional.">
         <Input id="variable-budget-note" value={note} onChange={(e) => setNote(e.target.value)} />
       </FieldRow>
-      {error ? <p className="text-sm text-negative">{error}</p> : null}
+      {error ? <InlineError>{error}</InlineError> : null}
       <Button type="submit" size="sm" className="self-start" disabled={submitting}>
         {submitting ? "Saving…" : "Save"}
       </Button>
@@ -370,7 +374,7 @@ function BudgetRowEditor({ budget, submitting, onCancel, onSave }) {
         <FieldRow label="Note" htmlFor={`budget-edit-note-${budget.id}`} hint="Optional.">
           <Input id={`budget-edit-note-${budget.id}`} value={note} onChange={(e) => setNote(e.target.value)} />
         </FieldRow>
-        {error ? <p className="text-sm text-negative">{error}</p> : null}
+        {error ? <InlineError>{error}</InlineError> : null}
         <div className="flex gap-2">
           <Button type="submit" size="sm" disabled={submitting}>
             {submitting ? "Saving…" : "Save correction"}
@@ -412,7 +416,7 @@ function CategoryBudgetSheet({
 
   return (
     <Sheet open={category !== null} onOpenChange={onOpenChange}>
-      <SheetContent side="bottom" className="max-h-[85vh] overflow-y-auto">
+      <SheetContent side="bottom" scrollable className="max-h-[85vh]">
         <SheetHeader>
           <SheetTitle>{category?.name ?? "Category"}</SheetTitle>
           <SheetDescription>
@@ -454,7 +458,7 @@ function CategoryBudgetSheet({
               <div>
                 <p className="text-xs text-text-subtle">Variance</p>
                 <p className="font-medium text-text">
-                  {categorySummary?.varianceCents != null ? <Delta value={categorySummary.varianceCents} kind="cents" invert /> : "—"}
+                  {categorySummary?.varianceCents != null ? <Delta value={categorySummary.varianceCents} kind="cents" variance /> : "—"}
                 </p>
               </div>
             </div>
@@ -507,7 +511,7 @@ function CategoryBudgetSheet({
                             <Button
                               size="icon-sm"
                               variant="ghost"
-                              className="text-negative"
+                              className="text-text-muted hover:text-text"
                               aria-label="Delete this budget row"
                               onClick={() => onDeleteBudget(b.id)}
                             >
@@ -539,7 +543,7 @@ function BudgetGroupDesktop({ title, categories, budgets, summaryByCategory, pri
   return (
     <div className="flex flex-col gap-2">
       <h3 className="text-sm font-semibold text-text-muted">{title}</h3>
-      <div className="overflow-x-auto rounded-(--radius-card) bg-surface shadow-(--shadow-card)">
+      <ScrollArea axis="x" className="rounded-(--radius-card) bg-surface shadow-(--shadow-card)">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-border text-left text-xs text-text-muted">
@@ -579,14 +583,14 @@ function BudgetGroupDesktop({ title, categories, budgets, summaryByCategory, pri
                     {summary?.trailingAveragePerMonthCents != null ? <Money value={summary.trailingAveragePerMonthCents} /> : "—"}
                   </td>
                   <td className="px-4 py-3">
-                    {summary?.varianceCents != null ? <Delta value={summary.varianceCents} kind="cents" invert /> : <span className="text-text-subtle">—</span>}
+                    {summary?.varianceCents != null ? <Delta value={summary.varianceCents} kind="cents" variance /> : <span className="text-text-subtle">—</span>}
                   </td>
                 </tr>
               );
             })}
           </tbody>
         </table>
-      </div>
+      </ScrollArea>
     </div>
   );
 }
@@ -665,7 +669,7 @@ function ActualsGridDesktop({ cycles, gridCategories, values, onChange, inputRef
   }
 
   return (
-    <div className="overflow-x-auto rounded-(--radius-card) bg-surface shadow-(--shadow-card)">
+    <ScrollArea axis="x" className="rounded-(--radius-card) bg-surface shadow-(--shadow-card)">
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b border-border text-left text-xs text-text-muted">
@@ -674,7 +678,7 @@ function ActualsGridDesktop({ cycles, gridCategories, values, onChange, inputRef
               <th key={cat.id} className="px-3 py-2 font-medium whitespace-nowrap">
                 <span className="flex items-center gap-1.5">
                   {cat.name}
-                  <span className={cat.isEssential ? "size-1.5 rounded-full bg-(--accent)" : "size-1.5 rounded-full bg-text-subtle"} aria-hidden="true" />
+                  <span className={cat.isEssential ? "size-1.5 rounded-full bg-(--chart-total)" :"size-1.5 rounded-full bg-text-subtle"} aria-hidden="true" />
                 </span>
               </th>
             ))}
@@ -734,7 +738,7 @@ function ActualsGridDesktop({ cycles, gridCategories, values, onChange, inputRef
           </tr>
         </tfoot>
       </table>
-    </div>
+    </ScrollArea>
   );
 }
 
@@ -767,9 +771,13 @@ function ActualsGridMobile({ cycles, gridCategories, values, cycleIndex, onCycle
     mobileRefs.current[i + 1]?.select();
   }
 
+  // One card: the cycle being entered is the card's header and its total the
+  // footer. As three separate pieces — a stepper card, an inputs card and a
+  // total floating under both — nothing said the total belonged to the inputs
+  // or the inputs to that cycle.
   return (
-    <div className="flex flex-col gap-3">
-      <div className="flex items-center justify-between gap-2 rounded-(--radius-card) bg-surface p-3 shadow-(--shadow-card)">
+    <div className="flex flex-col divide-y divide-border overflow-hidden rounded-(--radius-card) bg-surface shadow-(--shadow-card)">
+      <div className="flex items-center justify-between gap-2 px-2 py-2">
         <Button
           size="icon-sm"
           variant="ghost"
@@ -795,9 +803,8 @@ function ActualsGridMobile({ cycles, gridCategories, values, cycleIndex, onCycle
           <ChevronRightIcon />
         </Button>
       </div>
-      <div className="flex flex-col divide-y divide-border rounded-(--radius-card) bg-surface shadow-(--shadow-card)">
         {gridCategories.map((cat, i) => (
-          <div key={cat.id} className="flex items-center justify-between gap-3 p-4">
+          <div key={cat.id} className="flex items-center justify-between gap-3 px-4 py-2.5">
             <span className="flex items-center gap-2 text-sm text-text">
               {cat.name}
               <Badge variant={cat.isEssential ? "default" : "secondary"}>{cat.isEssential ? "Essential" : "Target"}</Badge>
@@ -822,9 +829,11 @@ function ActualsGridMobile({ cycles, gridCategories, values, cycleIndex, onCycle
             </InputGroup>
           </div>
         ))}
-      </div>
-      <p className="text-right text-sm font-medium text-text">
-        Cycle total: <Money value={total} />
+      <p className="flex items-baseline justify-between gap-3 bg-surface-muted/60 px-4 py-3 text-sm">
+        <span className="text-text-muted">Cycle total</span>
+        <span className="font-semibold text-text tabular-nums">
+          <Money value={total} />
+        </span>
       </p>
     </div>
   );
@@ -865,15 +874,12 @@ function OrphanedCyclesPanel() {
   if (orphans.length === 0) return null;
 
   return (
-    <div className="flex flex-col gap-2 rounded-(--radius-card) bg-negative-soft p-4">
-      <div className="flex items-start gap-2 text-sm text-negative">
-        <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
-        <p>
-          {orphans.length} entered cycle{orphans.length === 1 ? "" : "s"} no longer line up with the primary pay schedule —
-          real history, kept, never auto-deleted. Delete one to realign, then re-enter it above.
-        </p>
-      </div>
-      <ul className="flex flex-col divide-y divide-border">
+    <Notice>
+      <p>
+        {orphans.length} entered cycle{orphans.length === 1 ? "" : "s"} no longer line up with the primary pay schedule —
+        real history, kept, never auto-deleted. Delete one to realign, then re-enter it above.
+      </p>
+      <ul className="mt-2 flex flex-col divide-y divide-border">
         {orphans.map((o) => (
           <li key={o.id} className="flex items-center justify-between gap-3 py-2 text-sm">
             <span className="text-text">
@@ -882,7 +888,7 @@ function OrphanedCyclesPanel() {
             <Button
               size="sm"
               variant="ghost"
-              className="text-negative"
+              className="text-text-muted hover:text-text"
               onClick={async () => {
                 const ok = await confirm({
                   title: "Delete this orphaned actual?",
@@ -897,7 +903,7 @@ function OrphanedCyclesPanel() {
           </li>
         ))}
       </ul>
-    </div>
+    </Notice>
   );
 }
 
@@ -982,6 +988,7 @@ export function VariableCostsPage() {
   const essentialCategories = categories.filter((c) => c.isEssential);
   const nonEssentialCategories = categories.filter((c) => !c.isEssential);
   const gridCategories = useMemo(() => [...essentialCategories, ...nonEssentialCategories], [essentialCategories, nonEssentialCategories]);
+  const categoryColors = useMemo(() => entityColors(categories.map((c) => c.id)), [categories]);
 
   // Cycles come back newest-first; both charts read left-to-right in time.
   const oldestFirst = useMemo(() => [...cycles].reverse(), [cycles]);
@@ -998,10 +1005,10 @@ export function VariableCostsPage() {
     /** @type {{ key: string, dollars: number }[]} */
     const budgetLines = [];
 
-    gridCategories.forEach((cat, i) => {
+    gridCategories.forEach((cat) => {
       const key = `cat${cat.id}`;
       keys.push(key);
-      config[key] = { label: cat.name, color: SERIES[i % SERIES.length] };
+      config[key] = { label: cat.name, color: colorFor(categoryColors, cat.id) };
       const current = resolveVariableBudget(budgetsFor(budgets, cat.id), today);
       if (current && primary) {
         budgetLines.push({
@@ -1022,7 +1029,7 @@ export function VariableCostsPage() {
     });
 
     return { config, keys, budgets: budgetLines, rows };
-  }, [gridCategories, oldestFirst, budgets, today, primary, locale]);
+  }, [gridCategories, categoryColors, oldestFirst, budgets, today, primary, locale]);
 
   const splitRows = useMemo(
     () =>
@@ -1256,59 +1263,52 @@ export function VariableCostsPage() {
       ) : null}
 
       {summary ? (
-        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-          <StatTile
+        <StatGroup aria-label="Variable costs summary">
+          <Stat
+            lead
             label={`Essential${payCadenceLabel ? ` (${payCadenceLabel})` : " per month"}`}
             value={<Money value={essentialHeadlineCents} />}
-            sparkline={<p className="text-xs text-text-muted">The figure the allocation deducts.</p>}
+            hint="The figure the allocation deducts."
           />
-          <StatTile
-            className="opacity-90"
+          <Stat
             label={
               <span className="inline-flex items-center gap-1.5">
                 Non-essential{payCadenceLabel ? ` (${payCadenceLabel})` : " per month"}
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <InfoIcon className="size-3.5 text-text-subtle" aria-label="What is this?" />
+                    <InfoIcon className="size-3.5 shrink-0 text-text-subtle" aria-label="What is this?" />
                   </TooltipTrigger>
                   <TooltipContent>a benchmark compared against your prize pool — never deducted from income.</TooltipContent>
                 </Tooltip>
               </span>
             }
             value={<span className="text-text-muted"><Money value={nonEssentialHeadlineCents} /></span>}
-            sparkline={<p className="text-xs text-text-muted">A target, not a deduction.</p>}
+            hint="A target, not a deduction."
           />
-          <StatTile
+          <Stat
             label="Trailing average vs budget"
             value={withTrailingData.length > 0 ? <Money value={totalTrailingPerMonthCents} /> : <span className="text-text-subtle">—</span>}
-            delta={withTrailingData.length > 0 ? <Delta value={trailingVsBudgetPct} kind="pct" invert /> : undefined}
-            sparkline={
+            delta={withTrailingData.length > 0 ? <Delta value={trailingVsBudgetPct} kind="pct" variance /> : undefined}
+            hint={
               withTrailingData.length > 0 ? (
-                <p className="text-xs text-text-muted">
+                <>
                   vs <Money value={totalBudgetForTrailingCents} />/mo budgeted
-                </p>
+                </>
               ) : (
-                <p className="text-xs text-text-muted">No history entered yet.</p>
+                "No history entered yet."
               )
             }
           />
-          <StatTile label="Cycles recorded" value={cyclesRecorded} />
-        </div>
+          <Stat label="Cycles recorded" value={cyclesRecorded} />
+        </StatGroup>
       ) : null}
 
       {warnings.length > 0 ? (
-        <div className="flex flex-col gap-2 rounded-(--radius-card) bg-negative-soft p-4">
-          {warnings.map((w, i) => (
-            <div key={i} className="flex items-start gap-2 text-sm text-negative">
-              <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
-              <p>{w.message}</p>
-            </div>
-          ))}
-        </div>
+        <NoticeList items={warnings.map((w, i) => ({ key: String(i), content: <p>{w.message}</p> }))} />
       ) : null}
 
       {categories.length > 0 ? (
-        <div ref={budgetsSectionRef} className="flex flex-col gap-6">
+        <div ref={budgetsSectionRef} className="flex flex-col gap-5 md:gap-6">
           <div className="hidden md:flex md:flex-col md:gap-6">
             <BudgetGroupDesktop
               title="Essentials"
@@ -1329,7 +1329,7 @@ export function VariableCostsPage() {
               onOpenCategory={setBudgetSheetCategoryId}
             />
           </div>
-          <div className="flex flex-col gap-6 md:hidden">
+          <div className="flex flex-col gap-5 md:hidden">
             <BudgetGroupMobile
               title="Essentials"
               categories={essentialCategories}
@@ -1357,71 +1357,83 @@ export function VariableCostsPage() {
           description="Cycle spending is entered per pay cycle — set a primary pay schedule in Accounts before entering history."
         />
       ) : (
-        <div ref={actualsSectionRef} className="flex flex-col gap-4">
-          <div className="flex flex-wrap items-end justify-between gap-4">
-            <div className="flex flex-wrap items-end gap-4">
-              <FieldRow label="Lookback" htmlFor="variable-lookback" className="w-40">
-                <Select value={lookback} onValueChange={(v) => setLookback(/** @type {(typeof LOOKBACK_OPTIONS)[number]} */ (v))}>
-                  <SelectTrigger id="variable-lookback" className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="6">6 cycles</SelectItem>
-                    <SelectItem value="12">12 cycles</SelectItem>
-                    <SelectItem value="24">24 cycles</SelectItem>
-                    <SelectItem value="custom">Custom</SelectItem>
-                  </SelectContent>
-                </Select>
-              </FieldRow>
-              {lookback === "custom" ? (
-                <FieldRow label="Cycles" htmlFor="variable-custom" className="w-28">
-                  <Input id="variable-custom" type="number" min="1" inputMode="numeric" value={customPeriods} onChange={(e) => setCustomPeriods(e.target.value)} />
-                </FieldRow>
-              ) : null}
-            </div>
-            <Button onClick={() => saveActuals.mutate()} disabled={saveActuals.isPending}>
-              <SaveIcon />
-              {saveActuals.isPending ? "Saving…" : "Save"}
-            </Button>
-          </div>
+        <div ref={actualsSectionRef}>
+          <PageSection
+            title="Actual spending"
+            actions={
+              <>
+                <div className="flex items-center gap-2">
+                  <label htmlFor="variable-lookback" className="text-sm text-text-muted">
+                    Lookback
+                  </label>
+                  <Select value={lookback} onValueChange={(v) => setLookback(/** @type {(typeof LOOKBACK_OPTIONS)[number]} */ (v))}>
+                    <SelectTrigger id="variable-lookback" className="w-32">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="6">6 cycles</SelectItem>
+                      <SelectItem value="12">12 cycles</SelectItem>
+                      <SelectItem value="24">24 cycles</SelectItem>
+                      <SelectItem value="custom">Custom</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {lookback === "custom" ? (
+                    <Input
+                      id="variable-custom"
+                      aria-label="Cycles"
+                      className="w-20"
+                      type="number"
+                      min="1"
+                      inputMode="numeric"
+                      value={customPeriods}
+                      onChange={(e) => setCustomPeriods(e.target.value)}
+                    />
+                  ) : null}
+                </div>
+                <Button onClick={() => saveActuals.mutate()} disabled={saveActuals.isPending}>
+                  <SaveIcon />
+                  {saveActuals.isPending ? "Saving…" : "Save"}
+                </Button>
+              </>
+            }
+          >
+            {cyclesQuery.isLoading ? (
+              <PanelSkeleton height={360} label="Loading cycles" />
+            ) : cycles.length === 0 || gridCategories.length === 0 ? (
+              <EmptyState title="Nothing to enter yet" description="Add a variable cost category first." />
+            ) : (
+              <>
+                <div className="hidden md:block">
+                  <ActualsGridDesktop cycles={cycles} gridCategories={gridCategories} values={values} inputRefs={inputRefs} onChange={(i, categoryId, value) => setValues((prev) => prev.map((row, idx) => (idx === i ? { ...row, [categoryId]: value } : row)))} />
+                </div>
+                <div className="md:hidden">
+                  <ActualsGridMobile
+                    cycles={cycles}
+                    gridCategories={gridCategories}
+                    values={values}
+                    cycleIndex={Math.min(mobileCycleIndex, cycles.length - 1)}
+                    onCycleIndexChange={setMobileCycleIndex}
+                    onChange={(i, categoryId, value) => setValues((prev) => prev.map((row, idx) => (idx === i ? { ...row, [categoryId]: value } : row)))}
+                  />
+                </div>
+              </>
+            )}
 
-          {cyclesQuery.isLoading ? (
-            <PanelSkeleton height={360} label="Loading cycles" />
-          ) : cycles.length === 0 || gridCategories.length === 0 ? (
-            <EmptyState title="Nothing to enter yet" description="Add a variable cost category first." />
-          ) : (
-            <>
-              <div className="hidden md:block">
-                <ActualsGridDesktop cycles={cycles} gridCategories={gridCategories} values={values} inputRefs={inputRefs} onChange={(i, categoryId, value) => setValues((prev) => prev.map((row, idx) => (idx === i ? { ...row, [categoryId]: value } : row)))} />
-              </div>
-              <div className="md:hidden">
-                <ActualsGridMobile
-                  cycles={cycles}
-                  gridCategories={gridCategories}
-                  values={values}
-                  cycleIndex={Math.min(mobileCycleIndex, cycles.length - 1)}
-                  onCycleIndexChange={setMobileCycleIndex}
-                  onChange={(i, categoryId, value) => setValues((prev) => prev.map((row, idx) => (idx === i ? { ...row, [categoryId]: value } : row)))}
-                />
-              </div>
-            </>
-          )}
-
-          <OrphanedCyclesPanel />
+            <OrphanedCyclesPanel />
+          </PageSection>
         </div>
       )}
 
       {cycles.length > 0 && gridCategories.length > 0 ? (
-        <div className="flex flex-col gap-4">
-          <h2 className="text-lg font-semibold text-text">Trends</h2>
-          <div className="rounded-(--radius-card) bg-surface p-5 shadow-(--shadow-card)">
+        <PageSection title="Trends">
+          <div className="rounded-(--radius-card) bg-surface p-4 shadow-(--shadow-card) md:p-5">
             <h3 className="mb-3 text-sm font-semibold text-text">Actual per cycle, budget as a dashed reference</h3>
             {/* The grid above holds the same actuals, but only for the
                 cycles currently in view and, on mobile, one cycle at a time
                 — so this trend chart carries figures the grid does not. */}
             <Chart
               height={280}
-              ariaLabel={`Actual spend per cycle for ${gridCategories.length} categories across ${cycles.length} cycles, each with its budget as a dashed reference line.`}
+              ariaLabel={`Actual spend per cycle for ${gridCategories.length} categories across ${cycles.length} cycles, each with its budget as a faint reference line.`}
               dataTable={{
                 caption: "Actual spend per category, per cycle",
                 columns: ["Cycle", ...gridCategories.map((cat) => cat.name)],
@@ -1441,7 +1453,8 @@ export function VariableCostsPage() {
                 <YAxis {...AXIS} width={56} tickFormatter={moneyTick} />
                 <ChartTooltip content={<MoneyTooltip />} />
                 <ChartLegend content={<ChartLegendContent />} />
-                {/* Each category's budget as a dashed rule in its own colour.
+                {/* Each category's budget as a thin, faint rule in its own
+                    colour — not dashed, since dashed means projected.
                     A reference line, not a flat extra series: it is a
                     threshold rather than a measurement, and it stays out of
                     the tooltip and the legend where it would read as one. */}
@@ -1450,7 +1463,8 @@ export function VariableCostsPage() {
                     key={budget.key}
                     y={budget.dollars}
                     stroke={`var(--color-${budget.key})`}
-                    strokeDasharray="4 4"
+                    strokeWidth={1}
+                    strokeOpacity={0.5}
                     ifOverflow="extendDomain"
                   />
                 ))}
@@ -1469,7 +1483,7 @@ export function VariableCostsPage() {
               </LineChart>
             </Chart>
           </div>
-          <div className="rounded-(--radius-card) bg-surface p-5 shadow-(--shadow-card)">
+          <div className="rounded-(--radius-card) bg-surface p-4 shadow-(--shadow-card) md:p-5">
             <h3 className="mb-3 text-sm font-semibold text-text">Total variable spend, essential vs non-essential</h3>
             <Chart
               height={240}
@@ -1490,8 +1504,8 @@ export function VariableCostsPage() {
                 }),
               }}
               config={{
-                essential: { label: "Essential", color: SERIES[0] },
-                nonEssential: { label: "Non-essential", color: SERIES[3] },
+                essential: { label: "Essential", color: TOTAL },
+                nonEssential: { label: "Non-essential", color: SERIES[1] },
               }}
             >
               <AreaChart data={splitRows} margin={{ top: 8, right: 32, bottom: 0, left: 0 }}>
@@ -1542,7 +1556,7 @@ export function VariableCostsPage() {
               . This is a projection only — it writes nothing and never updates a budget.
             </p>
           </div>
-        </div>
+        </PageSection>
       ) : null}
 
       <CategoryManagerDialog

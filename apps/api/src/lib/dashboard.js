@@ -1,19 +1,28 @@
-import { addDaysIso, ALLOCATION_SECTIONS, daysBetween, equivalent, resolveCycle, sumCents } from "@budget/engine";
-import { allocationVersions, people } from "@budget/schema";
-import { eq } from "drizzle-orm";
+import {
+  addDaysIso,
+  ALLOCATION_SECTIONS,
+  daysBetween,
+  equivalent,
+  resolveCycle,
+  resolveVariant,
+  sumCents,
+} from "@budget/engine";
 import {
   findVersionByStatus,
   linesForVersion,
   loadAllocationContext,
+  compareWithApplied,
+  readAppliedSnapshot,
   resolveActiveAllocation,
   serializeLine,
 } from "./allocation.js";
 import { projectActiveBills } from "./bills.js";
+import { todayIso } from "./dates.js";
 import { loadGoals, loadNetWorth } from "./goals.js";
 import { serializeVariant } from "./income.js";
 
-/** @import { Cents, IsoDate } from "@budget/engine" */
-/** @import { AllocationContext } from "./allocation.js" */
+/** @import { Cadence, Cents, IsoDate } from "@budget/engine" */
+/** @import { AllocationContext, AppliedComparison } from "./allocation.js" */
 
 // Far enough ahead to always find five bills for the Upcoming card, whatever
 // the household's cadences. Nothing is averaged over it — it is a lookup
@@ -41,22 +50,98 @@ const STALE_BALANCE_DAYS = 30;
 const WARNING_HREFS = {
   variant_overlap: "/income",
   variant_gap: "/income",
+  over_allocated: "/allocation",
   unallocated: "/allocation",
   unapplied_draft: "/allocation",
+  transfers_drifted: "/allocation",
+  applied_cadence_changed: "/allocation",
   no_active_allocation: "/allocation",
   ambiguous_active_allocation: "/allocation",
   no_income_landing_account: "/accounts",
-  no_primary_pay_schedule: "/settings/pay-schedules",
+  // Pay schedules live on /income now (the old Settings tab redirects there),
+  // and the section carries this id.
+  no_primary_pay_schedule: "/income#pay-schedules",
   stale_balance: "/accounts",
   no_balance_recorded: "/accounts",
+  unconfirmed_due_dates: "/costs/fixed",
   orphaned_instances: "/costs/fixed",
   incomplete_seasonal_curve: "/costs/fixed",
   no_budget_set: "/costs/variable",
 };
 
+// How a cadence reads inside a sentence the API composes. The web has its own
+// labels for its own controls; a warning is prose, so it needs prose.
+/** @type {Record<Cadence, string>} */
+const CADENCE_PHRASES = {
+  weekly: "weekly",
+  fortnightly: "fortnightly",
+  monthly: "monthly",
+  every_2_months: "every two months",
+  quarterly: "quarterly",
+  every_6_months: "every six months",
+  yearly: "yearly",
+};
+
 /** @param {{ code: string, message: string }} warning */
 function withHref(warning) {
   return { code: warning.code, message: warning.message, href: WARNING_HREFS[warning.code] ?? "/settings/users" };
+}
+
+/**
+ * Money and dates inside a warning sentence. The web's `formatMoney` renders
+ * every figure the browser draws, but a warning is a sentence this API
+ * composes, so it makes the same `Intl` calls here — with the operator's own
+ * currency and locale from settings, never a hardcoded "$". Same fallbacks as
+ * routes/settings.js for a database `db:seed` hasn't reached yet.
+ *
+ * @param {import("@budget/schema").Db} db
+ */
+async function loadFormatters(db) {
+  const rows = await db.query.settings.findMany({
+    where: (s, { inArray }) => inArray(s.key, ["currency", "locale"]),
+  });
+  const currency = rows.find((r) => r.key === "currency")?.value;
+  const localeValue = rows.find((r) => r.key === "locale")?.value;
+  const locale = typeof localeValue === "string" ? localeValue : "en-AU";
+  /** @type {Intl.NumberFormatOptions} */
+  const moneyOptions = {
+    style: "currency",
+    currency: typeof currency === "string" ? currency : "AUD",
+    maximumFractionDigits: 2,
+  };
+  const plain = new Intl.NumberFormat(locale, moneyOptions);
+  // A change is only legible with its direction attached: "+$12.30" and
+  // "−$12.30" are two different instructions to the bank.
+  const signed = new Intl.NumberFormat(locale, { ...moneyOptions, signDisplay: "exceptZero" });
+  // A calendar date is a date, not an instant — formatted in UTC so the
+  // server's own zone can never move it a day (README "Dates").
+  const day = new Intl.DateTimeFormat(locale, { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
+  return {
+    /** @param {Cents} cents */
+    money: (cents) => plain.format(cents / 100),
+    /** @param {Cents} cents */
+    signedMoney: (cents) => signed.format(cents / 100),
+    /** @param {IsoDate} iso */
+    date: (iso) => day.format(new Date(`${iso}T00:00:00Z`)),
+  };
+}
+
+/**
+ * One sentence for a plan that commits more than it has, naming the amount.
+ * The engine says how deep the shortfall went and which lines went below zero
+ * to absorb it; this only words it.
+ *
+ * @param {import("@budget/engine").OverAllocation} over
+ * @param {(cents: Cents) => string} money
+ */
+function overAllocatedMessage(over, money) {
+  const n = over.negativeLineIds.length;
+  const lines = `${n} line${n === 1 ? "" : "s"}`;
+  if (over.shortfallPerMonthCents === 0) {
+    return `${lines} in this plan ${n === 1 ? "resolves" : "resolve"} below zero, which no transfer can do. Nothing is rebalanced for you.`;
+  }
+  const absorbed = n > 0 ? `, and ${lines} ${n === 1 ? "goes" : "go"} below zero to absorb it` : "";
+  return `This plan commits ${money(over.shortfallPerMonthCents)} a month more than the income it divides${absorbed}. Nothing is rebalanced for you.`;
 }
 
 /**
@@ -103,6 +188,10 @@ async function loadUpcomingBills(db, on) {
   const window = { from: on, to: addDaysIso(on, UPCOMING_WINDOW_DAYS) };
   const { bills, allInstances } = await projectActiveBills(db, window);
   const nameById = new Map(bills.map((b) => [b.id, b.name]));
+  // An imported bill's date is a placeholder until set (tables/bills.js), so
+  // every "due on" below inherits that doubt — carried per row so the card
+  // can say which dates are real.
+  const confirmedById = new Map(bills.map((b) => [b.id, b.dueDateConfirmed]));
 
   /** @param {{ expectedCents: Cents, actualCents: Cents | null }} instance */
   const amountOf = (instance) => instance.actualCents ?? instance.expectedCents;
@@ -115,10 +204,12 @@ async function loadUpcomingBills(db, on) {
 
   return {
     billCount: bills.length,
+    unconfirmedDueDateCount: bills.filter((b) => !b.dueDateConfirmed).length,
     upcoming: ascending.slice(0, UPCOMING_COUNT).map((instance) => ({
       billId: instance.billId,
       billName: nameById.get(instance.billId) ?? "Unnamed bill",
       dueDate: instance.dueDate,
+      dueDateConfirmed: confirmedById.get(instance.billId) ?? true,
       amountCents: amountOf(instance),
     })),
     dueNext14DaysCents: sumCents(ascending.filter((i) => i.dueDate < dueSoonCutoff).map(amountOf)),
@@ -216,6 +307,294 @@ function buildBreakdown(result, lines, context) {
 }
 
 /**
+ * @typedef {{
+ *   key: string,
+ *   label: string,
+ *   done: boolean,
+ *   href: string,
+ *   hint: string | null,
+ *   optional: boolean,
+ * }} SetupStep
+ *
+ * - `hint` — one sentence on what is half-done, when the state says something
+ *   more specific than the label (accounts exist but none is marked as where
+ *   income lands). Null when the label says it all.
+ * - `optional` — shown, but not counted towards `complete`. Only the invite
+ *   step: a household of one is a real household, and a setup card that can
+ *   never finish would be noise forever after.
+ */
+
+/**
+ * The household's "still to do" list — the ONE list. The importer's
+ * post-commit summary used to keep its own, in React state, so it was gone
+ * the moment the operator navigated away; the dashboard's card kept a second
+ * that missed steps and ticked "accounts" for any account at all. Both now
+ * read this, and every step is derived from what the database holds, so it
+ * survives navigation, reloads and the other household member's session, and
+ * a step ticks itself the moment the thing exists — nothing is ever marked
+ * done by hand (phases/README.md "No todo semantics").
+ *
+ * Steps that only make sense in some states are present only in those
+ * states: the due-date step while an imported placeholder is left, the
+ * invite step while the household has exactly one active user.
+ *
+ * `today` rather than the dashboard's `?on=`: "is a variant scheduled" asks
+ * about setup, and browsing a past cycle should not un-tick it.
+ *
+ * @param {import("@budget/schema").Db} db
+ * @param {IsoDate} today
+ */
+export async function loadSetup(db, today) {
+  const [
+    peopleRows,
+    accountRows,
+    scheduleRows,
+    variantRows,
+    lineRows,
+    entryRows,
+    billRows,
+    categoryRows,
+    budgetRows,
+    planRows,
+    versionRows,
+    userRows,
+    inviteRows,
+  ] = await Promise.all([
+    db.query.people.findMany({ where: (p, { isNull }) => isNull(p.archivedAt), columns: { id: true } }),
+    db.query.accounts.findMany({
+      where: (a, { isNull }) => isNull(a.archivedAt),
+      columns: { id: true, isIncomeLanding: true },
+    }),
+    db.query.paySchedules.findMany({
+      where: (p, { isNull }) => isNull(p.archivedAt),
+      columns: { id: true, isPrimary: true },
+    }),
+    db.query.incomeVariants.findMany({ where: (v, { isNull }) => isNull(v.archivedAt), columns: { id: true } }),
+    db.query.incomeLines.findMany({ columns: { variantId: true } }),
+    // Every entry, archived variant or not — the same rows
+    // `loadAllocationContext` resolves the running variant from.
+    db.query.variantSchedule.findMany({ columns: { variantId: true, startsOn: true, endsOn: true } }),
+    db.query.bills.findMany({
+      where: (b, { isNull }) => isNull(b.archivedAt),
+      columns: { id: true, dueDateConfirmed: true },
+    }),
+    db.query.costCategories.findMany({
+      where: (c, { and, eq, isNull }) => and(eq(c.kind, "variable"), isNull(c.archivedAt)),
+      columns: { id: true },
+    }),
+    db.query.variableBudgets.findMany({ columns: { categoryId: true } }),
+    db.query.allocationPlans.findMany({ where: (p, { isNull }) => isNull(p.archivedAt), columns: { id: true } }),
+    db.query.allocationVersions.findMany({
+      where: (v, { inArray }) => inArray(v.status, ["active", "draft"]),
+      columns: { planId: true, status: true },
+    }),
+    db.query.users.findMany({ where: (u, { eq }) => eq(u.isActive, true), columns: { id: true } }),
+    db.query.invites.findMany({
+      where: (i, { and, eq, isNull }) => and(eq(i.purpose, "new_user"), isNull(i.consumedAt)),
+      columns: { expiresAt: true },
+    }),
+  ]);
+
+  const hasLanding = accountRows.some((a) => a.isIncomeLanding);
+  const hasPrimary = scheduleRows.some((s) => s.isPrimary);
+  const variantIds = new Set(variantRows.map((v) => v.id));
+  const variantsWithLines = new Set(lineRows.map((l) => l.variantId).filter((id) => variantIds.has(id)));
+  const resolution = resolveVariant(entryRows, today);
+  const diagnostic = resolution.diagnostics[0] ?? null;
+  const unconfirmed = billRows.filter((b) => !b.dueDateConfirmed).length;
+  const budgeted = new Set(budgetRows.map((b) => b.categoryId));
+  const categoriesWithBudget = categoryRows.filter((c) => budgeted.has(c.id)).length;
+  const livePlanIds = new Set(planRows.map((p) => p.id));
+  const liveVersions = versionRows.filter((v) => livePlanIds.has(v.planId));
+  const hasActive = liveVersions.some((v) => v.status === "active");
+  const hasDraft = liveVersions.some((v) => v.status === "draft");
+  const now = Date.now();
+  const pendingInvite = inviteRows.some((i) => i.expiresAt.getTime() > now);
+
+  /** @type {SetupStep[]} */
+  const steps = [
+    {
+      key: "people",
+      label: "Add the people in your household",
+      done: peopleRows.length > 0,
+      href: "/admin/people",
+      hint: null,
+      optional: false,
+    },
+    {
+      key: "income_landing_account",
+      label: "Add your accounts, and mark the one your pay lands in",
+      done: hasLanding,
+      href: "/accounts",
+      hint:
+        !hasLanding && accountRows.length > 0
+          ? "None of your accounts is marked as the one income lands in, so no transfer can be told from money that stays put."
+          : null,
+      optional: false,
+    },
+    {
+      key: "pay_schedule",
+      label: "Set a primary pay schedule",
+      done: hasPrimary,
+      href: "/income#pay-schedules",
+      hint:
+        !hasPrimary && scheduleRows.length > 0
+          ? "A pay schedule exists, but none is marked primary — transfers are per month until one is."
+          : null,
+      optional: false,
+    },
+    {
+      key: "income_variant",
+      label: "Add your income: a variant with at least one income line",
+      done: variantsWithLines.size > 0,
+      href: "/income",
+      hint:
+        variantsWithLines.size === 0 && variantRows.length > 0 ? "Your income variants have no income lines yet." : null,
+      optional: false,
+    },
+    {
+      key: "variant_schedule",
+      label: "Schedule which income variant is running now",
+      done: resolution.variantId !== null,
+      href: "/income",
+      hint:
+        resolution.variantId !== null
+          ? null
+          : diagnostic?.kind === "overlap"
+            ? `${diagnostic.variantIds.length} income variants are all scheduled for today, so none is in effect.`
+            : entryRows.length > 0
+              ? "No schedule entry covers today."
+              : "One open-ended schedule entry is enough, even with a single variant.",
+      optional: false,
+    },
+    {
+      key: "bills",
+      label: "Record your fixed-cost bills",
+      done: billRows.length > 0,
+      href: "/costs/fixed",
+      hint: null,
+      optional: false,
+    },
+  ];
+
+  if (unconfirmed > 0) {
+    steps.push({
+      key: "due_dates",
+      label: `Set the real due date of ${unconfirmed} imported bill${unconfirmed === 1 ? "" : "s"}`,
+      done: false,
+      href: "/costs/fixed",
+      hint: "The import dates every bill it creates to one placeholder day, and the calendar, the bills buffer and the balance curve are all computed from it.",
+      optional: false,
+    });
+  }
+
+  steps.push(
+    {
+      key: "variable_budgets",
+      label: "Set a budget for your variable-cost categories",
+      done: categoriesWithBudget > 0,
+      href: "/costs/variable",
+      hint:
+        categoriesWithBudget === 0 && categoryRows.length > 0
+          ? "Your variable-cost categories have no budget yet."
+          : null,
+      optional: false,
+    },
+    {
+      key: "allocation",
+      label: "Build an allocation plan and apply it",
+      done: hasActive,
+      href: "/allocation",
+      hint:
+        !hasActive && hasDraft
+          ? "A plan is drafted but not applied — imported plans always land as drafts, because only you decide what the standing orders are."
+          : null,
+      optional: false,
+    },
+  );
+
+  if (userRows.length === 1) {
+    steps.push({
+      key: "invite",
+      label: "Invite the rest of your household",
+      done: pendingInvite,
+      href: "/admin/invites",
+      hint: pendingInvite ? "An invite is waiting to be used." : null,
+      optional: true,
+    });
+  }
+
+  /** @param {string} key */
+  const isDone = (key) => steps.find((s) => s.key === key)?.done ?? false;
+
+  return {
+    // The five booleans the card read before `steps` existed, kept so an
+    // older client still renders. `accounts` now means what its label always
+    // said — an income-landing account exists — rather than "any account".
+    people: isDone("people"),
+    paySchedule: isDone("pay_schedule"),
+    accounts: isDone("income_landing_account"),
+    bills: isDone("bills"),
+    allocation: isDone("allocation"),
+    complete: steps.every((s) => s.done || s.optional),
+    steps,
+    // Offered while the household is empty: one import fills in people,
+    // income, bills, budgets and draft plans in one go.
+    importHref: peopleRows.length === 0 && billRows.length === 0 && variantRows.length === 0 ? "/import" : null,
+  };
+}
+
+/** @typedef {Awaited<ReturnType<typeof loadSetup>>} Setup */
+
+/**
+ * The warning for standing transfers whose live figure has moved off what
+ * was recorded at apply — or, when the pay cadence itself changed, the one
+ * saying the record can no longer be compared at all.
+ *
+ * Only real standing orders are named. The income-landing account's
+ * "transfer" is money that stays where it landed (tables/accounts.js), so a
+ * change there is not a bank order anyone has to edit.
+ *
+ * @param {{
+ *   comparison: AppliedComparison,
+ *   live: import("@budget/engine").Transfer[],
+ *   planName: string,
+ *   versionNumber: number,
+ *   payCadence: Cadence,
+ *   nameOf: (accountId: string) => string,
+ *   format: Awaited<ReturnType<typeof loadFormatters>>,
+ * }} args
+ * @returns {{ code: string, message: string } | null}
+ */
+function appliedDriftWarning({ comparison, live, planName, versionNumber, payCadence, nameOf, format }) {
+  const { snapshot } = comparison;
+  if (!snapshot) return null;
+  const which = `The ${planName} plan (v${versionNumber}) was applied on ${format.date(snapshot.appliedOn)}`;
+
+  if (comparison.status === "cadence_changed") {
+    return {
+      code: "applied_cadence_changed",
+      message: `${which} with ${CADENCE_PHRASES[snapshot.payCadence]} transfers, but the primary pay schedule is now ${CADENCE_PHRASES[payCadence]}. The amounts recorded then can't be compared to today's — re-apply the plan to record them.`,
+    };
+  }
+
+  const liveById = new Map(live.map((t) => [t.accountId, t]));
+  const appliedById = new Map(snapshot.transfers.map((t) => [t.accountId, t]));
+  const moved = (comparison.drift ?? []).filter((d) => {
+    if (d.deltaPerPayCents === 0) return false;
+    const stayedPut = (liveById.get(d.accountId)?.isNoOp ?? true) && (appliedById.get(d.accountId)?.isNoOp ?? true);
+    return !stayedPut;
+  });
+  if (moved.length === 0) return null;
+
+  const list = moved.map((d) => `${nameOf(d.accountId)} ${format.signedMoney(d.deltaPerPayCents)}`).join(", ");
+  return {
+    code: "transfers_drifted",
+    message: `${which}, and ${moved.length === 1 ? "one standing transfer has" : `${moved.length} standing transfers have`} moved since: ${list} per pay. Update ${moved.length === 1 ? "that bank order" : "those bank orders"}, or re-apply the plan to record the new amounts.`,
+  };
+}
+
+/**
  * The whole `/dashboard` payload. Every figure is read from the endpoint or
  * engine function that owns it — this file sums, filters and picks, and does
  * no financial arithmetic of its own. A second implementation of a rule here
@@ -229,16 +608,16 @@ export async function loadDashboard(db, on) {
   const context = await loadAllocationContext(db, on);
   const allocation = await resolveActiveAllocation(db, context);
 
-  const [accounts, billsPayload, netWorthPayload, goalsPayload, peopleCount, activeVersionCount, draftVersion, activeLines] =
+  const [accounts, billsPayload, netWorthPayload, goalsPayload, setup, draftVersion, activeLines, format] =
     await Promise.all([
       loadAccountsWithBalances(db),
       loadUpcomingBills(db, on),
       loadNetWorth(db, { from: addDaysIso(on, -NET_WORTH_DAYS), to: on }),
       loadGoals(db, { on, context, allocation }),
-      db.$count(people),
-      db.$count(allocationVersions, eq(allocationVersions.status, "active")),
+      loadSetup(db, todayIso()),
       allocation.plan ? findVersionByStatus(db, allocation.plan.id, "draft") : Promise.resolve(null),
       allocation.version ? linesForVersion(db, allocation.version.id) : Promise.resolve([]),
+      loadFormatters(db),
     ]);
 
   // ---- cycle -------------------------------------------------------------
@@ -291,6 +670,35 @@ export async function loadDashboard(db, on) {
   const grossPerPayCents = context.hasPrimaryPaySchedule
     ? equivalent(allocation.grossPerMonthCents, "monthly", context.payCadence)
     : null;
+
+  // What the bank was told when this version was applied, beside what the
+  // plan resolves to today. The live figure is still the one shown — it is
+  // what the plan says the order should be — and the recorded one rides along
+  // so the card can say quietly when the two have parted. Nothing here, or
+  // anywhere, writes a live figure into the record: re-applying is the only
+  // way to record new amounts (phases/08-allocation.md "What transfers are,
+  // and are not").
+  /** @type {AppliedComparison | null} */
+  const applied =
+    allocation.version && result
+      ? compareWithApplied(readAppliedSnapshot(allocation.version), result, context.payCadence)
+      : null;
+  const driftById = new Map((applied?.drift ?? []).map((d) => [d.accountId, d]));
+  const recorded = applied?.status === "recorded";
+  const transfers = (result?.transfers ?? []).map((t) => {
+    const delta = driftById.get(t.accountId) ?? null;
+    return {
+      ...t,
+      // Null when nothing comparable was recorded (a version applied before
+      // amounts were, or one recorded at a different pay cadence). Zero, not
+      // null, for a destination the record simply did not have: the record is
+      // complete, so absent means no order existed.
+      appliedPerPayCents: recorded ? (delta?.fromPerPayCents ?? 0) : null,
+      // live − applied, from the engine's own `diffAllocations`.
+      driftPerPayCents: recorded ? (delta?.deltaPerPayCents ?? 0) : null,
+    };
+  });
+
   const allocationPayload =
     allocation.plan && allocation.version && result
       ? {
@@ -301,7 +709,17 @@ export async function loadDashboard(db, on) {
           incomeVariantId: allocation.plan.incomeVariantId,
           grossPerMonthCents: allocation.grossPerMonthCents,
           grossPerPayCents,
-          transfers: result.transfers,
+          transfers,
+          // The recorded amounts' provenance. `status` is "not_recorded" for a
+          // version applied before amounts were stored, which shows no drift
+          // until the next apply records them.
+          applied: {
+            status: applied?.status ?? "not_recorded",
+            appliedOn: applied?.snapshot?.appliedOn ?? null,
+            computedOn: applied?.snapshot?.computedOn ?? null,
+            payCadence: applied?.snapshot?.payCadence ?? null,
+            transfers: applied?.snapshot?.transfers ?? null,
+          },
           // The engine's own `StageResult`s, passed through untouched — they
           // already carry per-month, per-pay and per-week. Whether the pay
           // figures mean anything is `grossPerPayCents`/`setup.paySchedule`'s
@@ -319,6 +737,9 @@ export async function loadDashboard(db, on) {
           breakdown: buildBreakdown(result, activeLines, context),
           unallocatedPerMonthCents: result.unallocatedPerMonthCents,
           goodLifeFidelityCents: result.goodLifeFidelityCents,
+          // Null when the plan fits inside gross. The engine's own flag, passed
+          // through so the hero can say what the warnings strip says.
+          overAllocation: result.overAllocation ?? null,
           hasDraft: draftVersion !== null,
         }
       : null;
@@ -381,6 +802,9 @@ export async function loadDashboard(db, on) {
         approxMonthsToNextThreshold: nextThreshold?.approxMonthsToReach ?? null,
         nextThresholdEta: nextThreshold?.eta ?? null,
         payCadence: context.payCadence,
+        // False until any essential cost is recorded: months of nothing is no
+        // target at all (see `serializeGoal`).
+        targetComputable: coverGoal.targetComputable,
       }
     : null;
 
@@ -396,24 +820,20 @@ export async function loadDashboard(db, on) {
     reached: g.reached,
     currentBalanceCents: g.currentBalanceCents,
     targetCents: g.targetCents,
+    // False for a months-of-expenses goal before any costs are recorded, when
+    // `targetCents` is only a placeholder 0 (see `serializeGoal`).
+    targetComputable: g.targetComputable,
   }));
 
   // ---- setup path --------------------------------------------------------
-  // What the operator still has to do before any of the above means anything.
-  // The dashboard is the first screen they ever see, so it has to be the one
-  // that says where to start (phases/10-dashboard.md "Empty state on day one").
-  const setup = {
-    people: peopleCount > 0,
-    paySchedule: context.hasPrimaryPaySchedule,
-    accounts: accounts.length > 0,
-    bills: billsPayload.billCount > 0,
-    // "Have you built one?", not "does one apply on this date?". An ambiguous
-    // income schedule leaves `allocationPayload` null even though the plan
-    // exists, and telling the operator to go build an allocation they already
-    // have would point them away from the thing that is actually wrong — the
-    // warnings strip is where that gets said.
-    allocation: activeVersionCount > 0,
-  };
+  // What the operator still has to do before any of the above means anything
+  // — `loadSetup`, the one "still to do" list the importer's summary also
+  // reads. The dashboard is the first screen they ever see, so it has to be
+  // the one that says where to start (phases/10-dashboard.md "Empty state on
+  // day one"). Its allocation step asks "have you applied one?", not "does
+  // one apply on this date?": an ambiguous income schedule leaves
+  // `allocationPayload` null even though the plan exists, and the warnings
+  // strip is where that gets said.
 
   // ---- warnings ----------------------------------------------------------
   // Ordered most-actionable first: the UI shows three and collapses the rest,
@@ -434,14 +854,41 @@ export async function loadDashboard(db, on) {
           },
     );
   }
-  if (result && result.unallocatedPerMonthCents !== 0) {
+  // Over-allocation first, and from the engine's flag rather than from
+  // unallocated: a sweep stage absorbs a shortfall into negative lines and
+  // leaves unallocated at exactly zero, so checking that alone never fired for
+  // the plan most households have. A negative unallocated always ends a stage
+  // below zero, so the flag covers that case too — one warning per problem.
+  const overAllocation = result?.overAllocation ?? null;
+  if (overAllocation) {
+    warnings.push({
+      code: "over_allocated",
+      message: overAllocatedMessage(overAllocation, format.money),
+    });
+  } else if (result && result.unallocatedPerMonthCents > 0) {
     warnings.push({
       code: "unallocated",
-      message:
-        result.unallocatedPerMonthCents > 0
-          ? "Some income is not allocated anywhere — it stays in the income account."
-          : "This plan allocates more than the income it has. Nothing is rebalanced for you.",
+      message: "Some income is not allocated anywhere — it stays in the income account.",
     });
+  }
+  // A standing order that no longer says what the plan says is the next most
+  // actionable thing on the screen: it is money going to the wrong place
+  // every payday until someone edits it at the bank.
+  if (applied && allocation.plan && allocation.version && result) {
+    const accountNameById = new Map(accounts.map((a) => [a.id, a.name]));
+    const recordedNameById = new Map((applied.snapshot?.transfers ?? []).map((t) => [t.accountId, t.accountName]));
+    const drift = appliedDriftWarning({
+      comparison: applied,
+      live: result.transfers,
+      planName: allocation.plan.name,
+      versionNumber: allocation.version.version,
+      payCadence: context.payCadence,
+      // Today's name where the account is still live, the recorded one where
+      // it has been archived since.
+      nameOf: (id) => accountNameById.get(id) ?? recordedNameById.get(id) ?? "An archived account",
+      format,
+    });
+    if (drift) warnings.push(drift);
   }
   if (allocationPayload?.hasDraft) {
     warnings.push({
@@ -450,6 +897,16 @@ export async function loadDashboard(db, on) {
     });
   }
   if (allocation.warning) warnings.push(allocation.warning);
+  if (billsPayload.unconfirmedDueDateCount > 0) {
+    const n = billsPayload.unconfirmedDueDateCount;
+    warnings.push({
+      code: "unconfirmed_due_dates",
+      message:
+        n === 1
+          ? "1 bill still has a placeholder due date from the import — set its real date on Fixed Costs."
+          : `${n} bills still have a placeholder due date from the import — set their real dates on Fixed Costs.`,
+    });
+  }
   if (netWorth.staleDays !== null && netWorth.staleDays > STALE_BALANCE_DAYS) {
     warnings.push({
       code: "stale_balance",
@@ -485,6 +942,7 @@ export async function loadDashboard(db, on) {
       nextDue: billsPayload.upcoming[0] ?? null,
       upcoming: billsPayload.upcoming,
       billCount: billsPayload.billCount,
+      unconfirmedDueDateCount: billsPayload.unconfirmedDueDateCount,
     },
     variable: rollUpVariable(context),
     allocation: allocationPayload,
@@ -492,7 +950,7 @@ export async function loadDashboard(db, on) {
     netWorth,
     mojo,
     goals,
-    setup: { ...setup, complete: Object.values(setup).every(Boolean) },
+    setup,
     warnings: deduped.map(withHref),
   };
 }

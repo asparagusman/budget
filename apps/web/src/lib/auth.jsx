@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "@tanstack/react-router";
 import { api } from "@/lib/api.js";
 import { readApiError, withUnreachable } from "@/lib/api-error.js";
 
@@ -115,4 +116,19 @@ export function useAuth() {
   const ctx = useContext(AuthContext);
   if (!ctx) throw new Error("useAuth must be used within an AuthProvider.");
   return ctx;
+}
+
+/**
+ * Ends this browser's session and lands on /login. Shared by the two places
+ * the shell offers it — the desktop sidebar's account menu and the mobile
+ * menu — so they cannot drift into signing out differently.
+ */
+export function useSignOut() {
+  const { refresh } = useAuth();
+  const navigate = useNavigate();
+  return useCallback(async () => {
+    await api.auth.logout.$post();
+    await refresh();
+    navigate({ to: "/login", replace: true });
+  }, [refresh, navigate]);
 }

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
+import { Link, useRouterState } from "@tanstack/react-router";
 import {
   ChevronsLeft,
   ChevronsRight,
@@ -9,7 +9,7 @@ import {
   Settings as SettingsIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils.js";
-import { NAV_ITEMS } from "@/lib/nav.js";
+import { NAV_ITEMS, activeNavItem } from "@/lib/nav.js";
 import { ThemeMenuItems } from "@/components/theme-toggle.jsx";
 import {
   DropdownMenu,
@@ -20,16 +20,9 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu.jsx";
 import { toggleCommandPalette } from "@/lib/commands.js";
-import { api } from "@/lib/api.js";
-import { useAuth } from "@/lib/auth.jsx";
-
-/** @param {string} name */
-function initials(name) {
-  const parts = name.trim().split(/\s+/);
-  const first = parts[0]?.[0] ?? "";
-  const last = parts.length > 1 ? parts[parts.length - 1]?.[0] ?? "" : "";
-  return (first + last).toUpperCase() || "?";
-}
+import { useAuth, useSignOut } from "@/lib/auth.jsx";
+import { AccountAvatar } from "@/components/shell/account-avatar.jsx";
+import { ScrollArea } from "@/components/scroll-area.jsx";
 
 const STORAGE_KEY = "budget:sidebar-collapsed";
 
@@ -85,15 +78,10 @@ function rowClass(collapsed) {
 export function Sidebar() {
   const [collapsed, setCollapsed] = useState(readCollapsed);
   const pathname = useRouterState({ select: (state) => state.location.pathname });
-  const navigate = useNavigate();
-  const { state: authState, refresh } = useAuth();
+  const activeTo = activeNavItem(pathname)?.to;
+  const { state: authState } = useAuth();
   const user = authState?.user ?? null;
-
-  async function signOut() {
-    await api.auth.logout.$post();
-    await refresh();
-    navigate({ to: "/login", replace: true });
-  }
+  const signOut = useSignOut();
 
   useEffect(() => {
     writeCollapsed(collapsed);
@@ -105,7 +93,7 @@ export function Sidebar() {
         // `h-full` inside a frame that is already exactly one viewport tall,
         // not `sticky h-screen`: the shell no longer scrolls, so there is
         // nothing to stick to and nothing to scroll away from.
-        "hidden h-full shrink-0 flex-col overflow-y-auto border-r border-border bg-surface transition-[width] duration-150 md:flex",
+        "hidden h-full shrink-0 flex-col overflow-hidden border-r border-border bg-surface transition-[width] duration-150 md:flex",
         collapsed ? "w-[4.5rem]" : "w-64",
       )}
     >
@@ -124,7 +112,7 @@ export function Sidebar() {
         type="button"
         onClick={toggleCommandPalette}
         className={cn(
-          "mx-3 flex items-center rounded-(--radius-control) bg-surface-muted px-3 py-2 text-sm text-text-muted transition-colors hover:text-text",
+          "mx-3 flex shrink-0 items-center rounded-(--radius-control) bg-surface-muted px-3 py-2 text-sm text-text-muted transition-colors hover:text-text",
           collapsed ? "justify-center gap-0" : "gap-2",
         )}
       >
@@ -137,33 +125,40 @@ export function Sidebar() {
         )}
       </button>
 
-      <nav className="mt-2 flex flex-1 flex-col gap-0.5 overflow-y-auto px-3 py-2">
-        {NAV_ITEMS.map((item) => {
-          const active = pathname === item.to;
-          return (
-            <Link
-              key={item.to}
-              to={item.to}
-              title={collapsed ? item.label : undefined}
-              className={cn(
-                "flex items-center rounded-full px-3 py-2 text-sm font-medium transition-colors",
-                collapsed ? "justify-center gap-0" : "gap-3",
-                "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent)",
-                active
-                  ? "bg-accent-brand-soft text-accent-brand"
-                  : "text-text-muted hover:bg-surface-muted hover:text-text",
-              )}
-            >
-              <item.icon className="size-4 shrink-0" aria-hidden="true" />
-              <span className={cn(LABEL, labelClass(collapsed))}>{item.label}</span>
-            </Link>
-          );
-        })}
-      </nav>
+      {/* The column itself never scrolls: brand, search and the bottom
+          cluster are always in view. Only this list can, and only on a
+          window too short to hold all ten — min-h-0 is what lets it give up
+          height instead of pushing the account off the bottom. */}
+      <ScrollArea as="nav" className="mt-2 min-h-0 flex-1">
+        <div className="flex flex-col gap-0.5 px-3 py-2">
+          {NAV_ITEMS.map((item) => {
+            const active = item.to === activeTo;
+            return (
+              <Link
+                key={item.to}
+                to={item.to}
+                title={collapsed ? item.label : undefined}
+                aria-current={active ? "page" : undefined}
+                className={cn(
+                  "flex items-center rounded-full px-3 py-2 text-sm font-medium transition-colors",
+                  collapsed ? "justify-center gap-0" : "gap-3",
+                  "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent)",
+                  active
+                    ? "bg-accent-brand-soft text-accent-brand"
+                    : "text-text-muted hover:bg-surface-muted hover:text-text",
+                )}
+              >
+                <item.icon className="size-4 shrink-0" aria-hidden="true" />
+                <span className={cn(LABEL, labelClass(collapsed))}>{item.label}</span>
+              </Link>
+            );
+          })}
+        </div>
+      </ScrollArea>
 
       {/* Settings, then collapse, then the account — controls first and
           identity last, with the account pinned to the very bottom. */}
-      <div className="flex flex-col gap-0.5 border-t border-border p-3">
+      <div className="flex shrink-0 flex-col gap-0.5 border-t border-border p-3">
         {/* Settings is a menu, not a destination. The only thing in it is a
             preference, and a route that exists to hold one radio group is a
             route the operator has to leave the screen they were reading to
@@ -222,9 +217,7 @@ export function Sidebar() {
                 collapsed ? "justify-center gap-0 px-0" : "gap-2 px-2",
               )}
             >
-              <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent-brand-soft text-xs font-medium text-accent-brand">
-                {user ? initials(user.displayName) : "?"}
-              </div>
+              <AccountAvatar user={user} />
               <div className={cn(LABEL, labelClass(collapsed), "min-w-0 flex-1 text-left")}>
                 <p className="truncate text-sm font-medium text-text">
                   {user?.displayName ?? "Not signed in"}

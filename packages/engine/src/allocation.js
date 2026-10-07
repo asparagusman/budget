@@ -1,6 +1,6 @@
 import { divideCents, pctOfCents } from "./money.js";
 import { equivalent } from "./cadence.js";
-import { mustAt, mustGet } from "./invariant.js";
+import { mustAt, mustFind, mustGet } from "./invariant.js";
 
 /** @import { Cents } from "./money.js" */
 /** @import { Cadence } from "./cadence.js" */
@@ -90,6 +90,10 @@ export const ALLOCATION_SECTIONS = [
 export function sectionForStage(stage) {
   return ALLOCATION_SECTIONS.find((s) => s.stage === stage) ?? null;
 }
+
+// The section the Good Life benchmark is measured against: its pool is what
+// sections A and B leave behind.
+const LEFTOVER_STAGE = mustFind(ALLOCATION_SECTIONS, (s) => s.key === "leftover", "leftover section").stage;
 
 /**
  * A goal on a whole section, which no per-line goal can express.
@@ -185,18 +189,47 @@ export function sectionForStage(stage) {
 
 /**
  * @typedef {{
+ *   shortfallPerMonthCents: Cents,
+ *   shortfallPerPayCents: Cents,
+ *   negativeLineIds: string[],
+ *   negativeStages: number[]
+ * }} OverAllocation
+ *
+ * A plan that commits more than the income it divides. Flagged, never fixed:
+ * nothing here moves a cent to make it balance.
+ *
+ * - `shortfallPerMonthCents` — how far the plan's commitments ran past gross
+ *   at their deepest: the most negative remaining at any stage's end, as a
+ *   positive figure. Zero when every stage stayed in credit and the only
+ *   symptom is a line resolving below zero on its own.
+ * - `negativeLineIds` — every line that resolved below zero, which no bank
+ *   transfer can do. A sweep or `pct_of_remaining` line over a negative
+ *   remaining is the usual one, and it is what hides the shortfall: the sweep
+ *   absorbs it, so unallocated reads zero and the transfers reconcile.
+ * - `negativeStages` — every stage whose remaining ended below zero.
+ */
+
+/**
+ * @typedef {{
  *   lines: ResolvedLine[],
  *   stages: StageResult[],
  *   transfers: Transfer[],
  *   unallocatedPerMonthCents: Cents,
- *   goodLifeFidelityCents: Cents
+ *   goodLifeFidelityCents: Cents,
+ *   overAllocation?: OverAllocation | null
  * }} AllocationResult
  *
  * - `stages` is the ONE grouping of the resolved lines. A parallel `categories`
  *   grouping (by a per-line heading) lived here and was removed: it was the
  *   same figures a second time, which on screen meant a side panel restating
  *   the section subtotals the sections were already showing.
- * - `goodLifeFidelityCents` — nonEssential − final remaining; positive = short of aspiration
+ * - `goodLifeFidelityCents` — nonEssential − the Leftover pool (what is left
+ *   entering section C, or after the last stage when there is no section C);
+ *   positive = short of aspiration
+ * - `overAllocation` — null when the plan fits inside gross. `computeAllocation`
+ *   always sets it. Optional in this type only because the web dashboard
+ *   rebuilds an `AllocationResult` field by field and does not pass it yet;
+ *   make it required once it does.
  */
 
 /**
@@ -325,7 +358,8 @@ export function computeAllocation(input) {
   ).sort((a, b) => a - b);
 
   let remaining = gross;
-  let lastStageRemainingAtStart = gross;
+  /** @type {Cents | null} */
+  let leftoverPoolCents = null;
   /** @type {Map<string, ResolvedLine>} */
   const resolvedByLineId = new Map();
   /** @type {StageResult[]} */
@@ -334,7 +368,7 @@ export function computeAllocation(input) {
   for (const stageNum of stageNumbers) {
     const stageLines = input.lines.filter((l) => l.stage === stageNum);
     const remainingAtStart = remaining;
-    lastStageRemainingAtStart = remainingAtStart;
+    if (stageNum === LEFTOVER_STAGE) leftoverPoolCents = remainingAtStart;
 
     const stageAmounts = resolveStageLineAmounts(
       stageLines,
@@ -459,17 +493,52 @@ export function computeAllocation(input) {
     isNoOp: accountId === input.incomeLandingAccountId,
   }));
 
+  // Measured against the Leftover pool, never against "whatever the last
+  // stage present started with": in a plan with no section C yet that was
+  // stage 2's entry, which still has the savings in it, and read a plan with
+  // nothing left over as headroom. With no section C the pool is simply what
+  // is left after the last stage.
   const goodLifeFidelityCents =
-    input.variableNonEssentialPerMonthCents - lastStageRemainingAtStart;
+    input.variableNonEssentialPerMonthCents - (leftoverPoolCents ?? remaining);
+
+  const lines = input.lines.map((l) =>
+    mustGet(resolvedByLineId, l.id, "resolved line"),
+  );
 
   return {
-    lines: input.lines.map((l) =>
-      mustGet(resolvedByLineId, l.id, "resolved line"),
-    ),
+    lines,
     stages,
     transfers,
     unallocatedPerMonthCents: remaining,
     goodLifeFidelityCents,
+    overAllocation: findOverAllocation(lines, stages, input.payCadence),
+  };
+}
+
+/**
+ * Flags a plan that commits more than it has — see `OverAllocation`. Without
+ * this a sweep stage hides it completely: gross $5,000 against $5,500 of
+ * needs and a 10% saving leaves the sweep lines at −$500 each, unallocated at
+ * exactly zero, and the transfer total still reconciling to gross.
+ *
+ * @param {ResolvedLine[]} lines
+ * @param {StageResult[]} stages
+ * @param {Cadence} payCadence
+ */
+function findOverAllocation(lines, stages, payCadence) {
+  const negativeLineIds = lines.filter((l) => l.perMonthCents < 0).map((l) => l.lineId);
+  const negativeStages = stages.filter((s) => s.remainingPerMonthCents < 0);
+  if (negativeLineIds.length === 0 && negativeStages.length === 0) return null;
+
+  const shortfallPerMonthCents = negativeStages.reduce(
+    (deepest, s) => Math.max(deepest, -s.remainingPerMonthCents),
+    0,
+  );
+  return {
+    shortfallPerMonthCents,
+    shortfallPerPayCents: equivalent(shortfallPerMonthCents, "monthly", payCadence),
+    negativeLineIds,
+    negativeStages: negativeStages.map((s) => s.stage),
   };
 }
 

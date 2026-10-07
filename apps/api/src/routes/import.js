@@ -4,8 +4,15 @@ import { Hono } from "hono";
 import { getUserId } from "../lib/app-env.js";
 import { writeAuditLog } from "../lib/audit.js";
 import { loadAllocationContext } from "../lib/allocation.js";
+import { loadSetup } from "../lib/dashboard.js";
 import { todayIso } from "../lib/dates.js";
-import { applyImport, ImportSelectionError, importNextSteps, reconcileImport } from "../lib/import/apply.js";
+import {
+  applyImport,
+  describeReimport,
+  ImportSelectionError,
+  importNextSteps,
+  reconcileImport,
+} from "../lib/import/apply.js";
 import { parseImport } from "../lib/import/parse.js";
 import { handleValidation } from "../lib/validation.js";
 
@@ -81,23 +88,31 @@ export function createImportRoutes({ db }) {
       const { file } = c.req.valid("form");
       const accounts = await activeAccounts(db);
 
+      /** @type {import("../lib/import/parse.js").ImportPlan} */
+      let preview;
       try {
-        const preview = await parseImport(await toBuffer(file), {
+        preview = await parseImport(await toBuffer(file), {
           fileName: file.name || "workbook.xlsx",
           accounts: accounts.map((a) => ({ id: a.id, name: a.name })),
-        });
-        return c.json({
-          preview,
-          // The date the preview offers as a default for every imported bill
-          // and budget. Sent from here rather than computed in the browser so
-          // the server's calendar day is the one that gets used.
-          defaultAnchorDate: todayIso(),
-          accounts: accounts.map((a) => ({ id: a.id, name: a.name, type: a.type })),
         });
       } catch (err) {
         console.error("Import preview failed:", err);
         return c.json(UNREADABLE, 400);
       }
+
+      return c.json({
+        preview,
+        // The date the preview offers as a default for every imported bill
+        // and budget. Sent from here rather than computed in the browser so
+        // the server's calendar day is the one that gets used.
+        defaultAnchorDate: todayIso(),
+        accounts: accounts.map((a) => ({ id: a.id, name: a.name, type: a.type })),
+        // What importing this file over what is already here would change,
+        // row by row, plus the plain rules for what a re-import ever
+        // touches. Outside the parse's try: a failure reading the database
+        // is a 500, not an unreadable workbook.
+        reimport: await describeReimport(db, preview),
+      });
     })
 
     // Re-parse, apply the operator's selection, and report what landed beside
@@ -165,12 +180,21 @@ export function createImportRoutes({ db }) {
         applied.accountIdByDestination,
       );
 
+      // Every account a destination now points at, archived or not, by name —
+      // so the summary labels each transfer with the account it went to.
+      const mappedIds = [...new Set(Object.values(applied.accountIdByDestination))];
+      const mappedAccounts =
+        mappedIds.length > 0
+          ? await db.query.accounts.findMany({ where: (a, { inArray }) => inArray(a.id, mappedIds) })
+          : [];
+
       const reconciliation = reconcileImport({
         plan,
         selection,
         accountIdByDestination: applied.accountIdByDestination,
+        accountNameById: Object.fromEntries(mappedAccounts.map((a) => [a.id, a.name])),
         incomeLandingAccountId,
-        payCadence: context.payCadence,
+        householdPayCadence: context.hasPrimaryPaySchedule ? context.payCadence : null,
       });
 
       await writeAuditLog(db, {
@@ -187,14 +211,25 @@ export function createImportRoutes({ db }) {
         counts: applied.counts,
         createdAccountNames: applied.createdAccountNames,
         reconciliation,
-        payCadence: context.payCadence,
+        // The cadence the reconciliation's per-pay figures are stated in —
+        // the workbook's own where it says, see `reconcileImport` — which is
+        // what the summary's "per …" headings have to name. Not necessarily
+        // the household's: that is `householdPayCadence`.
+        payCadence: reconciliation.cadence.payCadence,
+        householdPayCadence: context.hasPrimaryPaySchedule ? context.payCadence : null,
         hasPrimaryPaySchedule: context.hasPrimaryPaySchedule,
         nextSteps: importNextSteps({
           importedPlans: applied.importedPlans,
           incomeLandingAccountId: context.incomeLandingAccountId,
           hasPrimaryPaySchedule: context.hasPrimaryPaySchedule,
           createdAccountNames: applied.createdAccountNames,
+          createdBillCount: applied.createdBillCount,
+          anchorDate: selection.anchorDate,
         }),
+        // The one "still to do" list — the dashboard's setup checklist,
+        // derived from the database as it now stands — so this page shows the
+        // same list the dashboard keeps after the operator navigates away.
+        setup: await loadSetup(db, todayIso()),
       });
     });
 }

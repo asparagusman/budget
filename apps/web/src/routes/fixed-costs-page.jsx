@@ -3,7 +3,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { addDaysIso } from "@budget/engine";
 import {
-  AlertTriangleIcon,
   CalendarClockIcon,
   PencilIcon,
   PlusIcon,
@@ -22,8 +21,9 @@ import { CategoryGroup } from "@/components/fixed-costs-table.jsx";
 import { DataList, DataListRow } from "@/components/data-list.jsx";
 import { EmptyState } from "@/components/empty-state.jsx";
 import { Money } from "@/components/money.jsx";
+import { NoticeList } from "@/components/notice.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
-import { StatTile } from "@/components/stat-tile.jsx";
+import { Stat, StatGroup } from "@/components/stat-tile.jsx";
 import { useConfirm } from "@/components/confirm-dialog.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
@@ -139,7 +139,7 @@ function CategoryManagerDialog({ open, onOpenChange, categories, submitting, onC
                       <Button size="sm" variant="ghost" onClick={() => setRenaming({ id: cat.id, name: cat.name })}>
                         Rename
                       </Button>
-                      <Button size="sm" variant="ghost" className="text-negative" onClick={() => onArchive(cat.id)}>
+                      <Button size="sm" variant="ghost" className="text-text-muted hover:text-text" onClick={() => onArchive(cat.id)}>
                         Archive
                       </Button>
                     </span>
@@ -630,8 +630,11 @@ export function FixedCostsPage() {
 
   return (
     <>
+      {/* Pinned only while editing, when Save and Cancel have to stay in reach
+          down a long table. Reading, a pinned header is a description and two
+          buttons parked over the top of a phone's screen for no reason. */}
       <PageHeader
-        sticky
+        sticky={editing}
         title="Fixed Costs"
         description={
           editing ? (
@@ -639,7 +642,7 @@ export function FixedCostsPage() {
               <span className="text-text">
                 {changeCount} unsaved change{changeCount === 1 ? "" : "s"}
                 {invalidRows > 0 ? (
-                  <span className="text-negative">
+                  <span className="text-warning-strong">
                     {" · "}
                     {invalidRows} row{invalidRows === 1 ? "" : "s"} need attention
                   </span>
@@ -696,9 +699,9 @@ export function FixedCostsPage() {
       ) : null}
 
       {summary ? (
-        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-          <StatTile
-            className="col-span-2"
+        <StatGroup aria-label="Fixed costs summary">
+          <Stat
+            lead
             label={`Bills contribution${payCadenceLabel ? ` (${payCadenceLabel})` : " per month"}`}
             value={
               summary.contribution.perPayCents != null ? (
@@ -707,27 +710,20 @@ export function FixedCostsPage() {
                 <Money value={summary.contribution.perMonthCents} />
               )
             }
-            sparkline={
-              <p className="text-xs text-text-muted">
+            hint={
+              <>
                 <Money value={summary.contribution.perMonthCents} /> / month ·{" "}
                 <Money value={summary.contribution.perYearCents} /> / year
-              </p>
+              </>
             }
           />
-          <StatTile label="Total bills" value={summary.billCount} />
-          <StatTile label="Due in 14 days" value={dueSoonCount} />
-        </div>
+          <Stat label="Total bills" value={summary.billCount} />
+          <Stat label="Due in 14 days" value={dueSoonCount} />
+        </StatGroup>
       ) : null}
 
       {warnings.length > 0 ? (
-        <div className="flex flex-col gap-2 rounded-(--radius-card) bg-negative-soft p-4">
-          {warnings.map((w, i) => (
-            <div key={i} className="flex items-start gap-2 text-sm text-negative">
-              <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
-              <p>{w.message}</p>
-            </div>
-          ))}
-        </div>
+        <NoticeList items={warnings.map((w, i) => ({ key: String(i), content: <p>{w.message}</p> }))} />
       ) : null}
 
       {!isLoading && !editing && categories.length > 0 && bills.length === 0 ? (
@@ -743,26 +739,30 @@ export function FixedCostsPage() {
           }
         />
       ) : (
-        populatedCategories.map((cat) => {
-          const rows = rowsByCategory.get(cat.id) ?? [];
-          return (
-            <CategoryGroup
-              key={cat.id}
-              category={cat}
-              rows={rows}
-              totals={groupTotals(rows)}
-              payCadenceLabel={payCadenceLabel}
-              editing={editing}
-              people={people}
-              accounts={accounts}
-              locale={locale}
-              onChange={changeDraft}
-              onRemove={toggleRemove}
-              onOpenBill={setDetailBillId}
-              onAddBill={(categoryId) => setDrafts((prev) => [...prev, blankDraft(categoryId, incomeLandingId)])}
-            />
-          );
-        })
+        // One block: the categories are parts of a single list of bills, so
+        // they sit closer to each other than the page's blocks do.
+        <div className="flex flex-col gap-5 md:gap-6">
+          {populatedCategories.map((cat) => {
+            const rows = rowsByCategory.get(cat.id) ?? [];
+            return (
+              <CategoryGroup
+                key={cat.id}
+                category={cat}
+                rows={rows}
+                totals={groupTotals(rows)}
+                payCadenceLabel={payCadenceLabel}
+                editing={editing}
+                people={people}
+                accounts={accounts}
+                locale={locale}
+                onChange={changeDraft}
+                onRemove={toggleRemove}
+                onOpenBill={setDetailBillId}
+                onAddBill={(categoryId) => setDrafts((prev) => [...prev, blankDraft(categoryId, incomeLandingId)])}
+              />
+            );
+          })}
+        </div>
       )}
 
       <BillsBalanceCurve window={curveWindow} />

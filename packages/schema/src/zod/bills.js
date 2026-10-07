@@ -33,8 +33,18 @@ export const createBillSchema = z.object(billFields);
 // fields are respelled here without their defaults, the same way people.js
 // and pay-schedules.js already do it, so "absent" means "leave alone".
 // PATCH /bills/:id — all fields optional so a caller can send just one.
+//
+// `dueDateConfirmed` is update-only and has no default, for the same reason:
+// absent means "leave it alone". A changed `anchorDate` confirms the date on
+// its own (routes/bills.js); sending `true` is how the operator says the
+// imported placeholder happens to be the real date after all.
 export const updateBillSchema = z
-  .object({ ...billFields, amountModel: z.enum(amountModel.enumValues), sortOrder: z.number().int() })
+  .object({
+    ...billFields,
+    amountModel: z.enum(amountModel.enumValues),
+    sortOrder: z.number().int(),
+    dueDateConfirmed: z.boolean(),
+  })
   .partial()
   .refine((value) => Object.keys(value).length > 0, {
     message: "At least one field is required.",

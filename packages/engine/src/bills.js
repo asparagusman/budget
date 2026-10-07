@@ -1,4 +1,5 @@
 import { sumCents } from "./money.js";
+import { OCCURRENCES_PER_YEAR } from "./cadence.js";
 import {
   countPaydays,
   projectPaydays,
@@ -35,32 +36,56 @@ import {
  *   dueDate: IsoDate,
  *   expectedCents: Cents,
  *   actualCents: Cents | null,
- *   isOverride: boolean
+ *   isOverride: boolean,
+ *   frequency?: Cadence
  * }} BillInstance
+ *
+ * - `frequency` — the cadence of the series the instance was projected from.
+ *   `projectInstances` always sets it; a stored history row has none. It is
+ *   what lets `billsContribution` annualise a pooled list of instances one
+ *   series at a time without a second lookup by `billId`.
  */
 
-/** The step-adjusted base at `dueDate`: the latest step change with
- * `effectiveFrom <= dueDate` replaces the base outright (it is a new base,
- * not a modifier on top of the old one). ISO dates compare correctly as
- * plain strings.
+/** The step change in force at `dueDate`: the latest one with
+ * `effectiveFrom <= dueDate`, or null before the first. ISO dates compare
+ * correctly as plain strings.
  *
  * @param {Bill} bill
  * @param {IsoDate} dueDate
  */
-function stepAdjustedBase(bill, dueDate) {
+function applicableStep(bill, dueDate) {
   const applicable = (bill.stepChanges ?? []).filter(
     (sc) => sc.effectiveFrom <= dueDate,
   );
-  if (applicable.length === 0) return bill.baseAmountCents;
-  const latest = applicable.reduce((a, b) =>
+  if (applicable.length === 0) return null;
+  return applicable.reduce((a, b) =>
     a.effectiveFrom > b.effectiveFrom ? a : b,
   );
-  return latest.newAmountCents;
+}
+
+/** @param {number} year */
+function isLeapYear(year) {
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+}
+
+/**
+ * @param {number} year
+ * @param {number} month 1-12
+ */
+function daysInMonth(year, month) {
+  if (month === 2) return isLeapYear(year) ? 29 : 28;
+  return month === 4 || month === 6 || month === 9 || month === 11 ? 30 : 31;
 }
 
 /** Full anniversaries elapsed between `anchor` and `due` (e.g. an anchor of
  * 2020-06-15 has completed 0 years as of 2021-06-14, and 1 year as of
  * 2021-06-15). Never negative.
+ *
+ * An anniversary on a day its month doesn't have that year lands on the
+ * month's last day — the same clamping `projectPaydays` gives the due dates
+ * themselves. Compared against the raw day instead, a 29 February anchor
+ * never completes a year on the 28 February its yearly bill actually falls
+ * due, and the 2028 instance jumped two escalations at once.
  *
  * @param {IsoDate} anchor
  * @param {IsoDate} due
@@ -75,7 +100,8 @@ function fullYearsElapsed(anchor, due) {
   const dm = Number(d[1]);
   const dd = Number(d[2]);
   let years = dy - ay;
-  if (dm < am || (dm === am && dd < ad)) years--;
+  const anniversaryDay = Math.min(ad, daysInMonth(dy, am));
+  if (dm < am || (dm === am && dd < anniversaryDay)) years--;
   return Math.max(0, years);
 }
 
@@ -85,7 +111,10 @@ function fullYearsElapsed(anchor, due) {
  * @param {BillInstance[]} history
  */
 function computeExpectedCents(bill, dueDate, history) {
-  const base = stepAdjustedBase(bill, dueDate);
+  // A step change replaces the base outright — it is a new base, not a
+  // modifier on top of the old one.
+  const step = applicableStep(bill, dueDate);
+  const base = step?.newAmountCents ?? bill.baseAmountCents;
   switch (bill.amountModel) {
     case "flat":
       return base;
@@ -95,7 +124,15 @@ function computeExpectedCents(bill, dueDate, history) {
       return Math.round(base * factor);
     }
     case "escalating": {
-      const years = fullYearsElapsed(bill.anchorDate, dueDate);
+      // ...so escalation restarts from it. Counting years from the anchor
+      // instead applied the years before the step to an amount that was only
+      // set at the step: rent stepped to $2,000 in 2023 on a 2020 anchor read
+      // $2,662 that same day. A step dated before the anchor moves nothing.
+      const since =
+        step !== null && step.effectiveFrom > bill.anchorDate
+          ? step.effectiveFrom
+          : bill.anchorDate;
+      const years = fullYearsElapsed(since, dueDate);
       const factor = Math.pow(1 + (bill.escalationPct ?? 0) / 100, years);
       return Math.round(base * factor);
     }
@@ -143,6 +180,7 @@ export function projectInstances(bill, window, history = []) {
         expectedCents: existing.expectedCents,
         actualCents: existing.actualCents,
         isOverride: true,
+        frequency: bill.frequency,
       };
     }
     return {
@@ -151,8 +189,59 @@ export function projectInstances(bill, window, history = []) {
       expectedCents: computeExpectedCents(bill, dueDate, history),
       actualCents: existing?.actualCents ?? null,
       isOverride: false,
+      frequency: bill.frequency,
     };
   });
+}
+
+// The cadences `projectPaydays` steps in days rather than months
+// (calendar.js `DAYS_PER_OCCURRENCE`). No window of whole years holds a whole
+// number of them.
+/** @type {ReadonlySet<Cadence>} */
+const DAY_BASED_CADENCES = new Set(["weekly", "fortnightly"]);
+
+/**
+ * The window total `billsContribution` annualises, with every weekly or
+ * fortnightly series restated at its nominal rate. Fractional cents are
+ * deliberate: the callers round once, at the figure they report.
+ *
+ * A month-based series lands a whole number of times in a window of whole
+ * years — 48 monthly, 16 quarterly, 4 yearly in 1461 days — so its real total
+ * scales to a year exactly. A day-based one never does: 1461 days holds 104
+ * or 105 fortnights (208 or 209 weeks) depending on the day the window
+ * starts, so counting them made a $500 fortnightly loan read $1,093.75 a
+ * month on some days and $1,083.33 on others, and the standing transfer
+ * moved with nothing changed but the date. Its instances are averaged
+ * instead — which still prices in an escalation or an entered actual — and
+ * charged `OCCURRENCES_PER_YEAR` times a year, the same convention
+ * `equivalent()` uses, for however long the window is.
+ *
+ * An instance with no `frequency` was not built by `projectInstances`, and
+ * counts as it falls.
+ *
+ * @param {BillInstance[]} inWindow
+ * @param {number} days
+ */
+function nominalWindowTotal(inWindow, days) {
+  /** @type {Map<string, { cadence: Cadence, amounts: Cents[] }>} */
+  const daySeries = new Map();
+  let total = 0;
+  for (const instance of inWindow) {
+    const amount = instance.actualCents ?? instance.expectedCents;
+    const cadence = instance.frequency;
+    if (cadence === undefined || !DAY_BASED_CADENCES.has(cadence)) {
+      total += amount;
+      continue;
+    }
+    const series = daySeries.get(instance.billId);
+    if (series) series.amounts.push(amount);
+    else daySeries.set(instance.billId, { cadence, amounts: [amount] });
+  }
+  for (const { cadence, amounts } of daySeries.values()) {
+    const average = sumCents(amounts) / amounts.length;
+    total += (average * OCCURRENCES_PER_YEAR[cadence] * days) / 365.25;
+  }
+  return total;
 }
 
 /**
@@ -160,6 +249,11 @@ export function projectInstances(bill, window, history = []) {
  * mechanism a spreadsheet uses, but the same idea: each instance carries its
  * own forecast (seasonal, escalating, …), so the averaging already prices
  * those in.
+ *
+ * A weekly or fortnightly series is annualised by its occurrences per year
+ * rather than by how many of it the window happens to hold — see
+ * `nominalWindowTotal`. `perPayCents` still divides by the paydays actually
+ * in the window, deliberately (todo.md `[P10-12]`).
  *
  * @param {BillInstance[]} instances
  * @param {DateWindow} window
@@ -169,11 +263,9 @@ export function billsContribution(instances, window, paySchedule) {
   const inWindow = instances.filter(
     (i) => i.dueDate >= window.from && i.dueDate < window.to,
   );
-  const total = sumCents(
-    inWindow.map((i) => i.actualCents ?? i.expectedCents),
-  );
-
   const days = windowLengthDays(window);
+  const total = nominalWindowTotal(inWindow, days);
+
   const perYearCents = days > 0 ? Math.round((total * 365.25) / days) : 0;
 
   const paydays = countPaydays(paySchedule, window);
@@ -203,7 +295,9 @@ export function billsContribution(instances, window, paySchedule) {
 /**
  * `billsContribution` plus everything a single bill's row needs to state what
  * it actually costs: the next occurrence, the average occurrence, the spread,
- * and the window total the three cadence figures are derived from.
+ * and the window total the three cadence figures are derived from. (For a
+ * weekly or fortnightly bill they are derived from the average occurrence
+ * instead, and `windowTotalCents` stays what really falls due in the window.)
  *
  * Its reason for existing is that a row cannot be restated from
  * `baseAmountCents * occurrences-per-year` without contradicting the

@@ -35,8 +35,10 @@ import {
   Chart,
   ChartTooltip,
   MoneyTooltip,
-  SERIES,
+  PROJECTED,
+  REFERENCE,
   TIME_AXIS,
+  TOTAL,
   isoToMs,
   useChartMotion,
   useMoneyTick,
@@ -48,9 +50,10 @@ import { EmptyState } from "@/components/empty-state.jsx";
 import { CardsSkeleton } from "@/components/loading.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
 import { Money } from "@/components/money.jsx";
+import { InlineError, NoticeList } from "@/components/notice.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
 import { QuickBalanceSheet } from "@/components/quick-balance-sheet.jsx";
-import { StatTile } from "@/components/stat-tile.jsx";
+import { Stat, StatGroup } from "@/components/stat-tile.jsx";
 import { useConfirm } from "@/components/confirm-dialog.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
@@ -59,7 +62,6 @@ import { CADENCE_LABELS, CADENCE_PERIOD_NOUNS } from "@/lib/constants.js";
 import { formatIsoDate, todayIso } from "@/lib/dates.js";
 import { formatMoney } from "@/lib/format-money.js";
 import { useSettings } from "@/lib/settings.jsx";
-import { cn } from "@/lib/utils.js";
 
 /** @import { Cadence, Cents } from "@budget/engine" */
 
@@ -144,15 +146,13 @@ function ProgressBar({ goal }) {
             <Money value={goal.targetCents} />
           </span>
         </span>
-        <span className={cn("text-xs font-medium", goal.reached ? "text-positive" : "text-text-muted")}>
+        <span className="inline-flex items-center gap-1 text-xs font-medium text-text-muted">
           {goal.progressPct.toFixed(1)}%
+          {goal.reached ? <CheckCircle2Icon className="size-3.5 shrink-0 text-text-muted" aria-hidden="true" /> : null}
         </span>
       </div>
       <div className="h-2 w-full overflow-hidden rounded-full bg-surface-muted">
-        <div
-          className={cn("h-full rounded-full", goal.reached ? "bg-positive" : "bg-accent-brand")}
-          style={{ width: `${pct}%` }}
-        />
+        <div className="h-full rounded-full bg-(--chart-total)" style={{ width: `${pct}%` }} />
       </div>
       <p className="text-xs text-text-subtle">
         {goal.currentBalanceAsAt ? (
@@ -190,8 +190,8 @@ function EtaAndRequired({ goal, summary }) {
           At the current contribution
         </p>
         {goal.reached ? (
-          <p className="mt-1 flex items-center gap-1.5 text-lg font-semibold text-positive">
-            <CheckCircle2Icon className="size-4" aria-hidden="true" />
+          <p className="mt-1 flex items-center gap-1.5 text-lg font-semibold text-text">
+            <CheckCircle2Icon className="size-4 text-text-muted" aria-hidden="true" />
             Reached
           </p>
         ) : goal.eta.date ? (
@@ -224,7 +224,7 @@ function EtaAndRequired({ goal, summary }) {
               /month
             </>
           ) : (
-            <span className="text-negative">Not currently funded</span>
+            <span className="text-warning-strong">Not currently funded</span>
           )}
         </p>
       </div>
@@ -244,7 +244,7 @@ function EtaAndRequired({ goal, summary }) {
               /month · <span className="font-medium text-text">{goal.required.pctOfGross.toFixed(2)}%</span> of gross
             </p>
             {goal.required.feasible ? null : (
-              <p className="mt-2 flex items-start gap-1.5 text-xs text-negative">
+              <p className="mt-2 flex items-start gap-1.5 text-xs text-warning-strong">
                 <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
                 Not achievable at any allocation — this needs more than the household earns.
               </p>
@@ -323,9 +323,9 @@ function GoalCurve({ goal, summary }) {
         goal.isFunded ? "This goal is already at its target." : "Fund this account from an allocation line to see a curve."
       }
       config={{
-        projected: { label: "Projected", color: SERIES[0] },
-        target: { label: "Target", color: SERIES[2] },
-        pace: { label: "Pace to target date", color: SERIES[3] },
+        projected: { label: "Projected", color: TOTAL },
+        target: { label: "Target", color: "var(--text-subtle)" },
+        pace: { label: "Pace to target date", color: "var(--text-subtle)" },
       }}
     >
       <ComposedChart data={rows} margin={{ top: 16, right: 12, bottom: 0, left: 0 }}>
@@ -338,25 +338,16 @@ function GoalCurve({ goal, summary }) {
           type="monotone"
           stroke="var(--color-projected)"
           fill="var(--color-projected)"
-          fillOpacity={0.15}
+          {...PROJECTED}
           strokeWidth={2}
           dot={false}
           {...motion}
         />
-        <Line
-          dataKey="target"
-          type="monotone"
-          stroke="var(--color-target)"
-          strokeWidth={1.5}
-          strokeDasharray="5 4"
-          dot={false}
-          {...motion}
-        />
+        <Line dataKey="target" type="monotone" {...REFERENCE} dot={false} {...motion} />
         <Line
           dataKey="pace"
           type="linear"
-          stroke="var(--color-pace)"
-          strokeWidth={1.5}
+          {...REFERENCE}
           strokeDasharray="2 3"
           dot={false}
           connectNulls={false}
@@ -406,7 +397,7 @@ function ExpenseCoverPanel({ goal, summary }) {
           >
             <span className="flex shrink-0 items-center gap-2">
               {threshold.covered ? (
-                <CheckCircle2Icon className="size-4 shrink-0 text-positive" aria-hidden="true" />
+                <CheckCircle2Icon className="size-4 shrink-0 text-text-muted" aria-hidden="true" />
               ) : (
                 <span className="flex size-4 shrink-0 items-center justify-center" aria-hidden="true">
                   <span className="size-1.5 rounded-full bg-text-subtle" />
@@ -421,7 +412,7 @@ function ExpenseCoverPanel({ goal, summary }) {
             </span>
             <span className="ml-6 text-xs text-text-muted sm:ml-0 sm:text-right">
               {threshold.covered ? (
-                <span className="text-positive">covered</span>
+                <span className="text-text">covered</span>
               ) : threshold.eta ? (
                 <>
                   {durationLabel(threshold.periodsToReach, threshold.approxMonthsToReach, summary.payCadence)}
@@ -459,7 +450,7 @@ function GoalCard({ goal, summary, onEdit, onDelete, onUpdateBalance }) {
             )}
             <span className="truncate">{goal.goal.name}</span>
             {goal.goal.status !== "active" ? <Badge variant="secondary">{goal.goal.status}</Badge> : null}
-            {!goal.isFunded ? <Badge variant="outline">not currently funded</Badge> : null}
+            {!goal.isFunded ? <Badge variant="attention">not currently funded</Badge> : null}
           </h2>
           <p className="text-xs text-text-muted">
             {goal.account.name}
@@ -474,7 +465,7 @@ function GoalCard({ goal, summary, onEdit, onDelete, onUpdateBalance }) {
           <Button size="icon" variant="ghost" aria-label="Edit goal" onClick={onEdit}>
             <PencilIcon />
           </Button>
-          <Button size="icon" variant="ghost" className="text-negative" aria-label="Delete goal" onClick={onDelete}>
+          <Button size="icon" variant="ghost" className="text-text-muted hover:text-text" aria-label="Delete goal" onClick={onDelete}>
             <Trash2Icon />
           </Button>
         </div>
@@ -659,7 +650,7 @@ function GoalFormDialog({ open, onOpenChange, accounts, editing, submitting, onS
           <FieldRow label="Note" htmlFor="goal-note" hint="Optional.">
             <Textarea id="goal-note" rows={2} value={note} onChange={(e) => setNote(e.target.value)} />
           </FieldRow>
-          {error ? <p className="text-sm text-negative">{error}</p> : null}
+          {error ? <InlineError>{error}</InlineError> : null}
           <DialogFooter>
             <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
               Cancel
@@ -818,9 +809,9 @@ export function GoalsPage() {
       />
 
       {summary ? (
-        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-          <StatTile label="Active goals" value={summary.activeCount} />
-          <StatTile
+        <StatGroup aria-label="Goals summary">
+          <Stat label="Active goals" value={summary.activeCount} />
+          <Stat
             label={`Required${cadenceLabel ? ` (${cadenceLabel})` : ""}`}
             value={
               summary.goalsWithDeadline > 0 ? (
@@ -829,61 +820,45 @@ export function GoalsPage() {
                 <span className="text-text-subtle">—</span>
               )
             }
-            sparkline={
-              <p className="text-xs text-text-muted">
-                {summary.goalsWithDeadline > 0
-                  ? `across ${summary.goalsWithDeadline} goal${summary.goalsWithDeadline === 1 ? "" : "s"} with a date`
-                  : "No goal has a target date yet."}
-              </p>
+            hint={
+              summary.goalsWithDeadline > 0
+                ? `across ${summary.goalsWithDeadline} goal${summary.goalsWithDeadline === 1 ? "" : "s"} with a date`
+                : "No goal has a target date yet."
             }
           />
-          <StatTile
+          <Stat
             label={`Allocated${cadenceLabel ? ` (${cadenceLabel})` : ""}`}
             value={<Money value={summary.totalAllocatedToGoalsPerPayCents} />}
-            sparkline={
-              <p className="text-xs text-text-muted">
-                {summary.allocationPlan ? `from the ${summary.allocationPlan.name} plan` : "No active allocation"}
-              </p>
-            }
+            hint={summary.allocationPlan ? `from the ${summary.allocationPlan.name} plan` : "No active allocation"}
           />
-          <StatTile
-            className={shortfall > 0 && summary.goalsWithDeadline > 0 ? "bg-negative-soft" : undefined}
+          <Stat
+            tone={shortfall > 0 && summary.goalsWithDeadline > 0 ? "attention" : "default"}
             label="Shortfall"
             value={
               summary.goalsWithDeadline === 0 ? (
                 <span className="text-text-subtle">—</span>
               ) : shortfall > 0 ? (
-                <span className="text-negative">
-                  <Money value={shortfall} />
-                </span>
+                <Money value={shortfall} />
               ) : (
-                <span className="text-positive">
+                <span className="inline-flex items-center gap-1.5">
                   <Money value={0} />
+                  <CheckCircle2Icon className="size-4 shrink-0 text-text-muted" aria-hidden="true" />
                 </span>
               )
             }
-            sparkline={
-              <p className="text-xs text-text-muted">
-                {summary.goalsWithDeadline === 0
-                  ? "Set a target date to see one."
-                  : shortfall > 0
-                    ? "Goals with a date need more than is allocated. Nothing is reprioritised for you."
-                    : "Everything with a date is covered."}
-              </p>
+            hint={
+              summary.goalsWithDeadline === 0
+                ? "Set a target date to see one."
+                : shortfall > 0
+                  ? "Goals with a date need more than is allocated. Nothing is reprioritised for you."
+                  : "Everything with a date is covered."
             }
           />
-        </div>
+        </StatGroup>
       ) : null}
 
       {warnings.length > 0 ? (
-        <div className="flex flex-col gap-2 rounded-(--radius-card) bg-warning-soft p-4">
-          {warnings.map((w, i) => (
-            <p key={i} className="flex items-start gap-2 text-sm text-text">
-              <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
-              {w.message}
-            </p>
-          ))}
-        </div>
+        <NoticeList items={warnings.map((w, i) => ({ key: String(i), content: w.message }))} />
       ) : null}
 
       {isLoading ? (
@@ -906,44 +881,46 @@ export function GoalsPage() {
           }
         />
       ) : summary ? (
-        <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
-          {goals.map((goal) => (
-            <GoalCard
-              key={goal.goal.id}
-              goal={goal}
-              summary={summary}
-              onEdit={() => {
-                setEditing(goal);
-                setFormOpen(true);
-              }}
-              onDelete={async () => {
-                const ok = await confirm({
-                  title: `Delete "${goal.goal.name}"?`,
-                  description: "The goal and its target go; the account and its balance history stay.",
-                  confirmLabel: "Delete",
-                });
-                if (ok) deleteGoal.mutate(goal.goal.id);
-              }}
-              onUpdateBalance={() => setBalanceFor({ accountId: goal.goal.accountId })}
-            />
-          ))}
+        // The list and its footnote are one block: the note explains where
+        // every card's contribution comes from, so it sits with the cards
+        // rather than a full page-gap below them.
+        <div className="flex flex-col gap-3">
+          <div className="grid grid-cols-1 gap-4 md:gap-6 xl:grid-cols-2">
+            {goals.map((goal) => (
+              <GoalCard
+                key={goal.goal.id}
+                goal={goal}
+                summary={summary}
+                onEdit={() => {
+                  setEditing(goal);
+                  setFormOpen(true);
+                }}
+                onDelete={async () => {
+                  const ok = await confirm({
+                    title: `Delete "${goal.goal.name}"?`,
+                    description: "The goal and its target go; the account and its balance history stay.",
+                    confirmLabel: "Delete",
+                  });
+                  if (ok) deleteGoal.mutate(goal.goal.id);
+                }}
+                onUpdateBalance={() => setBalanceFor({ accountId: goal.goal.accountId })}
+              />
+            ))}
+          </div>
+          <p className="px-1 text-xs text-text-subtle">
+            Contributions come from the active allocation
+            {summary.allocationPlan ? ` (${summary.allocationPlan.name})` : ""}, matched by destination account. Goals
+            never write back to it.{" "}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="cursor-help underline decoration-dotted">Why isn&apos;t there an apply button?</span>
+              </TooltipTrigger>
+              <TooltipContent>
+                Because a goal reporting a number and a goal changing your transfers are different things. You decide.
+              </TooltipContent>
+            </Tooltip>
+          </p>
         </div>
-      ) : null}
-
-      {summary && goals.length > 0 ? (
-        <p className="text-xs text-text-subtle">
-          Contributions come from the active allocation
-          {summary.allocationPlan ? ` (${summary.allocationPlan.name})` : ""}, matched by destination account. Goals
-          never write back to it.{" "}
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <span className="cursor-help underline decoration-dotted">Why isn&apos;t there an apply button?</span>
-            </TooltipTrigger>
-            <TooltipContent>
-              Because a goal reporting a number and a goal changing your transfers are different things. You decide.
-            </TooltipContent>
-          </Tooltip>
-        </p>
       ) : null}
 
       <GoalFormDialog

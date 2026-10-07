@@ -32,11 +32,17 @@ const Toaster = ({
       style={
         // Sonner's own `style` type comes from a stricter csstype version
         // with no index signature for custom properties; React's does.
+        //
+        // Raw tokens.css names only. The generated `var(--popover)` named a
+        // property that doesn't exist (only Tailwind's `--color-popover`
+        // does), and an undefined var() here doesn't fall back to Sonner's
+        // white — it overrides it, and every toast rendered see-through over
+        // the figures underneath.
         /** @type {import("react").CSSProperties} */ ({
-          "--normal-bg": "var(--popover)",
-          "--normal-text": "var(--popover-foreground)",
+          "--normal-bg": "var(--surface)",
+          "--normal-text": "var(--text)",
           "--normal-border": "var(--border)",
-          "--border-radius": "var(--radius)"
+          "--border-radius": "var(--radius-control)"
         })
       }
       toastOptions={{

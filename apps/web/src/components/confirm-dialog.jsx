@@ -16,7 +16,6 @@ import {
  *   description?: import("react").ReactNode,
  *   confirmLabel?: string,
  *   cancelLabel?: string,
- *   destructive?: boolean,
  * }} ConfirmOptions
  */
 
@@ -81,10 +80,11 @@ export function ConfirmProvider({ children }) {
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel onClick={() => settle(false)}>{state?.cancelLabel ?? "Cancel"}</AlertDialogCancel>
-            <AlertDialogAction
-              variant={state?.destructive === false ? "default" : "destructive"}
-              onClick={() => settle(true)}
-            >
+            {/* The primary blue, not red, even for a delete: red means money
+                out in this app. The weight is carried by the words — the
+                title names the thing ("Archive Electricity?") and the button
+                names the action ("Archive"), never a bare "OK". */}
+            <AlertDialogAction onClick={() => settle(true)}>
               {state?.confirmLabel ?? "Confirm"}
             </AlertDialogAction>
           </AlertDialogFooter>

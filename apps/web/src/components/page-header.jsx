@@ -2,12 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils.js";
 
 /**
- * Whether the app's one scroll container (`<main>`, see shell/app-shell.jsx)
- * is scrolled away from the top. Used to reveal a sticky header's edge only
+ * Whether the app's one scroll container (`<main>`'s <ScrollArea> viewport,
+ * see shell/app-shell.jsx) is scrolled away from the top. Used to reveal a sticky header's edge only
  * once there is something underneath it — a border and shadow drawn at rest
  * reads as a mistake.
  *
- * Listens on `<main>` rather than the window because the window never
+ * Listens on that viewport rather than the window because the window never
  * scrolls in this app, and an IntersectionObserver sentinel would have to
  * fight the route wrapper's `gap-6` for a position.
  *
@@ -19,7 +19,7 @@ function useScrolled(ref, enabled) {
 
   useEffect(() => {
     if (!enabled) return undefined;
-    const scroller = ref.current?.closest("main");
+    const scroller = ref.current?.closest('[data-slot="scroll-area-viewport"]');
     if (!scroller) return undefined;
     const onScroll = () => setScrolled(scroller.scrollTop > 0);
     onScroll();
@@ -47,16 +47,24 @@ function useScrolled(ref, enabled) {
  *
  * The negative margins let the background reach the scroller's own padding
  * edge, so content passes underneath rather than beside.
+ *
+ * Below `md` the title is visually hidden: the mobile top bar already names
+ * the page one line above, and saying it twice spends the most valuable 40px
+ * on a phone. It stays in the document as the page's one h1. A header with
+ * nothing else to show leaves the flow entirely there, so it doesn't leave a
+ * gap's worth of empty space at the top of the page either.
  */
 export function PageHeader({ title, description, actions, sticky = false, className }) {
   const ref = useRef(/** @type {HTMLDivElement | null} */ (null));
   const scrolled = useScrolled(ref, sticky);
+  const titleOnly = !description && !actions;
 
   return (
     <div
       ref={ref}
       className={cn(
-        "flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between",
+        "flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-6",
+        titleOnly && !sticky && "max-md:sr-only",
         sticky && [
           // The horizontal negative margins are what let the background reach
           // the scroller's padding edge. There are deliberately no vertical
@@ -82,15 +90,17 @@ export function PageHeader({ title, description, actions, sticky = false, classN
       )}
     >
       <div className="min-w-0">
-        <h1 className="text-xl font-semibold text-text sm:text-2xl">
+        <h1 className="text-2xl font-semibold text-text max-md:sr-only">
           {title}
         </h1>
         {description ? (
-          <p className="mt-1 text-sm text-text-muted">{description}</p>
+          // A measure, not the full column: at 1440px an unbounded line runs
+          // past 150 characters and the eye loses its way back.
+          <p className="max-w-3xl text-sm text-pretty text-text-muted md:mt-1">{description}</p>
         ) : null}
       </div>
       {actions ? (
-        <div className="flex shrink-0 items-center gap-2">{actions}</div>
+        <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div>
       ) : null}
     </div>
   );

@@ -110,9 +110,13 @@ export function createAccountsRoutes({ db }) {
       }
 
       // Pre-check for a friendly message; the partial unique index on
-      // accounts.is_income_landing is the actual guarantee under a race.
+      // accounts.is_income_landing is the actual guarantee under a race. Live
+      // rows only, matching that index.
       if (data.isIncomeLanding) {
-        const existing = await db.$count(accounts, eq(accounts.isIncomeLanding, true));
+        const existing = await db.$count(
+          accounts,
+          and(eq(accounts.isIncomeLanding, true), isNull(accounts.archivedAt)),
+        );
         if (existing > 0) return c.json(INCOME_LANDING_CONFLICT, 400);
       }
 
@@ -183,7 +187,18 @@ export function createAccountsRoutes({ db }) {
       }
 
       if (data.isIncomeLanding) {
-        const existing = await db.$count(accounts, and(eq(accounts.isIncomeLanding, true), ne(accounts.id, id)));
+        // The index no longer covers archived rows, so it would let an archived
+        // account hold the flag beside a live one.
+        if (current.archivedAt) {
+          return c.json(
+            { error: { code: "archived", message: "An archived account can't be the income-landing account." } },
+            400,
+          );
+        }
+        const existing = await db.$count(
+          accounts,
+          and(eq(accounts.isIncomeLanding, true), isNull(accounts.archivedAt), ne(accounts.id, id)),
+        );
         if (existing > 0) return c.json(INCOME_LANDING_CONFLICT, 400);
       }
 
@@ -211,11 +226,18 @@ export function createAccountsRoutes({ db }) {
     // Archive — never a hard delete. An account referenced by an
     // allocation line, goal or snapshot must stay resolvable so historic
     // records keep rendering a name (phases/04-accounts-people.md).
+    //
+    // Archiving the income-landing account also gives up the flag, for the
+    // reason pay-schedules.js gives for the primary flag: left set, it blocked
+    // every other account from taking it from a row nobody could see.
     .delete("/:id", async (c) => {
       const id = c.req.param("id");
+      const current = await db.query.accounts.findFirst({
+        where: (a, { and: andCol, eq: eqCol, isNull: isNullCol }) => andCol(eqCol(a.id, id), isNullCol(a.archivedAt)),
+      });
       const [archived] = await db
         .update(accounts)
-        .set({ archivedAt: new Date() })
+        .set({ archivedAt: new Date(), isIncomeLanding: false })
         .where(and(eq(accounts.id, id), isNull(accounts.archivedAt)))
         .returning();
       if (!archived) {
@@ -226,6 +248,7 @@ export function createAccountsRoutes({ db }) {
         action: "account.archive",
         entityType: "account",
         entityId: id,
+        metadata: { wasIncomeLanding: current?.isIncomeLanding ?? false },
       });
       return c.json({ ok: true });
     })

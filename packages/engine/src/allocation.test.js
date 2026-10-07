@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { computeAllocation, diffAllocations } from "./allocation.js";
+import { equivalent } from "./cadence.js";
 import { toCents } from "./money.js";
 import { mustAt, mustFind } from "./invariant.js";
 
@@ -133,6 +134,27 @@ describe("computeAllocation", () => {
     expect(result.goodLifeFidelityCents).toBe(toCents(-2500));
   });
 
+  it("measures Good Life against what is left after section B when there is no section C yet", () => {
+    /** @type {AllocationLine[]} */
+    const lines = [
+      { id: "fixed", stage: 1, label: "Fixed", basis: "from_fixed_costs", value: null, goalPct: null, accountId: "bills" },
+      { id: "save", stage: 2, label: "Save", basis: "pct_of_gross", value: 20, goalPct: null, accountId: "save" },
+    ];
+    const result = computeAllocation(
+      baseInput({
+        lines,
+        fixedTotalPerMonthCents: toCents(5000),
+        variableEssentialsPerMonthCents: 0,
+        variableNonEssentialPerMonthCents: toCents(2500),
+      }),
+    );
+    // $3,000 is left once the 20% saving is out, so $2,500 of aspiration has
+    // $500 of headroom. Measured from stage 2's ENTRY — which still has the
+    // saving in it — this read as $2,500 of headroom.
+    expect(result.unallocatedPerMonthCents).toBe(toCents(3000));
+    expect(result.goodLifeFidelityCents).toBe(toCents(-500));
+  });
+
   it("reports a positive unallocated amount when the lines don't sum to 100%, instead of it vanishing", () => {
     /** @type {AllocationLine[]} */
     const lines = [
@@ -178,6 +200,77 @@ describe("computeAllocation", () => {
     expect(mustFind(resultA.lines, (l) => l.lineId === "b").perMonthCents).toBe(
       mustFind(resultB.lines, (l) => l.lineId === "b").perMonthCents,
     );
+  });
+});
+
+describe("computeAllocation over-allocation", () => {
+  it("is null for a plan that fits inside gross", () => {
+    expect(computeAllocation(baseInput()).overAllocation).toBeNull();
+  });
+
+  it("flags a shortfall a sweep would otherwise hide", () => {
+    // Gross $5,000 against $5,500 of needs and a 10% saving. The sweep lines
+    // absorb the gap, so unallocated reads zero and the transfers still sum
+    // to gross — the only trace is two negative transfers.
+    const result = computeAllocation(
+      baseInput({
+        grossPerMonthCents: toCents(5000),
+        payCadence: "fortnightly",
+        fixedTotalPerMonthCents: toCents(4000),
+        variableEssentialsPerMonthCents: toCents(1500),
+        lines: [
+          { id: "fixed", stage: 1, label: "Fixed", basis: "from_fixed_costs", value: null, goalPct: null, accountId: "bills" },
+          { id: "variable", stage: 1, label: "Variable", basis: "from_variable_essentials", value: null, goalPct: null, accountId: "spending" },
+          { id: "save", stage: 2, label: "Save", basis: "pct_of_gross", value: 10, goalPct: null, accountId: "save" },
+          { id: "sweep_a", stage: 3, label: "Sweep A", basis: "sweep", value: 1, goalPct: null, accountId: "x" },
+          { id: "sweep_b", stage: 3, label: "Sweep B", basis: "sweep", value: 1, goalPct: null, accountId: "y" },
+        ],
+      }),
+    );
+
+    expect(result.unallocatedPerMonthCents).toBe(0);
+    expect(result.overAllocation).toEqual({
+      // Stage 1 overspends by $500, stage 2's saving takes it to $1,000.
+      shortfallPerMonthCents: toCents(1000),
+      shortfallPerPayCents: equivalent(toCents(1000), "monthly", "fortnightly"),
+      negativeLineIds: ["sweep_a", "sweep_b"],
+      negativeStages: [1, 2],
+    });
+  });
+
+  it("flags a plan whose percentages run past gross, with no sweep to absorb it", () => {
+    const result = computeAllocation(
+      baseInput({
+        lines: [
+          { id: "a", stage: 2, label: "A", basis: "pct_of_gross", value: 80, goalPct: null, accountId: "x" },
+          { id: "b", stage: 2, label: "B", basis: "pct_of_gross", value: 50, goalPct: null, accountId: "y" },
+        ],
+      }),
+    );
+
+    expect(result.unallocatedPerMonthCents).toBe(toCents(-3000));
+    expect(result.overAllocation).toMatchObject({
+      shortfallPerMonthCents: toCents(3000),
+      negativeLineIds: [],
+      negativeStages: [2],
+    });
+  });
+
+  it("flags a line below zero even while every stage stays in credit", () => {
+    const result = computeAllocation(
+      baseInput({
+        lines: [
+          { id: "refund", stage: 2, label: "Refund", basis: "fixed_amount", value: -5000, goalPct: null, accountId: "x" },
+        ],
+      }),
+    );
+
+    expect(result.overAllocation).toEqual({
+      shortfallPerMonthCents: 0,
+      shortfallPerPayCents: 0,
+      negativeLineIds: ["refund"],
+      negativeStages: [],
+    });
   });
 });
 

@@ -23,6 +23,11 @@ export function isBalanced(result) {
  * silently broken because one row had no formula, so non-zero has to feel
  * wrong immediately (phases/08-allocation.md "The invariant indicator").
  *
+ * "Wrong" is amber — needs a look — not red. Unallocated money isn't money
+ * going out, and red here used to compete with every bill on the dashboard.
+ * Balanced is a plain card with a check and the word: green is for money in,
+ * and "everything is fine" is simply the absence of amber.
+ *
  * Shared rather than per-screen: /allocation and the dashboard both show it,
  * and two indicators that disagreed about what "balanced" means would defeat
  * the point of having one (phases/10-dashboard.md "Unallocated": "Same
@@ -45,24 +50,25 @@ export function UnallocatedIndicator({ result, payCadence, hasPrimaryPaySchedule
     <div
       className={cn(
         "flex flex-col gap-1 rounded-(--radius-card) px-5 py-4 shadow-(--shadow-card)",
-        balanced ? "bg-positive-soft" : zeroUnallocated ? "bg-warning-soft" : "bg-negative-soft",
+        balanced ? "bg-surface" : "bg-warning-soft",
       )}
       aria-live="polite"
     >
       <div className="flex items-center justify-between gap-3">
         <p className="text-xs font-medium tracking-wide text-text-muted uppercase">Unallocated</p>
         {balanced ? (
-          <CheckIcon className="size-5 text-positive" aria-label="Balanced" />
+          <span className="flex items-center gap-1 text-sm font-medium text-text-muted">
+            <CheckIcon className="size-4" aria-hidden="true" />
+            Balanced
+          </span>
         ) : (
-          <AlertTriangleIcon className="size-5 text-negative" aria-hidden="true" />
+          <span className="flex items-center gap-1 text-sm font-medium text-warning-strong">
+            <AlertTriangleIcon className="size-4" aria-hidden="true" />
+            Needs a look
+          </span>
         )}
       </div>
-      <p
-        className={cn(
-          "text-2xl font-bold tracking-tight",
-          balanced ? "text-positive" : zeroUnallocated ? "text-text" : "text-negative",
-        )}
-      >
+      <p className="text-2xl font-bold tracking-tight text-text">
         <Money value={cents} signed={!zeroUnallocated} />
         <span className="ml-1.5 text-sm font-medium text-text-muted">/month</span>
       </p>
@@ -80,7 +86,7 @@ export function UnallocatedIndicator({ result, payCadence, hasPrimaryPaySchedule
         </p>
       ) : null}
       {negativeLines.length > 0 ? (
-        <p className="text-sm text-negative">
+        <p className="text-sm text-text">
           {negativeLines.length} line{negativeLines.length === 1 ? "" : "s"} resolve{negativeLines.length === 1 ? "s" : ""}{" "}
           to a negative amount — an earlier stage is taking more than the one before it leaves.
         </p>

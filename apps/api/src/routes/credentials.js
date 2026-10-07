@@ -1,8 +1,8 @@
-import { credentials, renameCredentialSchema } from "@budget/schema";
+import { credentials, renameCredentialSchema, sessions } from "@budget/schema";
 import { zValidator } from "@hono/zod-validator";
-import { and, eq } from "drizzle-orm";
+import { and, eq, gt, isNull, ne } from "drizzle-orm";
 import { Hono } from "hono";
-import { getUserId } from "../lib/app-env.js";
+import { getSessionId, getUserId } from "../lib/app-env.js";
 import { writeAuditLog } from "../lib/audit.js";
 import { handleValidation } from "../lib/validation.js";
 
@@ -47,8 +47,16 @@ export function createCredentialsRoutes({ db }) {
 
     // A user may not delete their own last credential — that's a
     // self-lockout (phases/03-auth.md).
+    //
+    // Removing one also signs out every OTHER session the user has. A
+    // session is not tied to the passkey that opened it, so there is no
+    // telling which ones the lost phone holds — and leaving them would keep
+    // that phone signed in for up to 30 days after its passkey is gone. The
+    // session making this request survives: it is the device the user still
+    // has in their hand (a recovery session included).
     .delete("/:id", async (c) => {
       const userId = getUserId(c);
+      const currentSessionId = getSessionId(c);
       const id = c.req.param("id");
 
       const remaining = await db.$count(credentials, eq(credentials.userId, userId));
@@ -64,11 +72,28 @@ export function createCredentialsRoutes({ db }) {
         );
       }
 
-      const [deleted] = await db
-        .delete(credentials)
-        .where(and(eq(credentials.id, id), eq(credentials.userId, userId)))
-        .returning();
-      if (!deleted) {
+      const revokedSessions = await db.transaction(async (tx) => {
+        const [deleted] = await tx
+          .delete(credentials)
+          .where(and(eq(credentials.id, id), eq(credentials.userId, userId)))
+          .returning();
+        if (!deleted) return null;
+        const now = new Date();
+        const revoked = await tx
+          .update(sessions)
+          .set({ revokedAt: now })
+          .where(
+            and(
+              eq(sessions.userId, userId),
+              ne(sessions.id, currentSessionId),
+              isNull(sessions.revokedAt),
+              gt(sessions.expiresAt, now),
+            ),
+          )
+          .returning({ id: sessions.id });
+        return revoked.length;
+      });
+      if (revokedSessions === null) {
         return c.json({ error: { code: "not_found", message: "Device not found." } }, 404);
       }
 
@@ -77,7 +102,8 @@ export function createCredentialsRoutes({ db }) {
         action: "credential.remove",
         entityType: "credential",
         entityId: id,
+        metadata: { revokedSessions },
       });
-      return c.json({ ok: true });
+      return c.json({ ok: true, revokedSessions });
     });
 }

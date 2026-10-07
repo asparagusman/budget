@@ -181,7 +181,7 @@ const variableCostsRoute = createRoute({
 });
 
 // Not in NAV_ITEMS — reached by tapping a bill on /costs/fixed, not from the
-// sidebar/bottom nav/command palette's Navigation group directly.
+// sidebar/mobile menu/command palette's Navigation group directly.
 const billHistoryRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/costs/fixed/$billId/history",
@@ -214,7 +214,7 @@ const projectionsRoute = createRoute({
 });
 
 // The one-time spreadsheet migration. Deliberately not in NAV_ITEMS — a tool
-// used once does not earn a permanent slot in a five-item bottom nav — so it
+// used once does not earn a permanent slot in the nav — so it
 // is reached from Admin and from the command palette (AppShell registers
 // the command).
 const importRoute = createRoute({
@@ -230,7 +230,7 @@ const calendarRoute = createRoute({
 });
 
 // Hidden dev route — deliberately not in NAV_ITEMS, so it never appears in
-// the sidebar, the bottom nav or the command palette.
+// the sidebar, the mobile menu or the command palette.
 const devChartsRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/dev/charts",

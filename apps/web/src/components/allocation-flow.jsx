@@ -6,10 +6,10 @@ import {
   ChartLegendContent,
   ChartTooltip,
   MoneyTooltip,
-  SERIES,
   useChartMotion,
 } from "@/components/chart.jsx";
 import { Money } from "@/components/money.jsx";
+import { colorFor, entityColors } from "@/lib/entity-colors.js";
 import { formatMoney } from "@/lib/format-money.js";
 import { LG, useMediaQuery } from "@/lib/use-media-query.js";
 import { useSettings } from "@/lib/settings.jsx";
@@ -59,6 +59,9 @@ export function accountName(accounts, accountId) {
 export function AllocationPie({ result, accounts, height = 300, heading = "Where the money goes" }) {
   const { currency, locale } = useSettings();
   const motion = useChartMotion();
+  // Every account the caller knows, not just the ones with a slice, so each
+  // wears the colour it wears on /projections.
+  const colors = useMemo(() => entityColors(accounts.map((a) => a.id)), [accounts]);
 
   const { slices, config } = useMemo(() => {
     /** @type {{ name: string, value: number, fill: string }[]} */
@@ -69,17 +72,17 @@ export function AllocationPie({ result, accounts, height = 300, heading = "Where
       rows.push({
         name: accountName(accounts, transfer.accountId),
         value: transfer.perMonthCents / 100,
-        // `?? SERIES[0]` only to satisfy `noUncheckedIndexedAccess` — the
-        // modulo already guarantees the index is in range.
-        fill: SERIES[rows.length % SERIES.length] ?? SERIES[0],
+        fill: colorFor(colors, transfer.accountId),
       });
     }
 
+    // Amber, like the indicator: money nobody has given a job is a "needs a
+    // look", not a destination.
     if (result.unallocatedPerMonthCents > 0) {
       rows.push({
         name: "Unallocated",
         value: result.unallocatedPerMonthCents / 100,
-        fill: "var(--text-subtle)",
+        fill: "var(--warning)",
       });
     }
 
@@ -92,7 +95,7 @@ export function AllocationPie({ result, accounts, height = 300, heading = "Where
     for (const row of rows) byName[row.name] = { label: row.name };
 
     return { slices: rows, config: byName };
-  }, [result, accounts]);
+  }, [result, accounts, colors]);
 
   return (
     <div className="flex flex-col gap-3">
@@ -146,30 +149,32 @@ export function AllocationPie({ result, accounts, height = 300, heading = "Where
  */
 export function AllocationProportionBar({ result, accounts, heading = "Where the money goes" }) {
   const positive = result.transfers.filter((t) => t.perMonthCents > 0);
+  // The same per-account colours as the pie, so the two halves agree.
+  const colors = useMemo(() => entityColors(accounts.map((a) => a.id)), [accounts]);
 
   return (
     <div className="flex flex-col gap-3">
       {heading ? <h3 className="text-sm font-semibold text-text">{heading}</h3> : null}
       <div className="flex h-3 w-full overflow-hidden rounded-full bg-surface-muted">
-        {positive.map((transfer, index) => (
+        {positive.map((transfer) => (
           <div
             key={transfer.accountId}
             className="h-full"
             style={{
               flexGrow: transfer.perMonthCents,
-              backgroundColor: `var(--chart-line-${(index % 5) + 1})`,
+              backgroundColor: colorFor(colors, transfer.accountId),
             }}
             title={accountName(accounts, transfer.accountId)}
           />
         ))}
       </div>
       <ul className="flex flex-col gap-1.5 text-sm">
-        {positive.map((transfer, index) => (
+        {positive.map((transfer) => (
           <li key={transfer.accountId} className="flex items-center justify-between gap-2">
             <span className="flex min-w-0 items-center gap-2">
               <span
                 className="size-2.5 shrink-0 rounded-full"
-                style={{ backgroundColor: `var(--chart-line-${(index % 5) + 1})` }}
+                style={{ backgroundColor: colorFor(colors, transfer.accountId) }}
                 aria-hidden="true"
               />
               <span className="truncate text-text">{accountName(accounts, transfer.accountId)}</span>
@@ -196,13 +201,15 @@ export function AllocationProportionBar({ result, accounts, heading = "Where the
  * Both halves now say the same thing — the division of income by
  * destination — where the desktop half used to say something else entirely.
  *
- * @param {{ result: AllocationResult, accounts: FlowAccount[], heading?: import("react").ReactNode }} props
+ * `height` sizes the desktop pie only; the narrow bar is as tall as its list.
+ *
+ * @param {{ result: AllocationResult, accounts: FlowAccount[], heading?: import("react").ReactNode, height?: number }} props
  */
-export function AllocationFlow({ result, accounts, heading }) {
+export function AllocationFlow({ result, accounts, heading, height }) {
   const isDesktop = useMediaQuery(LG);
 
   return isDesktop ? (
-    <AllocationPie result={result} accounts={accounts} heading={heading} />
+    <AllocationPie result={result} accounts={accounts} heading={heading} height={height} />
   ) : (
     <AllocationProportionBar result={result} accounts={accounts} heading={heading} />
   );

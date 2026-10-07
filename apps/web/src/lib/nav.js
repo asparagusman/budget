@@ -11,14 +11,16 @@ import {
   Wallet,
 } from "lucide-react";
 
-/** @typedef {{ to: string, label: string, icon: import("lucide-react").LucideIcon, phase: string, chord: string }} NavItem */
+/** @typedef {{ to: string, label: string, icon: import("lucide-react").LucideIcon, phase: string, chord: string, section?: string }} NavItem */
 
 // The single source of truth for every navigable destination — the desktop
-// sidebar, the mobile bottom nav + "More" sheet, and the command palette's
-// Navigation group all render from this list rather than each hand-rolling
-// their own copy. `chord` is the letter that follows a `g` chord press
-// (see command-palette.jsx) — chosen for uniqueness, not always the first
-// letter of the label, since several labels collide on that.
+// sidebar, the mobile menu drawer, and the command palette's Navigation group
+// all render from this list rather than each hand-rolling their own copy.
+// `chord` is the letter that follows a `g` chord press (see
+// command-palette.jsx) — chosen for uniqueness, not always the first letter
+// of the label, since several labels collide on that. `section` is set only
+// where the entry's pages live under a different prefix than `to` itself
+// (see activeNavItem).
 /** @type {NavItem[]} */
 export const NAV_ITEMS = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, phase: "10", chord: "d" },
@@ -38,7 +40,7 @@ export const NAV_ITEMS = [
   // Settings dropdown, which is a menu rather than a destination — so
   // nothing in NAV_ITEMS points at /settings any more. "m" for adMin: "a"
   // is Accounts and "s" no longer names a page.
-  { to: "/admin/users", label: "Admin", icon: ShieldCheck, phase: "03", chord: "m" },
+  { to: "/admin/users", label: "Admin", icon: ShieldCheck, phase: "03", chord: "m", section: "/admin" },
 ];
 
 // Routes that are deliberately NOT in NAV_ITEMS but still need a name in the
@@ -59,9 +61,27 @@ const EXTRA_TITLES = [
 export function pageTitle(pathname) {
   const navItem = NAV_ITEMS.find((item) => item.to === pathname);
   if (navItem) return navItem.label;
-  return EXTRA_TITLES.find(([prefix]) => pathname.startsWith(prefix))?.[1] ?? "Budget";
+  return (
+    EXTRA_TITLES.find(([prefix]) => pathname.startsWith(prefix))?.[1] ??
+    activeNavItem(pathname)?.label ??
+    "Budget"
+  );
 }
 
-// The five destinations that get a permanent slot in the mobile bottom nav.
-// Everything else in NAV_ITEMS surfaces through the "More" sheet.
-export const MOBILE_PRIMARY_PATHS = ["/", "/costs/fixed", "/allocation", "/goals"];
+/**
+ * The nav entry `pathname` belongs to: its own page, or a page beneath it —
+ * a bill's history under Fixed Costs, any admin tab under Admin. Exact
+ * matching alone left those pages highlighting nothing in the sidebar and
+ * the mobile menu, which is exactly when someone needs telling where they
+ * are. "/" only ever matches itself, since every path starts with it.
+ *
+ * @param {string} pathname
+ */
+export function activeNavItem(pathname) {
+  const exact = NAV_ITEMS.find((item) => item.to === pathname);
+  if (exact) return exact;
+  return NAV_ITEMS.find((item) => {
+    const base = item.section ?? item.to;
+    return base !== "/" && pathname.startsWith(`${base}/`);
+  });
+}

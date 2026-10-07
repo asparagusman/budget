@@ -92,6 +92,20 @@
       "when": 1788355820657,
       "tag": "0012_sleepy_shard",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1791355581388,
+      "tag": "0013_clear_flags_on_archived_rows",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1791355597227,
+      "tag": "0014_archive_aware_flags_due_dates_applied_snapshot",
+      "breakpoints": true
     }
   ]
 }

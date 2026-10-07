@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { addDaysIso } from "@budget/engine";
-import { AlertTriangleIcon, BanknoteIcon, InfoIcon, TrendingUpIcon } from "lucide-react";
+import { BanknoteIcon, InfoIcon, TrendingUpIcon } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button.jsx";
 import { Input } from "@/components/ui/input.jsx";
@@ -16,8 +16,9 @@ import {
   ChartLegendContent,
   ChartTooltip,
   MoneyTooltip,
-  SERIES,
+  PROJECTED,
   TIME_AXIS,
+  TOTAL,
   isoToMs,
   useChartMotion,
   useMoneyTick,
@@ -26,17 +27,19 @@ import {
 import { DataList, DataListRow } from "@/components/data-list.jsx";
 import { EmptyState } from "@/components/empty-state.jsx";
 import { PanelSkeleton } from "@/components/loading.jsx";
-import { FieldRow } from "@/components/field-row.jsx";
 import { Money } from "@/components/money.jsx";
+import { NoticeList } from "@/components/notice.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
+import { PageSection } from "@/components/page-section.jsx";
 import { QuickBalanceSheet } from "@/components/quick-balance-sheet.jsx";
-import { StatTile } from "@/components/stat-tile.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
 import { registerCommands } from "@/lib/commands.js";
 import { formatIsoDate, todayIso } from "@/lib/dates.js";
+import { colorFor, entityColors } from "@/lib/entity-colors.js";
 import { formatMoney } from "@/lib/format-money.js";
 import { useSettings } from "@/lib/settings.jsx";
+import { ScrollArea } from "@/components/scroll-area.jsx";
 
 /** @import { Cents } from "@budget/engine" */
 
@@ -135,11 +138,11 @@ function GrowthRateInput({ account, saving, onSave }) {
  */
 function ProjectionsTable({ projections, savingId, onSaveRate }) {
   return (
-    <div className="overflow-x-auto rounded-(--radius-card) bg-surface shadow-(--shadow-card)">
+    <ScrollArea axis="x" className="rounded-(--radius-card) bg-surface shadow-(--shadow-card)">
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b border-border text-left text-xs text-text-muted">
-            <th className="px-4 py-3 font-medium">Account</th>
+            <th className="sticky left-0 z-10 bg-surface px-4 py-3 font-medium">Account</th>
             <th className="px-3 py-3 text-right font-medium">Balance</th>
             <th className="px-3 py-3 text-right font-medium">Contribution</th>
             <th className="px-3 py-3 font-medium whitespace-nowrap">Growth (p.a.)</th>
@@ -153,7 +156,7 @@ function ProjectionsTable({ projections, savingId, onSaveRate }) {
         <tbody className="divide-y divide-border">
           {projections.accounts.map((account) => (
             <tr key={account.id}>
-              <td className="px-4 py-3 whitespace-nowrap">
+              <td className="sticky left-0 z-10 bg-surface px-4 py-3 whitespace-nowrap">
                 <p className="font-medium text-text">{account.name}</p>
                 <p className="text-xs text-text-subtle">
                   {account.currentBalanceAsAt
@@ -185,7 +188,7 @@ function ProjectionsTable({ projections, savingId, onSaveRate }) {
         </tbody>
         <tfoot>
           <tr className="border-t border-border text-xs">
-            <td className="px-4 py-3 font-medium whitespace-nowrap text-text-muted">
+            <td className="sticky left-0 z-10 bg-surface px-4 py-3 font-medium whitespace-nowrap text-text-muted">
               Household total
               <span className="block text-xs font-normal text-text-subtle">savings &amp; investment only</span>
             </td>
@@ -202,7 +205,7 @@ function ProjectionsTable({ projections, savingId, onSaveRate }) {
           </tr>
         </tfoot>
       </table>
-    </div>
+    </ScrollArea>
   );
 }
 
@@ -215,9 +218,14 @@ function ProjectionsTable({ projections, savingId, onSaveRate }) {
 function ProjectionCards({ projections, horizon, onHorizonChange, savingId, onSaveRate }) {
   return (
     <div className="flex flex-col gap-3">
-      <FieldRow label="Show value at" htmlFor="projection-horizon" className="w-44">
+      {/* Inline, the same shape as the section's Horizon control above it,
+          so the two read as a pair of settings rather than a form. */}
+      <div className="flex items-center gap-2">
+        <label htmlFor="projection-horizon" className="text-sm text-text-muted">
+          Show value at
+        </label>
         <Select value={String(horizon)} onValueChange={(v) => onHorizonChange(Number(v))}>
-          <SelectTrigger id="projection-horizon" className="w-full">
+          <SelectTrigger id="projection-horizon" className="w-32">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -228,7 +236,7 @@ function ProjectionCards({ projections, horizon, onHorizonChange, savingId, onSa
             ))}
           </SelectContent>
         </Select>
-      </FieldRow>
+      </div>
 
       <div className="flex flex-col divide-y divide-border rounded-(--radius-card) bg-surface shadow-(--shadow-card)">
         {projections.accounts.map((account) => (
@@ -311,47 +319,37 @@ function NetWorthPanel({ netWorth, loading, onUpdateBalance }) {
   const timeAxis = useTimeAxis(rows[0]?.t ?? 0, rows[rows.length - 1]?.t ?? 0);
 
   return (
-    <section className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <h2 className="text-lg font-semibold text-text">Net worth</h2>
+    <PageSection
+      title="Net worth"
+      actions={
         <Button size="sm" variant="outline" onClick={onUpdateBalance}>
           <BanknoteIcon />
           Update balance
         </Button>
-      </div>
-
-      <div className="grid grid-cols-2 gap-4">
-        <StatTile
-          label="Now"
-          value={
-            latest ? (
-              <span className="text-2xl sm:text-3xl">
-                <Money value={latest.totalCents} />
-              </span>
-            ) : (
-              <span className="text-text-subtle">—</span>
-            )
-          }
-          sparkline={
-            <p className="text-xs text-text-muted">
+      }
+    >
+      {/* One surface: the two figures are the chart's own headline, not
+          separate objects beside it. */}
+      <div className="flex flex-col gap-4 rounded-(--radius-card) bg-surface p-4 shadow-(--shadow-card) md:p-5">
+        <dl className="grid grid-cols-2 gap-x-6 gap-y-1">
+          <div className="row-span-3 grid min-w-0 grid-rows-subgrid gap-y-1">
+            <dt className="text-xs font-medium tracking-wide text-text-subtle uppercase">Now</dt>
+            <dd className="self-end text-2xl font-bold tracking-tight text-text tabular-nums sm:text-3xl">
+              {latest ? <Money value={latest.totalCents} /> : <span className="text-text-subtle">—</span>}
+            </dd>
+            <dd className="text-xs text-pretty text-text-muted">
               Excludes external accounts — money sent out isn&apos;t net worth.
-            </p>
-          }
-        />
-        <StatTile
-          label="Oldest balance"
-          value={
-            oldestAsAt ? (
-              <span className="text-2xl sm:text-3xl">{formatIsoDate(oldestAsAt, locale)}</span>
-            ) : (
-              <span className="text-text-subtle">—</span>
-            )
-          }
-          sparkline={<p className="text-xs text-text-muted">Balances are carried forward, never interpolated.</p>}
-        />
-      </div>
+            </dd>
+          </div>
+          <div className="row-span-3 grid min-w-0 grid-rows-subgrid gap-y-1">
+            <dt className="text-xs font-medium tracking-wide text-text-subtle uppercase">Oldest balance</dt>
+            <dd className="self-end text-xl font-semibold tracking-tight text-text sm:text-2xl">
+              {oldestAsAt ? formatIsoDate(oldestAsAt, locale) : <span className="text-text-subtle">—</span>}
+            </dd>
+            <dd className="text-xs text-pretty text-text-muted">Balances are carried forward, never interpolated.</dd>
+          </div>
+        </dl>
 
-      <div className="rounded-(--radius-card) bg-surface p-5 shadow-(--shadow-card)">
         <Chart
           loading={loading}
           empty={points.length < 2}
@@ -367,7 +365,7 @@ function NetWorthPanel({ netWorth, loading, onUpdateBalance }) {
           }}
           emptyTitle="Not enough history yet"
           emptyDescription="Record a balance on two different dates to see net worth move."
-          config={{ netWorth: { label: "Net worth", color: SERIES[0] } }}
+          config={{ netWorth: { label: "Net worth", color: TOTAL } }}
         >
           <AreaChart data={rows} margin={{ top: 16, right: 12, bottom: 0, left: 0 }}>
             <CartesianGrid vertical={false} />
@@ -390,7 +388,7 @@ function NetWorthPanel({ netWorth, loading, onUpdateBalance }) {
           </AreaChart>
         </Chart>
       </div>
-    </section>
+    </PageSection>
   );
 }
 
@@ -489,6 +487,12 @@ export function ProjectionsPage() {
   const projections = projectionsQuery.data ?? null;
   const netWorth = netWorthQuery.data ?? null;
   const accounts = accountsQuery.data ?? [];
+  // Every account, not just the projected ones, so each keeps the colour it
+  // wears on every other chart.
+  const accountColors = useMemo(
+    () => entityColors((accountsQuery.data ?? []).map((account) => account.id)),
+    [accountsQuery.data],
+  );
 
   // Every series draws from one row array, so each account becomes a COLUMN
   // on the row for its month. Keyed `account0`, `account1`, … rather than by
@@ -499,9 +503,9 @@ export function ProjectionsPage() {
     const totals = projections?.totalSeries ?? [];
 
     /** @type {import("@/components/ui/chart.jsx").ChartConfig} */
-    const config = { total: { label: "Household total", color: "var(--text)" } };
+    const config = { total: { label: "Household total", color: TOTAL } };
     accountSeries.forEach((account, i) => {
-      config[`account${i}`] = { label: account.name, color: SERIES[i % SERIES.length] };
+      config[`account${i}`] = { label: account.name, color: colorFor(accountColors, account.id) };
     });
 
     const rows = totals.map((point, index) => {
@@ -519,32 +523,13 @@ export function ProjectionsPage() {
     });
 
     return { chartConfig: config, chartRows: rows };
-  }, [projections]);
+  }, [projections, accountColors]);
 
   return (
     <>
       <PageHeader
         title="Projections"
         description="Where each account lands at your current contributions and one flat growth rate. A projection, not a promise — nothing here writes anything."
-        actions={
-          <FieldRow label="Horizon" htmlFor="projection-months" className="w-36">
-            <Select
-              value={months}
-              onValueChange={(v) => setMonths(/** @type {(typeof HORIZON_OPTIONS)[number]} */ (v))}
-            >
-              <SelectTrigger id="projection-months" className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {HORIZON_OPTIONS.map((h) => (
-                  <SelectItem key={h} value={h}>
-                    {h} months
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </FieldRow>
-        }
       />
 
       {netWorth ? (
@@ -556,23 +541,16 @@ export function ProjectionsPage() {
       ) : null}
 
       {projections?.warnings.length ? (
-        <div className="flex flex-col gap-2 rounded-(--radius-card) bg-warning-soft p-4">
-          {projections.warnings.map((w, i) => (
-            <p key={i} className="flex items-start gap-2 text-sm text-text">
-              <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
-              {w.message}
-            </p>
-          ))}
-        </div>
+        <NoticeList items={projections.warnings.map((w, i) => ({ key: String(i), content: w.message }))} />
       ) : null}
 
-      <section className="flex flex-col gap-4">
-        <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <h2 className="text-lg font-semibold text-text">Projected balances</h2>
-          <p className="flex items-center gap-1.5 text-xs text-text-muted">
+      <PageSection
+        title="Projected balances"
+        description={
+          <span className="inline-flex items-center gap-1.5">
             <Tooltip>
               <TooltipTrigger asChild>
-                <InfoIcon className="size-3.5 text-text-subtle" aria-label="Which accounts are projected?" />
+                <InfoIcon className="size-3.5 shrink-0 text-text-subtle" aria-label="Which accounts are projected?" />
               </TooltipTrigger>
               <TooltipContent>
                 Savings and investment accounts only. A transaction account&apos;s allocation is spent, not
@@ -582,9 +560,34 @@ export function ProjectionsPage() {
             {projections?.allocationPlan
               ? `Contributions from the ${projections.allocationPlan.name} allocation`
               : "No active allocation — contributions read as zero"}
-          </p>
-        </div>
-
+          </span>
+        }
+        actions={
+          // The horizon only changes this section — the table's columns and
+          // the chart's length — so it sits here rather than in the page
+          // header, above a net worth panel it does nothing to.
+          <div className="flex items-center gap-2">
+            <label htmlFor="projection-months" className="text-sm text-text-muted">
+              Horizon
+            </label>
+            <Select
+              value={months}
+              onValueChange={(v) => setMonths(/** @type {(typeof HORIZON_OPTIONS)[number]} */ (v))}
+            >
+              <SelectTrigger id="projection-months" className="w-32">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {HORIZON_OPTIONS.map((h) => (
+                  <SelectItem key={h} value={h}>
+                    {h} months
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        }
+      >
         {projectionsQuery.isLoading ? (
           <PanelSkeleton height={320} label="Loading projections" />
         ) : !projections || projections.accounts.length === 0 ? (
@@ -616,7 +619,7 @@ export function ProjectionsPage() {
                 it is `hidden` below md and the mobile cards show one horizon
                 at a time — so the chart still needs a table of its own for
                 the combined total. */}
-            <div className="rounded-(--radius-card) bg-surface p-5 shadow-(--shadow-card)">
+            <div className="rounded-(--radius-card) bg-surface p-4 shadow-(--shadow-card) md:p-5">
               <Chart
                 height={320}
                 ariaLabel={`Projected balance per account and in total, over ${projections?.totalSeries.length ?? 0} monthly steps.`}
@@ -644,33 +647,34 @@ export function ProjectionsPage() {
                       stroke={`var(--color-account${i})`}
                       strokeWidth={2}
                       dot={false}
+                      {...PROJECTED}
                       {...motion}
                     />
                   ))}
                   {/* The household total is the sum of the lines above it, so
-                      it is drawn in the text colour and dashed rather than
-                      taking a sixth series colour that would read as a
-                      seventh account. */}
+                      it is drawn in ink and heavier rather than taking a
+                      series colour that would read as one more account. Every
+                      line here is a forecast, so every line is dashed. */}
                   <Line
                     dataKey="total"
                     type="monotone"
                     stroke="var(--color-total)"
                     strokeWidth={3}
-                    strokeDasharray="6 4"
                     dot={false}
+                    {...PROJECTED}
                     {...motion}
                   />
                 </LineChart>
               </Chart>
             </div>
 
-            <p className="text-xs text-text-subtle">
+            <p className="px-1 text-xs text-text-subtle">
               Growth rates are annual and compounded monthly by the engine — enter 5.03, not 0.0041. One flat rate per
               account: no scenarios, no market modelling.
             </p>
           </>
         )}
-      </section>
+      </PageSection>
 
       <QuickBalanceSheet
         open={balanceOpen}

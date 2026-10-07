@@ -96,6 +96,7 @@ web server down with it instead of leaving a half-up session that looks like a C
 
 The full containerized stack (`infra/docker-compose.yml`) is for testing a prod-like build, not
 day-to-day dev. Everyday work needs only the db container, which `pnpm dev` starts for you.
+Deploying it to the thin client is [`infra/README.md`](infra/README.md), top to bottom.
 
 | Command | Does |
 |---|---|
@@ -139,7 +140,7 @@ packages/
 apps/
   api/        Hono
   web/        Vite + React 19 + Tailwind v4
-infra/        docker-compose, database backup
+infra/        docker-compose and the deployment runbook
 ```
 
 Cross-workspace imports always use the package name (`@budget/engine`), never a relative path that

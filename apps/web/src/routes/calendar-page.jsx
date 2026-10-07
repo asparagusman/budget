@@ -12,7 +12,6 @@ import {
   Chart,
   ChartTooltip,
   MoneyTooltip,
-  SERIES,
   useChartMotion,
   useMoneyTick,
 } from "@/components/chart.jsx";
@@ -25,6 +24,8 @@ import { registerCommands } from "@/lib/commands.js";
 import { MONTH_LABELS } from "@/lib/constants.js";
 import { formatMoney } from "@/lib/format-money.js";
 import { useSettings } from "@/lib/settings.jsx";
+import { todayIso } from "@/lib/dates.js";
+import { LG, useMediaQuery } from "@/lib/use-media-query.js";
 import { cn } from "@/lib/utils.js";
 
 /** @import { Cents } from "@budget/engine" */
@@ -49,20 +50,18 @@ function monthGridDays(year, month) {
   return cells;
 }
 
-/** @param {string} rgb */
-function parseRgbChannels(rgb) {
-  const match = rgb.match(/rgba?\(([^)]+)\)/);
-  const [r, g, b] = (match?.[1] ?? "0,0,0").split(",").map((n) => parseFloat(n));
-  return [r ?? 0, g ?? 0, b ?? 0];
+/**
+ * An ISO date's parts as a local Date, so formatting never shifts it a day the
+ * way `new Date("2026-10-01")` (UTC midnight) does west of Greenwich.
+ *
+ * @param {string} iso
+ */
+function localDate(iso) {
+  return new Date(Number(iso.slice(0, 4)), Number(iso.slice(5, 7)) - 1, Number(iso.slice(8, 10)));
 }
 
-/** @param {string} from @param {string} to @param {number} t */
-function mixRgb(from, to, t) {
-  const a = parseRgbChannels(from);
-  const b = parseRgbChannels(to);
-  const [r, g, bch] = a.map((channel, i) => Math.round(channel + ((b[i] ?? channel) - channel) * t));
-  return `rgb(${r}, ${g}, ${bch})`;
-}
+const WEEKDAY_SHORT = new Intl.DateTimeFormat("en-AU", { weekday: "short" });
+const DAY_LONG = new Intl.DateTimeFormat("en-AU", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
 
 /**
  * @param {{ date: string, total: Cents, isPayday: boolean, bills: MergedInstance[], billsById: Map<string, BillRef> }} props
@@ -100,9 +99,9 @@ function DayDetailSheet({ date, onOpenChange, instances, isPayday, billsById }) 
   const total = instances.reduce((sum, i) => sum + (i.actualCents ?? i.expectedCents), 0);
   return (
     <Sheet open={date !== null} onOpenChange={onOpenChange}>
-      <SheetContent side="bottom" className="max-h-[80vh] overflow-y-auto">
+      <SheetContent side="bottom" scrollable className="max-h-[80vh]">
         <SheetHeader>
-          <SheetTitle>{date}</SheetTitle>
+          <SheetTitle>{date ? DAY_LONG.format(localDate(date)) : null}</SheetTitle>
           <SheetDescription>
             {isPayday ? "Payday. " : ""}
             {instances.length > 0 ? `${instances.length} bill${instances.length === 1 ? "" : "s"} due, ` : "No bills due, "}
@@ -114,7 +113,7 @@ function DayDetailSheet({ date, onOpenChange, instances, isPayday, billsById }) 
             <div key={i.billId} className="flex items-center justify-between rounded-(--radius-card) bg-surface-muted p-3 text-sm">
               <span className="flex items-center gap-2 text-text">
                 {billsById.get(i.billId)?.name ?? "Bill"}
-                {i.isOrphan ? <Badge variant="destructive">Orphan</Badge> : null}
+                {i.isOrphan ? <Badge variant="attention">Orphan</Badge> : null}
                 {i.isOverride ? <Badge variant="secondary">Override</Badge> : null}
               </span>
               <Money value={i.actualCents ?? i.expectedCents} />
@@ -211,6 +210,10 @@ export function CalendarPage() {
     [],
   );
 
+  // Not `today.toISOString()`: that is the UTC date, which in Australia is
+  // still yesterday until mid-morning.
+  const todayIsoDate = todayIso();
+  const isDesktop = useMediaQuery(LG);
   const monthLabel = new Date(year, month, 1).toLocaleDateString("en-AU", { month: "long", year: "numeric" });
   const cells = useMemo(() => monthGridDays(year, month), [year, month]);
   const monthDatesWithEvents = cells.filter((d) => d !== null && (instancesByDate.has(d) || paydaySet.has(d)));
@@ -275,78 +278,123 @@ export function CalendarPage() {
         }
       />
 
-      <div className="flex items-center justify-between">
-        <Button variant="ghost" size="icon-sm" aria-label="Previous month" onClick={() => goToMonth(-1)}>
-          <ChevronLeftIcon />
-        </Button>
-        <h2 className="text-sm font-semibold text-text">{monthLabel}</h2>
-        <Button variant="ghost" size="icon-sm" aria-label="Next month" onClick={() => goToMonth(1)}>
-          <ChevronRightIcon />
-        </Button>
-      </div>
-
-      {view === "month" ? (
-        <div className="rounded-(--radius-card) bg-surface p-2 shadow-(--shadow-card) sm:p-4">
-          <div className="grid grid-cols-7 gap-1 text-center text-xs text-text-muted">
-            {WEEKDAY_LABELS.map((w) => (
-              <div key={w} className="py-1">
-                {w}
-              </div>
-            ))}
-          </div>
-          <div className="grid grid-cols-7 gap-1">
-            {cells.map((date, i) =>
-              date === null ? (
-                <div key={i} />
-              ) : (
-                <button
-                  key={date}
-                  type="button"
-                  onClick={() => setSelectedDate(date)}
-                  className={cn(
-                    "rounded-md border border-transparent transition-colors hover:border-border hover:bg-surface-muted",
-                    date === today.toISOString().slice(0, 10) && "border-(--accent)",
-                  )}
-                >
-                  <DayChips
-                    date={date}
-                    total={(instancesByDate.get(date) ?? []).reduce((s, i) => s + (i.actualCents ?? i.expectedCents), 0)}
-                    isPayday={paydaySet.has(date)}
-                    bills={instancesByDate.get(date) ?? []}
-                    billsById={billsById}
-                  />
-                </button>
-              ),
-            )}
-          </div>
+      {/* One card: the month stepper is the header of the thing it steps,
+          rather than a strip floating between the page header and the grid. */}
+      <section
+        aria-labelledby="calendar-month"
+        className="overflow-hidden rounded-(--radius-card) bg-surface shadow-(--shadow-card)"
+      >
+        <div className="flex items-center justify-between gap-2 border-b border-border px-2 py-2 sm:px-3">
+          <Button variant="ghost" size="icon-sm" aria-label="Previous month" onClick={() => goToMonth(-1)}>
+            <ChevronLeftIcon />
+          </Button>
+          <h2 id="calendar-month" className="text-sm font-semibold text-text">
+            {monthLabel}
+          </h2>
+          <Button variant="ghost" size="icon-sm" aria-label="Next month" onClick={() => goToMonth(1)}>
+            <ChevronRightIcon />
+          </Button>
         </div>
-      ) : monthDatesWithEvents.length === 0 ? (
-        <EmptyState icon={CalendarDaysIcon} title="Nothing this month" description="No paydays or bills fall in this month." />
-      ) : (
-        <div className="flex flex-col divide-y divide-border rounded-(--radius-card) bg-surface shadow-(--shadow-card)">
-          {monthDatesWithEvents.map((date) => {
-            const dayInstances = instancesByDate.get(/** @type {string} */ (date)) ?? [];
-            const total = dayInstances.reduce((s, i) => s + (i.actualCents ?? i.expectedCents), 0);
-            return (
-              <button key={date} type="button" onClick={() => setSelectedDate(date)} className="flex items-center justify-between gap-3 p-4 text-left hover:bg-surface-muted">
-                <div className="min-w-0">
-                  <p className="flex items-center gap-2 text-sm font-medium text-text">
-                    {date}
-                    {paydaySet.has(/** @type {string} */ (date)) ? <Badge variant="secondary">Payday</Badge> : null}
-                  </p>
-                  <p className="truncate text-xs text-text-muted">
-                    {dayInstances.map((i) => billsById.get(i.billId)?.name ?? "Bill").join(", ") || "No bills"}
-                  </p>
+
+        {view === "month" ? (
+          <div className="p-2 sm:p-4">
+            <div className="grid grid-cols-7 gap-1 text-center text-xs text-text-muted">
+              {WEEKDAY_LABELS.map((w) => (
+                <div key={w} className="py-1">
+                  {w}
                 </div>
-                {total > 0 ? <Money value={total} className="shrink-0 font-medium text-text" /> : null}
-              </button>
-            );
-          })}
-        </div>
-      )}
+              ))}
+            </div>
+            <div className="grid grid-cols-7 gap-1">
+              {cells.map((date, i) =>
+                date === null ? (
+                  <div key={i} />
+                ) : (
+                  <button
+                    key={date}
+                    type="button"
+                    onClick={() => setSelectedDate(date)}
+                    className={cn(
+                      "rounded-md border border-transparent transition-colors hover:border-border hover:bg-surface-muted",
+                      date === todayIsoDate && "border-(--accent)",
+                    )}
+                  >
+                    <DayChips
+                      date={date}
+                      total={(instancesByDate.get(date) ?? []).reduce((s, i) => s + (i.actualCents ?? i.expectedCents), 0)}
+                      isPayday={paydaySet.has(date)}
+                      bills={instancesByDate.get(date) ?? []}
+                      billsById={billsById}
+                    />
+                  </button>
+                ),
+              )}
+            </div>
+          </div>
+        ) : monthDatesWithEvents.length === 0 ? (
+          <EmptyState
+            icon={CalendarDaysIcon}
+            title="Nothing this month"
+            description="No paydays or bills fall in this month."
+            className="rounded-none shadow-none"
+          />
+        ) : (
+          // An agenda reads down a date column: weekday over day number on
+          // the left, what lands that day in the middle, the day's outflow on
+          // the right. It used to lead every row with "2026-10-01".
+          <ol className="flex flex-col divide-y divide-border">
+            {monthDatesWithEvents.map((date) => {
+              const day = /** @type {string} */ (date);
+              const dayInstances = instancesByDate.get(day) ?? [];
+              const total = dayInstances.reduce((s, i) => s + (i.actualCents ?? i.expectedCents), 0);
+              const isToday = day === todayIsoDate;
+              return (
+                <li key={day}>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedDate(day)}
+                    aria-label={DAY_LONG.format(localDate(day))}
+                    className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-surface-muted focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-(--accent)"
+                  >
+                    <span
+                      className={cn(
+                        "flex w-9 shrink-0 flex-col items-center leading-tight",
+                        isToday ? "text-accent-brand" : "text-text",
+                      )}
+                    >
+                      <span className="text-[0.6875rem] font-medium tracking-wide text-text-subtle uppercase">
+                        {WEEKDAY_SHORT.format(localDate(day))}
+                      </span>
+                      <span className="text-lg font-semibold tabular-nums">{Number(day.slice(8, 10))}</span>
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="flex items-center gap-2">
+                        <span className="truncate text-sm text-text">
+                          {dayInstances.map((i) => billsById.get(i.billId)?.name ?? "Bill").join(", ") || (
+                            <span className="text-text-muted">No bills</span>
+                          )}
+                        </span>
+                        {paydaySet.has(day) ? (
+                          <Badge variant="secondary">
+                            <span className="size-1.5 rounded-full bg-positive" aria-hidden="true" />
+                            Payday
+                          </Badge>
+                        ) : null}
+                      </span>
+                    </span>
+                    {total > 0 ? (
+                      <Money value={total} className="shrink-0 text-sm font-semibold text-negative tabular-nums" />
+                    ) : null}
+                  </button>
+                </li>
+              );
+            })}
+          </ol>
+        )}
+      </section>
 
-      <div className="rounded-(--radius-card) bg-surface p-5 shadow-(--shadow-card)">
-        <p className="mb-3 text-sm font-medium text-text-muted">Outflow by month — {year}</p>
+      <section className="rounded-(--radius-card) bg-surface p-4 shadow-(--shadow-card) md:p-5">
+        <h2 className="mb-3 text-sm font-semibold text-text">Outflow by month — {year}</h2>
         {/* This was a day-by-day calendar heat map. Two problems with that
             shape: 366 cells of mostly zero say very little about a household
             whose bills land on a dozen dates, and the panel's own data table
@@ -363,17 +411,24 @@ export function CalendarPage() {
             columns: ["Month", "Outflow"],
             rows: monthlyOutflow.map((row) => [row.label, formatMoney(row.totalCents, { currency, locale })]),
           }}
-          config={{ outflow: { label: "Outflow", color: SERIES[3] } }}
+          config={{ outflow: { label: "Outflow", color: "var(--negative)" } }}
         >
           <BarChart data={outflowRows} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
             <CartesianGrid vertical={false} />
-            <XAxis dataKey="label" {...AXIS} interval={0} />
+            {/* Every month labelled, so a phone gets initials: twelve "Sep"s
+                at 375px ran into each other as "JanFebMar". */}
+            <XAxis
+              dataKey="label"
+              {...AXIS}
+              interval={0}
+              tickFormatter={isDesktop ? undefined : (label) => String(label).slice(0, 1)}
+            />
             <YAxis {...AXIS} width={56} tickFormatter={moneyTick} />
             <ChartTooltip content={<MoneyTooltip />} />
             <Bar dataKey="outflow" fill="var(--color-outflow)" radius={[4, 4, 0, 0]} {...motion} />
           </BarChart>
         </Chart>
-      </div>
+      </section>
 
       <DayDetailSheet
         date={selectedDate}

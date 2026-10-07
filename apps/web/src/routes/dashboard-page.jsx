@@ -22,8 +22,8 @@ import {
   Chart,
   ChartTooltip,
   MoneyTooltip,
-  SERIES,
   TIME_AXIS,
+  TOTAL,
   isoToMs,
   useChartMotion,
   useMoneyTick,
@@ -33,6 +33,7 @@ import { Delta } from "@/components/delta.jsx";
 import { FidelityBadge } from "@/components/fidelity-badge.jsx";
 import { GoodLifeFidelity } from "@/components/good-life-fidelity.jsx";
 import { Money } from "@/components/money.jsx";
+import { Notice } from "@/components/notice.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
 import { QuickBalanceSheet } from "@/components/quick-balance-sheet.jsx";
 import { UnallocatedIndicator, isBalanced } from "@/components/unallocated-indicator.jsx";
@@ -108,6 +109,12 @@ const BREAKDOWN_HINTS = {
   leftover: "What's left for day to day",
 };
 
+// Two columns on desktop: a 4/6 main column and a 2/6 rail, over three rows
+// whose middle one is `1fr`. A card spanning into the flexible row is left out
+// of the auto rows' sizing, so the hero's row is exactly as tall as the hero
+// and the slack lands in the cards that span — never as a gap under a card.
+const CYCLE_GRID = "grid grid-cols-1 gap-4 md:gap-6 lg:grid-cols-6 lg:grid-rows-[auto_1fr_auto]";
+
 /**
  * Every card on this screen: one surface, one radius, one shadow, and a quiet
  * "View →" into the screen that owns the figures (phases/10-dashboard.md
@@ -126,7 +133,9 @@ function Card({ title, to, toLabel = "View", aside, className, children }) {
   return (
     <section
       className={cn(
-        "flex flex-col gap-4 rounded-(--radius-card) bg-surface p-5 shadow-(--shadow-card)",
+        // `flex-1` fills the grid cell the card sits in, so two cards sharing
+        // a row end on the same line instead of leaving a ragged hole.
+        "flex flex-1 flex-col gap-4 rounded-(--radius-card) bg-surface p-4 shadow-(--shadow-card) md:p-5",
         className,
       )}
     >
@@ -177,11 +186,14 @@ function CycleBanner({ data, result, onMove, isToday, onToday }) {
   return (
     <div
       className={cn(
-        "flex flex-col gap-4 rounded-(--radius-card) p-5 shadow-(--shadow-card)",
+        "flex flex-col gap-4 rounded-(--radius-card) p-4 shadow-(--shadow-card) md:p-5",
         hasDiagnostic ? "bg-warning-soft" : "bg-surface",
       )}
     >
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      {/* The stepper stays beside the dates at every width. Stacked under
+          them on a phone it took a 44px row of its own, left-aligned under
+          a heading it has nothing to do with visually. */}
+      <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-base font-semibold text-text">
             {cycle ? (
@@ -196,7 +208,7 @@ function CycleBanner({ data, result, onMove, isToday, onToday }) {
             )}
             {data.allocation?.hasDraft ? (
               <Link to="/allocation" data-touch-target className="inline-flex items-center">
-                <Badge variant="outline" className="text-warning">
+                <Badge variant="attention">
                   unapplied draft
                 </Badge>
               </Link>
@@ -217,7 +229,7 @@ function CycleBanner({ data, result, onMove, isToday, onToday }) {
           </p>
         </div>
 
-        <div className="flex shrink-0 items-center gap-1">
+        <div className="-mt-1 -mr-2 flex shrink-0 items-center">
           <Button
             size="icon"
             variant="ghost"
@@ -227,7 +239,13 @@ function CycleBanner({ data, result, onMove, isToday, onToday }) {
           >
             <ChevronLeftIcon />
           </Button>
-          <Button size="sm" variant={isToday ? "ghost" : "secondary"} onClick={onToday} disabled={isToday}>
+          <Button
+            size="sm"
+            variant={isToday ? "ghost" : "secondary"}
+            onClick={onToday}
+            disabled={isToday}
+            className="max-sm:px-2"
+          >
             Today
           </Button>
           <Button
@@ -255,14 +273,17 @@ function CycleBanner({ data, result, onMove, isToday, onToday }) {
               <dt className="text-xs text-text-muted">Unallocated</dt>
               <dd className="mt-0.5 text-lg font-semibold tabular-nums">
                 {isBalanced(result) ? (
-                  <span className="inline-flex items-center gap-1.5 text-positive">
-                    <CheckCircle2Icon className="size-4 shrink-0" aria-hidden="true" />
+                  <span className="inline-flex items-center gap-1.5 text-text">
+                    <CheckCircle2Icon className="size-4 shrink-0 text-text-muted" aria-hidden="true" />
                     Balanced
                   </span>
                 ) : (
-                  <Link to="/allocation" className="text-negative underline underline-offset-2">
-                    <Money value={result.unallocatedPerMonthCents} signed />
-                    <span className="ml-1 text-xs font-medium text-text-muted">/month</span>
+                  <Link to="/allocation" className="inline-flex items-center gap-1.5 text-warning-strong">
+                    <AlertTriangleIcon className="size-4 shrink-0" aria-hidden="true" />
+                    <span className="underline underline-offset-2">
+                      <Money value={result.unallocatedPerMonthCents} signed />
+                      <span className="ml-1 text-xs font-medium text-text-muted">/month</span>
+                    </span>
                   </Link>
                 )}
               </dd>
@@ -306,7 +327,7 @@ function WarningsStrip({ warnings }) {
     <div className="flex flex-col gap-2 rounded-(--radius-card) bg-warning-soft p-4">
       {visible.map((warning) => (
         <p key={warning.code + warning.message} className="flex items-start gap-2 text-sm text-text">
-          <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+          <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-warning-strong" aria-hidden="true" />
           <span className="min-w-0">
             {warning.message}{" "}
             <Link to={warning.href} className="font-medium whitespace-nowrap underline underline-offset-2">
@@ -401,22 +422,29 @@ function HeroCard({ data }) {
       {allocation ? (
         // Plain columns, not tiles: a card inside a card is two surfaces
         // competing for one idea.
-        <dl className="grid grid-cols-1 gap-x-6 gap-y-5 border-t border-border pt-5 sm:grid-cols-2 lg:grid-cols-3">
-          {allocation.breakdown.map((group, index) => {
+        //
+        // Below `sm` each group is a single line — name left, figure right —
+        // over its bar. Stacked label-figure-bar-caption, three groups cost a
+        // phone 330px for what is one glance.
+        <dl className="grid grid-cols-1 gap-x-6 gap-y-4 border-t border-border pt-4 sm:grid-cols-2 sm:gap-y-5 sm:pt-5 lg:grid-cols-3">
+          {allocation.breakdown.map((group) => {
             const hint = BREAKDOWN_HINTS[group.key] ?? null;
             return (
-              <div key={group.key}>
-                <dt className="text-sm font-medium text-text-muted">{group.label}</dt>
-                <dd className="mt-1">
-                  <span className="text-2xl font-semibold tracking-tight text-text tabular-nums">
-                    <Money value={group.perPayCents ?? group.perMonthCents} tween />
-                  </span>
-                  <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-border">
+              <div
+                key={group.key}
+                className="grid grid-cols-[minmax(0,1fr)_auto] content-start items-baseline gap-x-3 sm:grid-cols-1"
+              >
+                <dt className="min-w-0 text-sm font-medium text-text-muted">{group.label}</dt>
+                <dd className="text-lg font-semibold tracking-tight text-text tabular-nums sm:mt-1 sm:text-2xl">
+                  <Money value={group.perPayCents ?? group.perMonthCents} tween />
+                </dd>
+                <dd className="col-span-2 sm:col-span-1">
+                  <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-border sm:mt-2">
                     <div
                       className="h-full rounded-full"
                       style={{
                         width: `${Math.max(0, Math.min(100, group.pctOfGross ?? 0))}%`,
-                        backgroundColor: `var(--chart-line-${(index % 5) + 1})`,
+                        backgroundColor: "var(--chart-total)",
                       }}
                     />
                   </div>
@@ -490,31 +518,36 @@ function TransfersCard({ data, accounts }) {
     >
       <ul className="flex flex-col divide-y divide-border">
         {allocation.transfers.map((transfer) => (
-          <li key={transfer.accountId} className="flex items-start justify-between gap-3 py-2">
-            <div className="min-w-0">
-              <p className={cn("truncate text-sm font-medium", transfer.isNoOp ? "text-text-muted" : "text-text")}>
-                {nameOf(transfer.accountId)}
-              </p>
-              {transfer.isNoOp ? <p className="text-xs text-text-subtle">no move required</p> : null}
-            </div>
+          <li key={transfer.accountId}>
             <button
               type="button"
-              data-touch-target
               onClick={() => copyAmount(transfer.perPayCents)}
-              aria-label={`Copy the ${nameOf(transfer.accountId)} amount`}
+              aria-label={`Copy the ${nameOf(transfer.accountId)} amount, ${(transfer.perPayCents / 100).toFixed(2)}`}
               title={`Copy ${(transfer.perPayCents / 100).toFixed(2)}`}
-              className={cn(
-                "flex shrink-0 items-center justify-end rounded-(--radius-control) px-1.5 py-0.5 text-right text-sm font-semibold tabular-nums transition-colors hover:bg-surface-muted focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-(--accent)",
-                transfer.isNoOp ? "text-text-muted" : "text-text",
-              )}
+              className="-mx-2 flex min-h-11 w-[calc(100%+1rem)] items-center justify-between gap-3 rounded-(--radius-control) px-2 py-1.5 text-left transition-colors hover:bg-surface-muted focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-(--accent)"
             >
-              <Money value={transfer.perPayCents} tween />
+              <span className="min-w-0">
+                <span
+                  className={cn("block truncate text-sm font-medium", transfer.isNoOp ? "text-text-muted" : "text-text")}
+                >
+                  {nameOf(transfer.accountId)}
+                </span>
+                {transfer.isNoOp ? <span className="block text-xs text-text-subtle">no move required</span> : null}
+              </span>
+              <span
+                className={cn(
+                  "shrink-0 text-right text-sm font-semibold tabular-nums",
+                  transfer.isNoOp ? "text-text-muted" : "text-text",
+                )}
+              >
+                <Money value={transfer.perPayCents} tween />
+              </span>
             </button>
           </li>
         ))}
       </ul>
-      <p className="text-xs text-text-subtle">
-        Per {cadenceLabel}. Tap an amount to copy it.
+      <p className="mt-auto text-xs text-text-subtle">
+        Per {cadenceLabel}. Tap a row to copy its amount.
       </p>
     </Card>
   );
@@ -628,9 +661,12 @@ function NetWorthCard({ data, onUpdateBalance }) {
         <p className="text-3xl font-bold tracking-tight text-text tabular-nums">
           <Money value={netWorth.totalCents} />
         </p>
-        <p className={cn("mt-0.5 text-xs", isStale ? "text-negative" : "text-text-muted")}>
+        <p className={cn("mt-0.5 text-xs", isStale ? "text-warning-strong" : "text-text-muted")}>
           {netWorth.stalestAsAt ? (
             <>
+              {isStale ? (
+                <AlertTriangleIcon className="mr-1 inline size-3.5 align-text-bottom" aria-hidden="true" />
+              ) : null}
               Oldest balance {formatIsoDate(netWorth.stalestAsAt, locale)}
               {netWorth.staleDays !== null ? ` · ${netWorth.staleDays} days old` : ""}
               {isStale ? " — worth a refresh" : ""}
@@ -665,7 +701,7 @@ function NetWorthCard({ data, onUpdateBalance }) {
         empty={netWorth.series.length < 2}
         emptyTitle="Not enough history yet"
         emptyDescription="Record a balance on two different dates and the line starts to draw itself."
-        config={{ netWorth: { label: "Net worth", color: SERIES[0] } }}
+        config={{ netWorth: { label: "Net worth", color: TOTAL } }}
       >
         <AreaChart data={rows} margin={{ top: 16, right: 12, bottom: 0, left: 0 }}>
           <CartesianGrid vertical={false} />
@@ -736,8 +772,8 @@ function MojoCard({ mojo }) {
           )}
         </p>
       ) : (
-        <p className="flex items-center gap-2 text-sm text-positive">
-          <CheckCircle2Icon className="size-4 shrink-0" aria-hidden="true" />
+        <p className="flex items-center gap-2 text-sm text-text">
+          <CheckCircle2Icon className="size-4 shrink-0 text-text-muted" aria-hidden="true" />
           Every marker is covered.
         </p>
       )}
@@ -773,23 +809,23 @@ function GoalsCard({ goals }) {
           contribution.
         </p>
       ) : (
-        <ul className="flex flex-col gap-3">
+        <ul className="grid grid-cols-1 gap-x-8 gap-y-4 lg:grid-cols-2">
           {goals.map((goal) => (
             <li key={goal.id} className="flex flex-col gap-1.5">
               <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5">
                 <span className="flex min-w-0 items-center gap-2 text-sm font-medium text-text">
                   <span className="truncate">{goal.name}</span>
-                  {goal.isFunded ? null : <Badge variant="outline">unfunded</Badge>}
+                  {goal.isFunded ? null : <Badge variant="attention">unfunded</Badge>}
                 </span>
                 <span
-                  className={cn("text-xs font-medium tabular-nums", goal.reached ? "text-positive" : "text-text-muted")}
+                  className={cn("text-xs font-medium tabular-nums", goal.reached ? "text-text" : "text-text-muted")}
                 >
                   {goal.progressPct.toFixed(0)}%
                 </span>
               </div>
               <div className="h-2 w-full overflow-hidden rounded-full bg-surface-muted">
                 <div
-                  className={cn("h-full rounded-full", goal.reached ? "bg-positive" : "bg-accent-brand")}
+                  className="h-full rounded-full bg-(--chart-total)"
                   style={{ width: `${Math.max(0, Math.min(100, goal.progressPct))}%` }}
                 />
               </div>
@@ -798,7 +834,10 @@ function GoalsCard({ goals }) {
                   <Money value={goal.currentBalanceCents} /> of <Money value={goal.targetCents} />
                 </span>
                 {goal.reached ? (
-                  <span className="text-positive">reached</span>
+                  <span className="inline-flex items-center gap-1 text-text">
+                    <CheckCircle2Icon className="size-3.5 shrink-0 text-text-muted" aria-hidden="true" />
+                    reached
+                  </span>
                 ) : goal.etaDate ? (
                   <span>ETA {formatIsoDate(goal.etaDate, locale)}</span>
                 ) : (
@@ -810,7 +849,7 @@ function GoalsCard({ goals }) {
                     transaction account is noise. Wording matches /goals so
                     the two screens don't describe the same figure two ways. */}
                 {aheadBehindLabel(goal) ? (
-                  <span className="text-positive">{aheadBehindLabel(goal)} sooner with growth</span>
+                  <span className="text-text-muted">{aheadBehindLabel(goal)} sooner with growth</span>
                 ) : null}
               </p>
             </li>
@@ -847,8 +886,8 @@ function GoodLifeCard({ data }) {
         )}
       </p>
       <dl className="flex flex-col gap-2 text-xs">
-        <div className="flex items-baseline justify-between gap-2">
-          <dt className="text-text-muted">Essentials, per {cadenceLabel}</dt>
+        <div className="flex items-baseline justify-between gap-4">
+          <dt className="min-w-0 text-text-muted">Essentials, per {cadenceLabel}</dt>
           <dd className="font-medium text-text tabular-nums">
             {variable.essentialPerPayCents !== null ? (
               <Money value={variable.essentialPerPayCents} />
@@ -857,16 +896,16 @@ function GoodLifeCard({ data }) {
             )}
           </dd>
         </div>
-        <div className="flex items-baseline justify-between gap-2">
-          <dt className="text-text-muted">Actually spending, per month</dt>
-          <dd className="flex items-center gap-2">
+        <div className="flex items-baseline justify-between gap-4">
+          <dt className="min-w-0 text-text-muted">Actually spending, per month</dt>
+          <dd className="flex shrink-0 items-center justify-end gap-2 text-right">
             {variable.trailingAveragePerMonthCents !== null ? (
               <>
                 <span className="font-medium text-text tabular-nums">
                   <Money value={variable.trailingAveragePerMonthCents} />
                 </span>
                 {variable.varianceCents !== null ? (
-                  <Delta value={variable.varianceCents} kind="cents" invert />
+                  <Delta value={variable.varianceCents} kind="cents" variance />
                 ) : null}
               </>
             ) : (
@@ -909,7 +948,7 @@ function SetupPath({ setup }) {
               className="group flex items-center gap-3 rounded-(--radius-control) px-2 py-2 transition-colors hover:bg-surface-muted focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-(--accent)"
             >
               {step.done ? (
-                <CheckCircle2Icon className="size-5 shrink-0 text-positive" aria-hidden="true" />
+                <CheckCircle2Icon className="size-5 shrink-0 text-text-muted" aria-hidden="true" />
               ) : (
                 <span
                   className="flex size-5 shrink-0 items-center justify-center rounded-full bg-surface-muted text-[0.625rem] font-semibold text-text-muted"
@@ -940,17 +979,10 @@ function DashboardSkeleton() {
   return (
     <>
       <Skeleton className="h-36 rounded-(--radius-card)" />
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-6 lg:items-start">
+      <div className={CYCLE_GRID}>
         <Skeleton className="h-64 rounded-(--radius-card) lg:col-span-4" />
-        <Skeleton className="h-64 rounded-(--radius-card) lg:col-span-2" />
+        <Skeleton className="h-64 rounded-(--radius-card) lg:col-span-2 lg:row-span-2" />
         <Skeleton className="h-80 rounded-(--radius-card) lg:col-span-4" />
-        <Skeleton className="h-80 rounded-(--radius-card) lg:col-span-2" />
-      </div>
-      <div className="mt-4 grid grid-cols-1 gap-6 lg:grid-cols-6 lg:items-start">
-        <Skeleton className="h-72 rounded-(--radius-card) lg:col-span-4" />
-        <Skeleton className="h-72 rounded-(--radius-card) lg:col-span-2" />
-        <Skeleton className="h-48 rounded-(--radius-card) lg:col-span-3" />
-        <Skeleton className="h-48 rounded-(--radius-card) lg:col-span-3" />
       </div>
     </>
   );
@@ -1077,13 +1109,15 @@ export function DashboardPage() {
       <PageHeader title="Overview" />
 
       {dashboardQuery.isLoading ? (
-        <DashboardSkeleton />
-      ) : dashboardQuery.isError ? (
-        <div className="rounded-(--radius-card) bg-negative-soft p-5 text-sm text-negative">
-          {dashboardQuery.error.message}
+        <div className="flex flex-col gap-4 md:gap-6">
+          <DashboardSkeleton />
         </div>
+      ) : dashboardQuery.isError ? (
+        <Notice kind="error" className="p-5">
+          {dashboardQuery.error.message}
+        </Notice>
       ) : data ? (
-        <>
+        <div className="flex flex-col gap-4 md:gap-6">
           <CycleBanner
             data={data}
             result={result}
@@ -1121,54 +1155,78 @@ export function DashboardPage() {
               so the dashboard assembles instead of appearing as one slab.
               See app.css; the delays live there rather than here because
               this grid's children are conditional and hand-numbered inline
-              delays would go stale. */}
-          <div data-stagger className="grid grid-cols-1 gap-6 lg:grid-cols-6 lg:items-start">
-            <div className="lg:order-1 lg:col-span-4">
+              delays would go stale.
+
+              DOM order is the phone's order. On desktop the cards are placed
+              into two columns — income over the flow, the transfers over
+              what's due — with the middle row flexible, so each column's
+              cards end level with the other's instead of the short card
+              leaving a hole under itself. */}
+          <div data-stagger className={CYCLE_GRID}>
+            <div className="flex flex-col lg:col-span-4 lg:col-start-1 lg:row-start-1">
               <HeroCard data={data} />
             </div>
 
-            <div className="lg:order-2 lg:col-span-2">
+            <div className="flex flex-col lg:col-span-2 lg:col-start-5 lg:row-span-2 lg:row-start-1">
               <TransfersCard data={data} accounts={data.accounts} />
             </div>
 
-            <div className="lg:order-4 lg:col-span-2">
+            <div className="flex flex-col lg:col-span-2 lg:col-start-5 lg:row-start-3">
               <UpcomingCard data={data} />
             </div>
 
             {result && data.allocation ? (
-              <div className="lg:order-3 lg:col-span-4">
+              <div className="flex flex-col lg:col-span-4 lg:col-start-1 lg:row-span-2 lg:row-start-2">
                 <Card title="Where the money goes" to="/allocation">
                   {/* `lines` is gone with the sankey: slices are keyed by
                       destination, which the result's own transfers carry. */}
-                  <AllocationFlow result={result} accounts={data.accounts} heading={null} />
+                  {/* This card's height is set by the rail beside it (transfers
+                      over upcoming bills), which runs taller than a 300px pie.
+                      A larger canvas fills most of that, and centring takes
+                      up the rest as margin rather than a blank strip under
+                      the chart. */}
+                  <div className="flex flex-1 flex-col justify-center">
+                    <AllocationFlow result={result} accounts={data.accounts} heading={null} height={400} />
+                  </div>
                 </Card>
               </div>
             ) : null}
           </div>
 
           {/* The slower-moving half: where the household is heading rather
-              than what the cycle needs. A wider gap than the grids' own
-              separates the two so they read as two groups. */}
-          <div className="mt-4 grid grid-cols-1 gap-6 lg:grid-cols-6 lg:items-start">
-            <div className={data.mojo ? "lg:col-span-4" : "lg:col-span-6"}>
+              than what the cycle needs. Net worth leads with the two short
+              cards stacked beside it, and goals take the full width under
+              them. */}
+          <div className="grid grid-cols-1 gap-4 md:gap-6 lg:grid-cols-6">
+            <div
+              className={cn(
+                "flex flex-col lg:col-span-4 lg:col-start-1 lg:row-start-1",
+                data.mojo && "lg:row-span-2",
+              )}
+            >
               <NetWorthCard data={data} onUpdateBalance={() => setBalanceFor({ accountId: null })} />
             </div>
 
             {data.mojo ? (
-              <div className="lg:col-span-2">
+              <div className="flex flex-col lg:col-span-2 lg:col-start-5 lg:row-start-1">
                 <MojoCard mojo={data.mojo} />
               </div>
             ) : null}
 
-            <div className="lg:col-span-3">
+            <div className={cn("flex flex-col lg:col-span-6", data.mojo ? "lg:row-start-3" : "lg:row-start-2")}>
               <GoalsCard goals={data.goals} />
             </div>
 
-            <div className="lg:col-span-3">
+            <div
+              className={cn(
+                "flex flex-col lg:col-span-2 lg:col-start-5",
+                data.mojo ? "lg:row-start-2" : "lg:row-start-1",
+              )}
+            >
               <GoodLifeCard data={data} />
             </div>
           </div>
-        </>
+        </div>
       ) : null}
 
       <QuickBalanceSheet

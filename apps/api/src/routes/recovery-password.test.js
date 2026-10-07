@@ -138,6 +138,22 @@ describe("setting the recovery password", () => {
     expect(status).toMatchObject({ configured: true, holderDisplayName: "Ada" });
   });
 
+  it("signs out the sessions the old password opened when it is replaced", async () => {
+    const passkeyToken = await signIn("passkey");
+    await setPassword(passkeyToken);
+    const recoveryToken = await signIn("recovery_password");
+    expect((await request("/invites", { token: recoveryToken })).status).toBe(200);
+
+    // Rotating because the old one got out has to close the door it already
+    // opened, the way removing it does — not leave it ajar for the hour.
+    expect((await setPassword(passkeyToken, "a-second-long-recovery-phrase-2")).status).toBe(200);
+    expect((await request("/invites", { token: recoveryToken })).status).toBe(401);
+    expect((await request("/dashboard", { token: passkeyToken })).status).toBe(200);
+
+    const rows = await db.select().from(sessions).where(eq(sessions.authMethod, "recovery_password"));
+    expect(rows.every((row) => row.revokedAt !== null)).toBe(true);
+  });
+
   it("replaces the holder's own password without complaint", async () => {
     const token = await signIn("passkey");
     await setPassword(token);

@@ -1,11 +1,21 @@
-import { addDaysIso, computeAllocation, equivalent, mustAt, mustGet, resolveVariant } from "@budget/engine";
-import { allocationLines, allocationStageGoals, allocationVersions } from "@budget/schema";
+import {
+  addDaysIso,
+  computeAllocation,
+  diffAllocations,
+  equivalent,
+  mustAt,
+  mustGet,
+  resolveVariant,
+} from "@budget/engine";
+import { allocationLines, allocationStageGoals, allocationVersions, appliedSnapshotSchema } from "@budget/schema";
 import { and, desc, eq } from "drizzle-orm";
 import { computeContribution, projectActiveBills } from "./bills.js";
+import { todayIso } from "./dates.js";
 import { computeVariantTotals, getPrimaryPaySchedule } from "./income.js";
 import { summarizeVariableCosts } from "./variable-costs.js";
 
-/** @import { AllocationLine, AllocationResult, Cadence, Cents, IsoDate } from "@budget/engine" */
+/** @import { AllocationLine, AllocationResult, Cadence, Cents, IsoDate, Transfer } from "@budget/engine" */
+/** @import { AppliedSnapshot } from "@budget/schema" */
 
 /**
  * @typedef {{
@@ -46,7 +56,11 @@ import { summarizeVariableCosts } from "./variable-costs.js";
  *   createdBy: string | null,
  *   createdAt: Date,
  *   activatedAt: Date | null,
+ *   appliedSnapshot?: unknown,
  * }} StoredAllocationVersion
+ *
+ * `appliedSnapshot` is raw jsonb — read it through `readAppliedSnapshot`,
+ * never directly.
  */
 
 // Four years, and the number is load-bearing. `billsContribution`
@@ -59,7 +73,11 @@ import { summarizeVariableCosts } from "./variable-costs.js";
 // bank. On a 1461-day window every month-based cadence lands on its exact
 // conventional rate (a monthly bill 48 times, quarterly 16, yearly 4), so
 // the fixed total the allocation deducts matches the sum of the bills'
-// own monthly equivalents to the cent.
+// own monthly equivalents to the cent. No window does that for a weekly or
+// fortnightly bill — 1461 days holds 104 or 105 fortnights depending on
+// `on` — so the engine prices those at 52 or 26 a year instead of counting
+// them, and the transfer no longer moves when nothing but the date has
+// (`billsContribution`).
 //
 // It looks FORWARD from `on` rather than straddling it: money set aside now
 // pays bills that haven't happened yet, so an escalating bill's future
@@ -241,6 +259,10 @@ export function serializeVersion(version, lineRows, extra = {}) {
     // than being omitted so a caller never has to distinguish "this version
     // has no section goals" from "this response didn't say".
     stageGoals: (extra.stageGoalRows ?? []).map(serializeStageGoal),
+    // What the standing transfers were set to when this version was applied.
+    // Null for a draft and for a version applied before amounts were
+    // recorded — "not recorded", never a recomputation passed off as one.
+    applied: readAppliedSnapshot(version),
   };
 }
 
@@ -589,10 +611,16 @@ export async function createDraftVersion(db, { planId, source, createdBy, note =
  * `status = 'active'` rejects the second statement — which is the index
  * doing its job.
  *
+ * `appliedSnapshot` is written in the same statement as the promotion, so a
+ * version can never be active with the amounts of some other moment — or
+ * have amounts recorded and fail to become active. Null when nothing could
+ * be resolved (see `resolveAppliedSnapshot`); the version is still applied,
+ * since applying is the operator's decision, not the engine's.
+ *
  * @param {import("@budget/schema").Db} db
- * @param {{ draft: StoredAllocationVersion, active: StoredAllocationVersion | null, note?: string | null }} args
+ * @param {{ draft: StoredAllocationVersion, active: StoredAllocationVersion | null, note?: string | null, appliedSnapshot?: AppliedSnapshot | null }} args
  */
-export async function applyDraftVersion(db, { draft, active, note }) {
+export async function applyDraftVersion(db, { draft, active, note, appliedSnapshot = null }) {
   return db.transaction(async (tx) => {
     if (active) {
       await tx
@@ -608,11 +636,218 @@ export async function applyDraftVersion(db, { draft, active, note }) {
         // An empty note in the confirmation dialog leaves whatever the draft
         // already carried (e.g. "Reverted from v3") rather than blanking it.
         note: note === undefined || note === null ? draft.note : note,
+        appliedSnapshot,
       })
       .where(eq(allocationVersions.id, draft.id))
       .returning();
     return mustAt(updated, 0, "applied version");
   });
+}
+
+// ---------------------------------------------------------------------------
+// Applied amounts. A version stores rules (basis + value), and every figure
+// they resolve to moves when a bill, a budget or an income line does. The
+// bank does not: a standing order says what it said on the day it was typed
+// in. So the amounts are recorded at apply, and everything that reports "what
+// the bank is doing" reads them back rather than recomputing.
+//
+// Nothing here ever writes a new figure into a recorded one. Drift is shown,
+// and re-applying the plan is the only way to record new amounts — there is
+// no "mark the bank as updated", because the app is not a todo list
+// (phases/08-allocation.md "What transfers are, and are not").
+// ---------------------------------------------------------------------------
+
+/**
+ * The amounts stored on a version at apply, or null when there are none: a
+ * draft, a version applied before amounts were recorded, or a row whose jsonb
+ * does not parse. All three read the same way — "not recorded".
+ *
+ * @param {{ appliedSnapshot?: unknown }} version
+ * @returns {AppliedSnapshot | null}
+ */
+export function readAppliedSnapshot(version) {
+  if (version.appliedSnapshot == null) return null;
+  const parsed = appliedSnapshotSchema.safeParse(version.appliedSnapshot);
+  return parsed.success ? parsed.data : null;
+}
+
+/**
+ * What to record when `version` is applied: its transfers resolved exactly
+ * the way the preview the operator just read resolved them — same context,
+ * same gross, same engine call — for the date that preview was computed for.
+ *
+ * Null without an income-landing account. The engine has no destination for
+ * unallocated money without one, so there is nothing true to record; the
+ * version still applies, and reads as "not recorded" until it is re-applied.
+ *
+ * @param {import("@budget/schema").Db} db
+ * @param {{ plan: { incomeVariantId: string }, version: StoredAllocationVersion, on: IsoDate }} args
+ * @returns {Promise<AppliedSnapshot | null>}
+ */
+export async function resolveAppliedSnapshot(db, { plan, version, on }) {
+  const context = await loadAllocationContext(db, on);
+  if (!context.incomeLandingAccountId) return null;
+
+  const [lineRows, stageGoalRows, grossPerMonthCents] = await Promise.all([
+    linesForVersion(db, version.id),
+    stageGoalsForVersion(db, version.id),
+    variantGrossPerMonthCents(db, plan.incomeVariantId),
+  ]);
+  const result = computeVersionAllocation(context, grossPerMonthCents, lineRows, stageGoalRows);
+
+  const accountIds = result.transfers.map((t) => t.accountId);
+  const accounts =
+    accountIds.length > 0
+      ? await db.query.accounts.findMany({ where: (a, { inArray }) => inArray(a.id, accountIds) })
+      : [];
+  // Lines reference accounts by foreign key and accounts are only ever
+  // archived, so every destination resolves to a row.
+  const nameById = new Map(accounts.map((a) => [a.id, a.name]));
+
+  return {
+    version: 1,
+    payCadence: context.payCadence,
+    hasPrimaryPaySchedule: context.hasPrimaryPaySchedule,
+    computedOn: on,
+    appliedOn: todayIso(),
+    grossPerMonthCents,
+    transfers: result.transfers.map((t) => ({
+      accountId: t.accountId,
+      accountName: mustGet(nameById, t.accountId, "transfer destination"),
+      perPayCents: t.perPayCents,
+      perMonthCents: t.perMonthCents,
+      isNoOp: t.isNoOp,
+    })),
+  };
+}
+
+/**
+ * The recorded transfers in the engine's own `AllocationResult` shape, so the
+ * comparison below is `diffAllocations` — the engine's function — rather than
+ * a subtraction written here. `diffAllocations` reads `transfers` and nothing
+ * else, so the rest of `live` rides along untouched, and `lineIds` is empty
+ * because the record never needed to say which lines fed each transfer.
+ *
+ * @param {AppliedSnapshot} snapshot
+ * @param {AllocationResult} live
+ * @returns {AllocationResult}
+ */
+function appliedAsResult(snapshot, live) {
+  /** @type {Transfer[]} */
+  const transfers = snapshot.transfers.map((t) => ({
+    accountId: t.accountId,
+    perMonthCents: t.perMonthCents,
+    perPayCents: t.perPayCents,
+    lineIds: [],
+    isNoOp: t.isNoOp,
+  }));
+  return { ...live, transfers };
+}
+
+/**
+ * @typedef {{
+ *   status: "recorded" | "not_recorded" | "cadence_changed",
+ *   snapshot: AppliedSnapshot | null,
+ *   drift: import("@budget/engine").TransferDelta[] | null,
+ * }} AppliedComparison
+ *
+ * - `drift` — per destination, `toPerPayCents` is live and `fromPerPayCents`
+ *   is applied, so `deltaPerPayCents` is live − applied. Null unless
+ *   `status` is "recorded".
+ * - `"cadence_changed"` — the primary pay schedule's cadence is not the one
+ *   the amounts were recorded in. Deliberately not converted: what the bank
+ *   holds is a fortnightly order, and a monthly figure derived from it is a
+ *   number nobody typed anywhere. The plan needs re-applying.
+ */
+
+/**
+ * The live result beside the amounts recorded at apply.
+ *
+ * @param {AppliedSnapshot | null} snapshot
+ * @param {AllocationResult} live
+ * @param {Cadence} payCadence the cadence `live` was computed in
+ * @returns {AppliedComparison}
+ */
+export function compareWithApplied(snapshot, live, payCadence) {
+  if (!snapshot) return { status: "not_recorded", snapshot: null, drift: null };
+  if (snapshot.payCadence !== payCadence) return { status: "cadence_changed", snapshot, drift: null };
+  return { status: "recorded", snapshot, drift: diffAllocations(appliedAsResult(snapshot, live), live) };
+}
+
+/**
+ * @typedef {{
+ *   accountId: string,
+ *   accountName: string | null,
+ *   perPayCents: Cents,
+ *   perMonthCents: Cents,
+ *   isNoOp: boolean,
+ * }} CurrentTransfer
+ *
+ * `accountName` is the name recorded at apply, or null for a recomputed row
+ * (the screen already holds the live names).
+ */
+
+/**
+ * @typedef {{
+ *   source: "applied" | "recomputed",
+ *   reason: "not_recorded" | "cadence_changed" | null,
+ *   applied: AppliedSnapshot | null,
+ *   transfers: CurrentTransfer[],
+ *   drift: import("@budget/engine").TransferDelta[] | null,
+ * }} CurrentTransfers
+ *
+ * - `reason` — why `source` is "recomputed": the version was applied before
+ *   amounts were recorded, or the pay cadence has changed since. Null when
+ *   `source` is "applied".
+ * - `drift` — live − applied for the active version itself, so the screen can
+ *   say a standing order has gone stale without anyone opening a draft. Null
+ *   unless `source` is "applied".
+ */
+
+/**
+ * What the preview's "Current" column is: the amounts recorded when the
+ * active version was applied — what is actually at the bank — whenever they
+ * exist and are in today's cadence; otherwise today's recomputation of the
+ * active version, with `reason` saying why. Diffing a draft against the
+ * recorded amounts is what makes "apply an unchanged draft after a bill
+ * moved" show exactly which standing orders to edit, which is the flow phase
+ * 08 sanctions for it.
+ *
+ * `baseline` is the same choice in `AllocationResult` shape, for
+ * `diffAllocations`.
+ *
+ * @param {StoredAllocationVersion} activeVersion
+ * @param {AllocationResult} recomputed
+ * @param {Cadence} payCadence
+ * @returns {{ current: CurrentTransfers, baseline: AllocationResult }}
+ */
+export function resolveCurrentTransfers(activeVersion, recomputed, payCadence) {
+  const comparison = compareWithApplied(readAppliedSnapshot(activeVersion), recomputed, payCadence);
+
+  if (comparison.status === "recorded" && comparison.snapshot) {
+    const snapshot = comparison.snapshot;
+    return {
+      current: { source: "applied", reason: null, applied: snapshot, transfers: snapshot.transfers, drift: comparison.drift },
+      baseline: appliedAsResult(snapshot, recomputed),
+    };
+  }
+
+  return {
+    current: {
+      source: "recomputed",
+      reason: comparison.status === "cadence_changed" ? "cadence_changed" : "not_recorded",
+      applied: comparison.snapshot,
+      transfers: recomputed.transfers.map((t) => ({
+        accountId: t.accountId,
+        accountName: null,
+        perPayCents: t.perPayCents,
+        perMonthCents: t.perMonthCents,
+        isNoOp: t.isNoOp,
+      })),
+      drift: null,
+    },
+    baseline: recomputed,
+  };
 }
 
 /**

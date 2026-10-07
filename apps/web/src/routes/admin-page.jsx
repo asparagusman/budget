@@ -14,7 +14,6 @@ import {
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge.jsx";
 import { Button } from "@/components/ui/button.jsx";
-import { Card, CardContent } from "@/components/ui/card.jsx";
 import {
   Dialog,
   DialogContent,
@@ -37,6 +36,7 @@ import { useAuth } from "@/lib/auth.jsx";
 import { registerCommands } from "@/lib/commands.js";
 import { moveInList } from "@/lib/reorder.js";
 import { useSettings } from "@/lib/settings.jsx";
+import { ScrollArea } from "@/components/scroll-area.jsx";
 
 /** @param {string} locale @param {string} iso */
 function formatDateTime(locale, iso) {
@@ -74,7 +74,7 @@ function ShareLinkDialog({ open, onOpenChange, title, description, link }) {
         <div className="flex items-center gap-2">
           <Input readOnly value={link} onFocus={(e) => e.target.select()} />
           <Button type="button" size="icon" variant="outline" onClick={copy} aria-label="Copy link">
-            {copied ? <CheckIcon className="text-positive" /> : <CopyIcon />}
+            {copied ? <CheckIcon className="text-text-muted" /> : <CopyIcon />}
           </Button>
         </div>
       </DialogContent>
@@ -136,7 +136,7 @@ function UsersPanel() {
         <EmptyState icon={UsersIcon} title="No users yet" description="Invite the first user." />
       ) : (
         <>
-          <div className="hidden overflow-x-auto rounded-(--radius-card) bg-surface shadow-(--shadow-card) md:block">
+          <ScrollArea axis="x" className="hidden rounded-(--radius-card) bg-surface shadow-(--shadow-card) md:block">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-border text-left text-xs text-text-muted">
@@ -153,7 +153,7 @@ function UsersPanel() {
                     <td className="px-4 py-3 text-text">{user.displayName}</td>
                     <td className="px-4 py-3 text-text-muted">{user.email ?? "—"}</td>
                     <td className="px-4 py-3">
-                      <Badge variant={user.isActive ? "default" : "outline"}>
+                      <Badge variant={user.isActive ? "secondary" : "outline"}>
                         {user.isActive ? "Active" : "Inactive"}
                       </Badge>
                     </td>
@@ -181,7 +181,7 @@ function UsersPanel() {
                 ))}
               </tbody>
             </table>
-          </div>
+          </ScrollArea>
 
           <DataList className="md:hidden">
             {users.map((user) => (
@@ -338,7 +338,7 @@ function RecoveryPasswordPanel() {
               <Button
                 size="sm"
                 variant="ghost"
-                className="text-negative"
+                className="text-text-muted hover:text-text"
                 onClick={async () => {
                   const ok = await confirm({
                     title: "Remove the recovery password?",
@@ -475,7 +475,7 @@ function DevicesPanel() {
                     <Button
                       size="sm"
                       variant="ghost"
-                      className="text-negative"
+                      className="text-text-muted hover:text-text"
                       onClick={async () => {
                         const ok = await confirm({
                           title: `Remove ${cred.deviceName ?? "this passkey"}?`,
@@ -580,7 +580,7 @@ function SessionsPanel() {
                   <Button
                     size="sm"
                     variant="ghost"
-                    className="text-negative"
+                    className="text-text-muted hover:text-text"
                     onClick={async () => {
                       const ok = await confirm({
                         title: "Revoke this session?",
@@ -646,7 +646,7 @@ function InvitesPanel() {
             <Button
               size="sm"
               variant="ghost"
-              className="text-negative"
+              className="text-text-muted hover:text-text"
               onClick={async () => {
                 const ok = await confirm({
                   title: "Revoke this invite?",
@@ -832,7 +832,7 @@ function PeoplePanel() {
                     <Button
                       size="sm"
                       variant="ghost"
-                      className="text-negative"
+                      className="text-text-muted hover:text-text"
                       onClick={async () => {
                         const ok = await confirm({
                           title: `Archive ${person.name}?`,
@@ -911,43 +911,43 @@ export function AdminPage() {
           </>
         }
       />
-      <Card>
-        <CardContent>
-          <Tabs
-            value={activeTab}
-            onValueChange={(value) => {
-              const tab = ADMIN_TABS.find((t) => t.value === value);
-              if (tab) navigate({ to: tab.path });
-            }}
-          >
-            <TabsList>
-              {ADMIN_TABS.map((tab) => (
-                <TabsTrigger key={tab.value} value={tab.value}>
-                  {tab.label}
-                </TabsTrigger>
-              ))}
-            </TabsList>
-            <TabsContent value="users">
-              <UsersPanel />
-            </TabsContent>
-            <TabsContent value="devices">
-              <div className="flex flex-col gap-8">
-                <DevicesPanel />
-                <RecoveryPasswordPanel />
-              </div>
-            </TabsContent>
-            <TabsContent value="sessions">
-              <SessionsPanel />
-            </TabsContent>
-            <TabsContent value="invites">
-              <InvitesPanel />
-            </TabsContent>
-            <TabsContent value="people">
-              <PeoplePanel />
-            </TabsContent>
-          </Tabs>
-        </CardContent>
-      </Card>
+      {/* No card around the tabs: every panel already draws its own
+          surfaces (a table, a list), and inside a card each of those was a
+          card in a card. */}
+      <Tabs
+        className="gap-4"
+        value={activeTab}
+        onValueChange={(value) => {
+          const tab = ADMIN_TABS.find((t) => t.value === value);
+          if (tab) navigate({ to: tab.path });
+        }}
+      >
+        <TabsList className="md:self-start">
+          {ADMIN_TABS.map((tab) => (
+            <TabsTrigger key={tab.value} value={tab.value}>
+              {tab.label}
+            </TabsTrigger>
+          ))}
+        </TabsList>
+        <TabsContent value="users">
+          <UsersPanel />
+        </TabsContent>
+        <TabsContent value="devices">
+          <div className="flex flex-col gap-8">
+            <DevicesPanel />
+            <RecoveryPasswordPanel />
+          </div>
+        </TabsContent>
+        <TabsContent value="sessions">
+          <SessionsPanel />
+        </TabsContent>
+        <TabsContent value="invites">
+          <InvitesPanel />
+        </TabsContent>
+        <TabsContent value="people">
+          <PeoplePanel />
+        </TabsContent>
+      </Tabs>
     </>
   );
 }

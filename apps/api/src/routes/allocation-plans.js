@@ -14,12 +14,14 @@ import {
   createDraftVersion,
   findNewestVersion,
   findVersionByStatus,
+  resolveAppliedSnapshot,
   serializeVersion,
   serializeVersionById,
   versionsForPlan,
 } from "../lib/allocation.js";
 import { getUserId } from "../lib/app-env.js";
 import { writeAuditLog } from "../lib/audit.js";
+import { todayIso } from "../lib/dates.js";
 import { handleValidation } from "../lib/validation.js";
 
 /** @import { StoredAllocationVersion } from "../lib/allocation.js" */
@@ -271,24 +273,48 @@ export function createAllocationPlansRoutes({ db }) {
     // Apply. Never validates the allocation first: a plan whose unallocated
     // figure isn't zero is the operator's call to make, and this app does not
     // resolve conflicts on their behalf (phases/README.md "The one rule").
+    //
+    // Nor does it require the draft to differ from the active version. A
+    // draft with no line edits, applied after a bill or an income line moved,
+    // is exactly how the operator records the new standing-order amounts —
+    // the preview diffs it against what was recorded at the last apply and
+    // names the orders to edit (phases/08-allocation.md "Preview panel").
     .post("/:id/draft/apply", zValidator("json", applyAllocationDraftSchema, handleValidation), async (c) => {
       const id = c.req.param("id");
-      const { note } = c.req.valid("json");
+      const body = c.req.valid("json");
+      const on = body.on ?? todayIso();
 
+      const plan = await findPlan(db, id);
+      if (!plan) {
+        return c.json({ error: { code: "not_found", message: "Allocation plan not found." } }, 404);
+      }
       const draft = await findVersionByStatus(db, id, "draft");
       if (!draft) {
         return c.json({ error: { code: "not_found", message: "No draft to apply." } }, 404);
       }
       const active = await findVersionByStatus(db, id, "active");
 
-      const applied = await applyDraftVersion(db, { draft, active, note });
+      // Resolved before the transaction, from the same inputs the preview
+      // used, and written in the same statement that makes the draft active.
+      const appliedSnapshot = await resolveAppliedSnapshot(db, { plan, version: draft, on });
+      const applied = await applyDraftVersion(db, { draft, active, note: body.note, appliedSnapshot });
 
       await writeAuditLog(db, {
         actorId: getUserId(c),
         action: "allocation_version.apply",
         entityType: "allocation_version",
         entityId: applied.id,
-        metadata: { planId: id, version: applied.version, archivedVersionId: active?.id ?? null },
+        metadata: {
+          planId: id,
+          version: applied.version,
+          archivedVersionId: active?.id ?? null,
+          // The figures that were (or should now be) typed into the bank —
+          // the one part of an apply that is money rather than a status flip.
+          appliedTransfers: appliedSnapshot
+            ? appliedSnapshot.transfers.map((t) => ({ accountId: t.accountId, perPayCents: t.perPayCents }))
+            : null,
+          payCadence: appliedSnapshot?.payCadence ?? null,
+        },
       });
 
       return c.json({ version: await serializeVersionById(db, applied) });

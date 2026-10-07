@@ -5,57 +5,72 @@ import { useSettings } from "@/lib/settings.jsx";
 /** @import { Cents } from "@budget/engine" */
 
 /**
- * A tinted pill badge for a signed change — `+5.3%` or `+$40.00` — never
- * bare coloured text. Positive/negative tokens only ever mean money in/out
- * here; a value of exactly zero gets the neutral muted treatment.
+ * A pill badge for a change — `+$40.00`, `−5.3%` — never bare coloured text.
+ *
+ * NEUTRAL by default. Most changes in this app are neither good nor bad:
+ * moving $140 from Bills to Savings is −$140 on one line and +$140 on the
+ * other, and colouring them red and green handed down a verdict on a
+ * zero-sum move. The same went for comparing two income variants, where the
+ * colours flipped depending on which one you picked first. A returning
+ * household reads red as "go and look at this" — so red has to be earned.
+ *
+ * `variance` is the one case that earns it: actual spending against a
+ * budget, where over is genuinely bad and under is genuinely good. It says
+ * so in words ("$40.00 over"), so the colour confirms the meaning rather than
+ * being the only place it lives.
  *
  * @param {{
  *   value: number,
  *   kind?: 'pct' | 'cents',
- *   invert?: boolean,
+ *   variance?: boolean,
  *   className?: string,
- * }} props
+ * }} props `value` for a variance is actual − budget: positive is over.
  */
-export function Delta({ value, kind = "pct", invert = false, className }) {
+export function Delta({ value, kind = "pct", variance = false, className }) {
   const { currency, locale } = useSettings();
   const magnitude = Math.abs(value);
+  const amount =
+    kind === "pct" ? `${magnitude.toFixed(1)}%` : formatMoney(/** @type {Cents} */ (magnitude), { currency, locale });
+  const amountSpoken =
+    kind === "pct"
+      ? `${magnitude.toFixed(1)} percent`
+      : formatMoneySpoken(/** @type {Cents} */ (magnitude), { currency, locale });
+
+  if (variance) {
+    const over = value > 0;
+    const under = value < 0;
+    return (
+      <span
+        className={cn(
+          "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium whitespace-nowrap",
+          over ? "bg-negative-soft text-negative" : under ? "bg-positive-soft text-positive" : "bg-surface-muted text-text-muted",
+          className,
+        )}
+      >
+        <span aria-hidden="true">{over ? `${amount} over` : under ? `${amount} under` : "on budget"}</span>
+        <span className="sr-only">
+          {over ? `${amountSpoken} over budget` : under ? `${amountSpoken} under budget` : "on budget"}
+        </span>
+      </span>
+    );
+  }
+
   // U+2212 MINUS SIGN, not a hyphen — it aligns with the digits. It is also
   // the reason this needs a spoken alternative: assistive tech reads it
   // inconsistently, and "5.3%" and "−5.3%" must never sound the same.
   const sign = value > 0 ? "+" : value < 0 ? "−" : "";
-  const text =
-    kind === "pct"
-      ? `${sign}${magnitude.toFixed(1)}%`
-      : `${sign}${formatMoney(/** @type {Cents} */ (magnitude), { currency, locale })}`;
   const direction = value > 0 ? "up" : value < 0 ? "down" : "no change";
-  const spoken =
-    kind === "pct"
-      ? `${direction} ${magnitude.toFixed(1)} percent`
-      : `${direction} ${formatMoneySpoken(/** @type {Cents} */ (magnitude), { currency, locale })}`;
-
-  // `invert` flips which sign reads as good news without touching the
-  // displayed number — e.g. a spending variance, where MORE than budgeted
-  // (a positive number) is the bad outcome and belongs in the negative
-  // token, the opposite of a plain income/balance delta.
-  const isGood = invert ? value < 0 : value > 0;
-  const isBad = invert ? value > 0 : value < 0;
 
   return (
     <span
       className={cn(
-        "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
-        value === 0
-          ? "bg-surface-muted text-text-muted"
-          : isGood
-            ? "bg-positive-soft text-positive"
-            : isBad
-              ? "bg-negative-soft text-negative"
-              : "bg-surface-muted text-text-muted",
+        "inline-flex items-center rounded-full bg-surface-muted px-2 py-0.5 text-xs font-medium whitespace-nowrap tabular-nums",
+        value === 0 ? "text-text-muted" : "text-text",
         className,
       )}
     >
-      <span aria-hidden="true">{text}</span>
-      <span className="sr-only">{value === 0 ? "no change" : spoken}</span>
+      <span aria-hidden="true">{`${sign}${amount}`}</span>
+      <span className="sr-only">{value === 0 ? "no change" : `${direction} ${amountSpoken}`}</span>
     </span>
   );
 }

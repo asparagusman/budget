@@ -4,6 +4,12 @@
    used by the generated shadcn/ui primitives. */
 @import "tw-animate-css";
 
+/* OverlayScrollbars' structural CSS (components/scroll-area.jsx), layered so
+   a utility on a scroll area's root still wins. Unlayered, its host rule
+   (`display: flex`) beat every Tailwind class — `hidden md:block` on a
+   scrolling table would have shown it on a phone. */
+@import "overlayscrollbars/overlayscrollbars.css" layer(base);
+
 /* Self-hosted, variable-weight Inter. No Google Fonts request — this app is
    served over Tailscale to devices that may have no general internet route,
    and a blocked font request must not leave the page rendering in the
@@ -12,7 +18,22 @@
 
 @import "./tokens.css";
 
-@custom-variant dark (&:is([data-theme="dark"] *));
+/* `dark:` has to match the same two conditions tokens.css goes dark on: an
+   explicit [data-theme="dark"], OR the OS preference while no explicit
+   light is set. "System" removes data-theme entirely (lib/theme.jsx), so a
+   variant keyed on the attribute alone left every `dark:` utility dead for
+   an OS-dark household — tokens dark, primitives light, a second dark theme
+   nobody designed. */
+@custom-variant dark {
+  &:is([data-theme="dark"] *) {
+    @slot;
+  }
+  @media (prefers-color-scheme: dark) {
+    &:is(:root:not([data-theme="light"]) *) {
+      @slot;
+    }
+  }
+}
 
 @layer base {
   html {
@@ -49,16 +70,32 @@
         removed the document scrollbar and shifted the whole layout by its
         width on every open and close. A body that never scrolled has no
         scrollbar to remove.
-     3. `scrollbar-gutter: stable` on the scroller below reserves the space
-        once, so a short page and a long page align.
-     4. There is now a single, styleable scroll container to hang an
-        overlay scrollbar off, instead of the browser's document one. */
+     3. A short page and a long page put their content in the same place:
+        <main>'s scrollbar is an overlay (see "scrollbars" below), so it
+        takes no width whether or not the page overflows.
+     4. There is a single scroll container to hang that overlay scrollbar
+        off, instead of the browser's document one. */
   html,
   body,
   #root {
     height: 100%;
     overflow-y: hidden;
     overscroll-behavior-y: none;
+  }
+
+  /* ---- scrollbars ----------------------------------------------------
+     No native scrollbars anywhere. Containers that scroll a real distance
+     — <main>, sheets, the nav lists, wide tables — are <ScrollArea>s
+     (components/scroll-area.jsx) and draw an overlay bar that appears on
+     pointer movement or scroll. What is left native is short and
+     wheel/touch-scrolled: menu, select and palette lists, a tab strip on a
+     phone. */
+  * {
+    scrollbar-width: none;
+  }
+
+  *::-webkit-scrollbar {
+    display: none;
   }
 
   /* ---- touch targets -------------------------------------------------
@@ -316,4 +353,24 @@
   [data-stagger] > * {
     animation-delay: 0ms !important;
   }
+}
+
+/* The overlay scrollbar's look (scrollbars.theme in components/scroll-area.jsx).
+   A thin rounded handle in the text colour at low strength, so it reads on
+   both themes from the one token; it thickens under the pointer, where it
+   is about to be dragged. No track: the content shows through. */
+.os-theme-app {
+  --os-size: 10px;
+  --os-padding-perpendicular: 2px;
+  --os-padding-axis: 2px;
+  --os-track-border-radius: 9999px;
+  --os-handle-border-radius: 9999px;
+  --os-handle-bg: color-mix(in oklab, var(--text) 26%, transparent);
+  --os-handle-bg-hover: color-mix(in oklab, var(--text) 40%, transparent);
+  --os-handle-bg-active: color-mix(in oklab, var(--text) 52%, transparent);
+  --os-handle-min-size: 32px;
+  --os-handle-perpendicular-size: 60%;
+  --os-handle-perpendicular-size-hover: 100%;
+  --os-handle-perpendicular-size-active: 100%;
+  --os-handle-interactive-area-offset: 4px;
 }

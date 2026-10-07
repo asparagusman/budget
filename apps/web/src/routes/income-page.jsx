@@ -37,13 +37,16 @@ import { EmptyState } from "@/components/empty-state.jsx";
 import { CardsSkeleton, ListSkeleton, PanelSkeleton } from "@/components/loading.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
 import { Money } from "@/components/money.jsx";
+import { InlineError, Notice } from "@/components/notice.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
+import { PageSection } from "@/components/page-section.jsx";
 import { useConfirm } from "@/components/confirm-dialog.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
 import { registerCommands } from "@/lib/commands.js";
 import { CADENCES, CADENCE_LABELS } from "@/lib/constants.js";
 import { formatIsoDate, todayIso } from "@/lib/dates.js";
+import { colorFor, entityColors } from "@/lib/entity-colors.js";
 import { useSettings } from "@/lib/settings.jsx";
 import { cn } from "@/lib/utils.js";
 
@@ -58,23 +61,6 @@ import { cn } from "@/lib/utils.js";
 /** @typedef {{ name: string, notes: string | null }} VariantFormData */
 /** @typedef {{ personId: string, label: string | null, amountCents: Cents, cadence: Cadence, notes: string | null }} IncomeLineFormData */
 /** @typedef {{ variantId: string, startsOn: string, endsOn: string | null, notes: string | null }} ScheduleFormData */
-
-// The five chart line tokens double as a stable variant palette — the same
-// colours the rest of the app already uses for series, so a variant reads as
-// "the same thing" wherever it shows up.
-const VARIANT_COLOR_VARS = [
-  "var(--chart-line-1)",
-  "var(--chart-line-2)",
-  "var(--chart-line-3)",
-  "var(--chart-line-4)",
-  "var(--chart-line-5)",
-];
-
-/** @param {string[]} orderedVariantIds @param {string} variantId */
-function colorForVariant(orderedVariantIds, variantId) {
-  const idx = Math.max(orderedVariantIds.indexOf(variantId), 0);
-  return VARIANT_COLOR_VARS[idx % VARIANT_COLOR_VARS.length];
-}
 
 /** @param {Person[]} people @param {string} personId */
 function personName(people, personId) {
@@ -168,10 +154,13 @@ function computeGaps(entries, windowStartMs, windowEndMs) {
  * @param {{ label: string, value: Cents | null }} props
  */
 function TotalCell({ label, value }) {
+  // Figure pinned to the bottom of the cell: "Per pay (Fortnightly)" wraps to
+  // two lines in a narrow card and "Per month" doesn't, and the three figures
+  // should still read across as one row.
   return (
-    <div>
+    <div className="flex flex-col justify-between gap-0.5">
       <p className="text-xs text-text-subtle">{label}</p>
-      <p className="font-semibold text-text">{value != null ? <Money value={value} /> : "—"}</p>
+      <p className="font-semibold text-text tabular-nums">{value != null ? <Money value={value} /> : "—"}</p>
     </div>
   );
 }
@@ -181,7 +170,7 @@ function TotalCell({ label, value }) {
  */
 function TotalsRow({ totals, payCadenceLabel }) {
   return (
-    <div className="grid grid-cols-3 gap-2 border-t border-border pt-3">
+    <div className="mt-auto grid grid-cols-3 gap-2 border-t border-border pt-3">
       <TotalCell label={`Per pay${payCadenceLabel ? ` (${payCadenceLabel})` : ""}`} value={totals.totalCents.perPay} />
       <TotalCell label="Per month" value={totals.totalCents.perMonth} />
       <TotalCell label="Per year" value={totals.totalCents.perYear} />
@@ -214,10 +203,9 @@ function ActiveVariantBanner({ resolution, isLoading, variants, payCadenceLabel,
   const shown = override ?? resolution?.variant ?? null;
 
   return (
-    <div className="flex flex-col gap-3 rounded-(--radius-card) bg-surface p-5 shadow-(--shadow-card)">
+    <div className="flex flex-col gap-3 rounded-(--radius-card) bg-surface p-4 shadow-(--shadow-card) md:p-5">
       {diagnostic ? (
-        <div className="flex items-start gap-2 rounded-lg bg-negative-soft p-3 text-sm text-negative">
-          <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+        <Notice>
           <p>
             {diagnostic.kind === "overlap" ? (
               <>
@@ -233,7 +221,7 @@ function ActiveVariantBanner({ resolution, isLoading, variants, payCadenceLabel,
               </>
             )}
           </p>
-        </div>
+        </Notice>
       ) : null}
 
       {override ? (
@@ -248,12 +236,15 @@ function ActiveVariantBanner({ resolution, isLoading, variants, payCadenceLabel,
       ) : null}
 
       {shown ? (
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        // The variant's name belongs to the figure: on desktop it used to sit
+        // at the far right edge of the card, 900px from the number it names.
+        <div className="flex flex-col gap-1">
+          <p className="flex flex-wrap items-baseline gap-x-2 text-xs font-medium tracking-wide text-text-subtle uppercase">
+            {override ? "Viewing" : "Active today"}
+            <span className="text-sm font-semibold tracking-normal text-text normal-case">{shown.name}</span>
+          </p>
           <div>
-            <p className="text-xs font-medium tracking-wide text-text-subtle uppercase">
-              {override ? "Viewing" : "Active today"}
-            </p>
-            <p className="mt-1 text-3xl font-bold tracking-tight text-text">
+            <p className="text-3xl font-bold tracking-tight text-text tabular-nums">
               {shown.totals.totalCents.perPay != null ? (
                 <Money value={shown.totals.totalCents.perPay} />
               ) : (
@@ -264,7 +255,6 @@ function ActiveVariantBanner({ resolution, isLoading, variants, payCadenceLabel,
               </span>
             </p>
           </div>
-          <p className="text-lg font-semibold text-text">{shown.name}</p>
         </div>
       ) : (
         <EmptyState
@@ -330,7 +320,7 @@ function VariantFormDialog({ open, onOpenChange, variant, submitting, onSubmit }
           <FieldRow label="Notes" htmlFor="variant-notes" hint="Optional — context worth keeping, e.g. scheme details.">
             <Textarea id="variant-notes" value={notes} onChange={(e) => setNotes(e.target.value)} rows={3} />
           </FieldRow>
-          {error ? <p className="text-sm text-negative">{error}</p> : null}
+          {error ? <InlineError>{error}</InlineError> : null}
           <DialogFooter>
             <Button type="submit" disabled={submitting}>
               {submitting ? "Saving…" : "Save"}
@@ -453,7 +443,7 @@ function IncomeLineFormDialog({ open, onOpenChange, line, people, submitting, on
           <FieldRow label="Notes" htmlFor="line-notes" hint="Optional.">
             <Textarea id="line-notes" value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} />
           </FieldRow>
-          {error ? <p className="text-sm text-negative">{error}</p> : null}
+          {error ? <InlineError>{error}</InlineError> : null}
           <DialogFooter>
             <Button type="submit" disabled={submitting}>
               {submitting ? "Saving…" : "Save"}
@@ -563,10 +553,10 @@ function ScheduleEntryFormDialog({ open, onOpenChange, entry, variants, submitti
           <FieldRow label="Notes" htmlFor="entry-notes" hint="Optional.">
             <Textarea id="entry-notes" value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} />
           </FieldRow>
-          {error ? <p className="text-sm text-negative">{error}</p> : null}
+          {error ? <InlineError>{error}</InlineError> : null}
           <DialogFooter className={onDelete ? "sm:justify-between!" : undefined}>
             {onDelete ? (
-              <Button type="button" variant="ghost" className="text-negative" onClick={onDelete}>
+              <Button type="button" variant="ghost" className="text-text-muted hover:text-text" onClick={onDelete}>
                 Delete
               </Button>
             ) : null}
@@ -581,10 +571,41 @@ function ScheduleEntryFormDialog({ open, onOpenChange, entry, variants, submitti
 }
 
 /**
- * One band per scheduled entry, coloured by variant. Overlaps ring red;
- * uncovered stretches sit behind everything as a tinted band — the operator
- * should see a bad schedule, not read about it (phases/05-income.md
- * "Schedule timeline").
+ * Quarter starts inside the window, for the axis. Calendar quarters rather than
+ * "every N days from the left edge", so the labels land on dates a person
+ * would name.
+ *
+ * @param {string} windowFrom
+ * @param {number} windowStartMs
+ * @param {number} windowEndMs
+ */
+function quarterTicks(windowFrom, windowStartMs, windowEndMs) {
+  const [y0, m0] = windowFrom.split("-").map(Number);
+  const fmt = new Intl.DateTimeFormat("en-AU", { month: "short", year: "numeric" });
+  /** @type {{ ms: number, label: string }[]} */
+  const ticks = [];
+  let y = /** @type {number} */ (y0);
+  let m = /** @type {number} */ (m0) - 1;
+  m -= m % 3;
+  for (let i = 0; i < 12; i++) {
+    const date = new Date(y, m, 1);
+    const ms = date.getTime();
+    if (ms > windowEndMs) break;
+    if (ms >= windowStartMs) ticks.push({ ms, label: fmt.format(date) });
+    m += 3;
+    if (m > 11) {
+      m -= 12;
+      y += 1;
+    }
+  }
+  return ticks;
+}
+
+/**
+ * One band per scheduled entry, coloured by variant, on a quarterly axis with
+ * today marked. Overlaps ring amber; stretches no entry covers are hatched and
+ * named — the operator should see a bad schedule, not read about it
+ * (phases/05-income.md "Schedule timeline").
  *
  * @param {{ entries: ScheduleEntry[], variants: IncomeVariant[], onEditEntry: (entry: ScheduleEntry) => void }} props
  */
@@ -602,51 +623,100 @@ function ScheduleTimelineDesktop({ entries, variants, onEditEntry }) {
 
   const overlapping = useMemo(() => computeOverlappingIds(entries), [entries]);
   const gaps = useMemo(() => computeGaps(entries, windowStartMs, windowEndMs), [entries, windowStartMs, windowEndMs]);
-  const orderedVariantIds = variants.map((v) => v.id);
+  const ticks = useMemo(() => quarterTicks(windowFrom, windowStartMs, windowEndMs), [windowFrom, windowStartMs, windowEndMs]);
+  const variantColors = useMemo(() => entityColors(variants.map((v) => v.id)), [variants]);
   const sorted = [...entries].sort((a, b) => a.startsOn.localeCompare(b.startsOn));
   const todayPct = pct(isoToMs(todayIso()));
 
   return (
-    <div className="rounded-(--radius-card) bg-surface p-5 shadow-(--shadow-card)">
-      <div className="mb-3 flex items-center justify-between text-xs text-text-muted">
-        <span>{formatIsoDate(windowFrom, "en-AU")}</span>
-        <span>{formatIsoDate(windowTo, "en-AU")}</span>
+    <div
+      role="group"
+      aria-label="Variant schedule timeline"
+      className="rounded-(--radius-card) bg-surface p-5 shadow-(--shadow-card)"
+    >
+      <div className="relative h-5 text-xs text-text-muted">
+        {ticks
+          // A tick label under the Today pill or jammed against an edge
+          // would overprint, so those few drop out.
+          .filter((tick) => Math.abs(pct(tick.ms) - todayPct) > 7 && pct(tick.ms) > 4 && pct(tick.ms) < 96)
+          .map((tick) => (
+            <span
+              key={tick.ms}
+              className="absolute top-0 -translate-x-1/2 whitespace-nowrap"
+              style={{ left: `${pct(tick.ms)}%` }}
+            >
+              {tick.label}
+            </span>
+          ))}
+        <span
+          className="absolute top-0 -translate-x-1/2 rounded-full bg-accent-brand px-2 text-[0.6875rem] leading-5 font-medium text-accent-brand-fg"
+          style={{ left: `${todayPct}%` }}
+        >
+          Today
+        </span>
       </div>
-      <div className="relative min-h-12">
-        {gaps.map(([gStart, gEnd], i) => (
+
+      <div className="relative mt-1">
+        {ticks.map((tick) => (
           <div
-            key={i}
-            className="absolute inset-y-0 rounded-md bg-negative-soft"
-            style={{ left: `${pct(gStart)}%`, width: `${Math.max(pct(gEnd) - pct(gStart), 0.4)}%` }}
+            key={tick.ms}
+            aria-hidden="true"
+            className="absolute inset-y-0 w-px bg-border"
+            style={{ left: `${pct(tick.ms)}%` }}
           />
         ))}
-        <div className="absolute inset-y-0 z-20 w-px bg-(--accent)" style={{ left: `${todayPct}%` }} />
-        <div className="relative z-10 flex flex-col gap-2 py-1">
+        {gaps.map(([gStart, gEnd], i) => {
+          const width = Math.max(pct(gEnd) - pct(gStart), 0.4);
+          return (
+            <div
+              key={i}
+              className="absolute inset-y-0 overflow-hidden rounded-md border border-dashed border-warning-strong/50 px-2 py-1 text-xs font-medium whitespace-nowrap text-warning-strong"
+              style={{
+                left: `${pct(gStart)}%`,
+                width: `${width}%`,
+                backgroundImage:
+                  "repeating-linear-gradient(135deg, var(--warning-soft) 0 6px, transparent 6px 12px)",
+              }}
+            >
+              {width >= 12 ? "No variant in effect" : null}
+            </div>
+          );
+        })}
+        <div
+          aria-hidden="true"
+          className="absolute inset-y-0 z-0 w-px bg-accent-brand"
+          style={{ left: `${todayPct}%` }}
+        />
+        <div className="relative z-10 flex flex-col gap-2 py-2">
           {sorted.map((entry) => {
             const left = pct(isoToMs(entry.startsOn));
             const right = pct(entry.endsOn ? isoToMs(entry.endsOn) : windowEndMs);
+            const color = colorFor(variantColors, entry.variantId);
             return (
               <button
                 key={entry.id}
                 type="button"
                 onClick={() => onEditEntry(entry)}
                 className={cn(
-                  "h-8 rounded-md border-l-4 text-left text-xs font-medium text-text transition-opacity hover:opacity-80",
-                  overlapping.has(entry.id) && "ring-2 ring-negative ring-offset-1 ring-offset-surface",
+                  "flex h-9 items-center gap-2 overflow-hidden rounded-md px-2.5 text-left text-xs text-text transition-colors hover:brightness-95",
+                  overlapping.has(entry.id) && "ring-2 ring-warning-strong ring-offset-1 ring-offset-surface",
                 )}
                 style={{
                   marginLeft: `${left}%`,
                   width: `${Math.max(right - left, 1.5)}%`,
-                  // A tinted fill + coloured left border reads clearly in
-                  // both themes without a hardcoded text colour fighting an
-                  // arbitrary background lightness the way solid-fill +
-                  // white text would (some chart-line tokens are light).
-                  borderLeftColor: colorForVariant(orderedVariantIds, entry.variantId),
-                  backgroundColor: `color-mix(in oklch, ${colorForVariant(orderedVariantIds, entry.variantId)} 16%, transparent)`,
+                  // Mixed into the surface rather than transparent, so the
+                  // Today line passes behind the band instead of through its
+                  // label. A tint keeps both themes legible without a
+                  // hardcoded text colour fighting the fill.
+                  backgroundColor: `color-mix(in oklch, ${color} 20%, var(--surface))`,
                 }}
                 title={`${variantName(variants, entry.variantId)} · ${formatIsoDate(entry.startsOn, "en-AU")} – ${entry.endsOn ? formatIsoDate(entry.endsOn, "en-AU") : "open-ended"}`}
               >
-                <span className="block truncate px-2 py-1.5">{variantName(variants, entry.variantId)}</span>
+                <span aria-hidden="true" className="size-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
+                <span className="max-w-[70%] shrink-0 truncate font-medium">{variantName(variants, entry.variantId)}</span>
+                <span className="min-w-0 truncate text-text-muted">
+                  {formatIsoDate(entry.startsOn, "en-AU")} – {entry.endsOn ? formatIsoDate(entry.endsOn, "en-AU") : "open-ended"}
+                </span>
               </button>
             );
           })}
@@ -676,8 +746,8 @@ function ScheduleTimelineMobile({ entries, variants, onEditEntry }) {
         return (
           <div key={entry.id}>
             {hasGapBefore ? (
-              <div className="flex items-center gap-2 bg-negative-soft px-4 py-2 text-xs text-negative">
-                <AlertTriangleIcon className="size-3.5 shrink-0" aria-hidden="true" />
+              <div className="flex items-center gap-2 bg-warning-soft px-4 py-2 text-xs text-text">
+                <AlertTriangleIcon className="size-3.5 shrink-0 text-warning-strong" aria-hidden="true" />
                 Gap: no variant from {formatIsoDate(/** @type {string} */ (prev?.endsOn), "en-AU")} to{" "}
                 {formatIsoDate(entry.startsOn, "en-AU")}
               </div>
@@ -687,7 +757,7 @@ function ScheduleTimelineMobile({ entries, variants, onEditEntry }) {
               primary={
                 <span className="flex items-center gap-2">
                   {variantName(variants, entry.variantId)}
-                  {overlapping.has(entry.id) ? <Badge variant="destructive">Overlaps</Badge> : null}
+                  {overlapping.has(entry.id) ? <Badge variant="attention">Overlaps</Badge> : null}
                 </span>
               }
               secondary={`${formatIsoDate(entry.startsOn, "en-AU")} – ${entry.endsOn ? formatIsoDate(entry.endsOn, "en-AU") : "open-ended"}`}
@@ -717,7 +787,7 @@ function ComparisonPanel({ variants, people, payCadenceLabel }) {
   );
 
   return (
-    <div className="flex flex-col gap-4 rounded-(--radius-card) bg-surface p-5 shadow-(--shadow-card)">
+    <div className="flex flex-col gap-4 rounded-(--radius-card) bg-surface p-4 shadow-(--shadow-card) md:p-5">
       <div className="grid grid-cols-2 gap-3">
         <FieldRow label="Variant A" htmlFor="compare-a">
           <Select value={aId} onValueChange={setAId}>
@@ -822,7 +892,7 @@ function VariantCard({ variant, isActive, people, payCadenceLabel, onEdit, onDup
           <Button size="icon-sm" variant="ghost" aria-label="Edit variant" onClick={onEdit}>
             <PencilIcon />
           </Button>
-          <Button size="icon-sm" variant="ghost" className="text-negative" aria-label="Archive variant" onClick={onArchive}>
+          <Button size="icon-sm" variant="ghost" className="text-text-muted hover:text-text" aria-label="Archive variant" onClick={onArchive}>
             <Trash2Icon />
           </Button>
         </div>
@@ -845,7 +915,7 @@ function VariantCard({ variant, isActive, people, payCadenceLabel, onEdit, onDup
                 <Button
                   size="icon-xs"
                   variant="ghost"
-                  className="text-negative"
+                  className="text-text-muted hover:text-text"
                   aria-label="Delete line"
                   onClick={() => onDeleteLine(line.id)}
                 >
@@ -888,7 +958,7 @@ function VariantDetailSheet(props) {
   const { variant, onOpenChange } = props;
   return (
     <Sheet open={variant !== null} onOpenChange={onOpenChange}>
-      <SheetContent side="bottom" className="max-h-[85vh] overflow-y-auto">
+      <SheetContent side="bottom" scrollable className="max-h-[85vh]">
         <SheetHeader>
           <SheetTitle>{variant?.name}</SheetTitle>
           <SheetDescription>{variant?.notes ?? "Lines and totals for this variant."}</SheetDescription>
@@ -1034,7 +1104,7 @@ function PayScheduleFormDialog({ open, onOpenChange, schedule, people, submittin
               </div>
             </FieldRow>
           ) : null}
-          {error ? <p className="text-sm text-negative">{error}</p> : null}
+          {error ? <InlineError>{error}</InlineError> : null}
           <DialogFooter>
             <Button type="submit" disabled={submitting}>
               {submitting ? "Saving…" : "Save"}
@@ -1140,68 +1210,73 @@ function PaySchedulesPanel({ people, schedules, isLoading }) {
       {/* The section's own control sits on its heading row rather than in
           the page control bar above: that bar already carries two buttons
           and a third overflows it at 375px. */}
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <h2 id="pay-schedules" className="text-lg font-semibold text-text">
-            Pay schedules
-          </h2>
-          <p className="mt-1 text-sm text-text-muted">
-            One known payday per person. Everything on this page quoted &ldquo;per pay&rdquo; uses the
-            primary schedule&apos;s cadence.
-          </p>
-        </div>
-        <Button
-          variant="outline"
-          className="shrink-0"
-          onClick={() => {
-            setEditing(null);
-            setFormOpen(true);
-          }}
-          disabled={people.length === 0}
-          title={people.length === 0 ? "Add a person first." : undefined}
-        >
-          <PlusIcon />
-          Add pay schedule
-        </Button>
-      </div>
-
-      {isLoading ? (
-        <ListSkeleton rows={2} label="Loading pay schedules" />
-      ) : schedules.length === 0 ? (
-        <EmptyState
-          icon={CalendarClockIcon}
-          title="No pay schedules yet"
-          description="Add one known payday per person — the rest of the series, including any 27-payday years, is derived from it."
-          action={
-            <Button
-              onClick={() => {
-                setEditing(null);
-                setFormOpen(true);
-              }}
-              disabled={people.length === 0}
-              title={people.length === 0 ? "Add a person in Admin first." : undefined}
-            >
-              <PlusIcon />
-              Add pay schedule
-            </Button>
-          }
-        />
-      ) : (
-        <DataList>
-          {schedules.map((schedule) => {
-            const next = nextPayday(schedule);
-            return (
-              <DataListRow
-                key={schedule.id}
-                primary={
-                  <span className="flex items-center gap-2">
-                    {personName(schedule.personId)}
-                    {schedule.isPrimary ? <Badge variant="secondary">Primary</Badge> : null}
-                  </span>
-                }
-                secondary={`${CADENCE_LABELS[schedule.cadence]} · anchored ${formatIsoDate(schedule.anchorDate, locale)}${next ? ` · next ${formatIsoDate(next, locale)}` : ""}`}
-                trailing={
-                  <div className="flex items-center gap-1">
+      <PageSection
+        id="pay-schedules"
+        title="Pay schedules"
+        description={
+          <>
+            One known payday per person. Everything on this page quoted &ldquo;per pay&rdquo; uses the primary
+            schedule&apos;s cadence.
+          </>
+        }
+        actions={
+          <Button
+            variant="outline"
+            onClick={() => {
+              setEditing(null);
+              setFormOpen(true);
+            }}
+            disabled={people.length === 0}
+            title={people.length === 0 ? "Add a person first." : undefined}
+          >
+            <PlusIcon />
+            Add pay schedule
+          </Button>
+        }
+      >
+        {isLoading ? (
+          <ListSkeleton rows={2} label="Loading pay schedules" />
+        ) : schedules.length === 0 ? (
+          <EmptyState
+            icon={CalendarClockIcon}
+            title="No pay schedules yet"
+            description="Add one known payday per person — the rest of the series, including any 27-payday years, is derived from it."
+            action={
+              <Button
+                onClick={() => {
+                  setEditing(null);
+                  setFormOpen(true);
+                }}
+                disabled={people.length === 0}
+                title={people.length === 0 ? "Add a person in Admin first." : undefined}
+              >
+                <PlusIcon />
+                Add pay schedule
+              </Button>
+            }
+          />
+        ) : (
+          // Its own rows rather than <DataListRow>: that truncates its second
+          // line, and beside Edit and Archive on a phone it cut every schedule
+          // off at "anchored 16 Sept…" — before the next payday, the one date
+          // anybody opens this for.
+          <ul className="flex flex-col divide-y divide-border overflow-hidden rounded-(--radius-card) bg-surface shadow-(--shadow-card)">
+            {schedules.map((schedule) => {
+              const next = nextPayday(schedule);
+              return (
+                <li key={schedule.id} className="flex items-center justify-between gap-3 py-2.5 pr-2 pl-4">
+                  <div className="min-w-0">
+                    <p className="flex items-center gap-2 text-sm font-medium text-text">
+                      <span className="truncate">{personName(schedule.personId)}</span>
+                      {schedule.isPrimary ? <Badge variant="secondary">Primary</Badge> : null}
+                    </p>
+                    <p className="text-xs text-text-muted">
+                      {CADENCE_LABELS[schedule.cadence]}
+                      {next ? ` · next ${formatIsoDate(next, locale)}` : ""}
+                      <span className="text-text-subtle"> · anchored {formatIsoDate(schedule.anchorDate, locale)}</span>
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 items-center">
                     <Button
                       size="sm"
                       variant="ghost"
@@ -1215,7 +1290,7 @@ function PaySchedulesPanel({ people, schedules, isLoading }) {
                     <Button
                       size="sm"
                       variant="ghost"
-                      className="text-negative"
+                      className="text-text-muted hover:text-text"
                       onClick={async () => {
                         const ok = await confirm({
                           title: `Archive ${personName(schedule.personId)}'s pay schedule?`,
@@ -1230,12 +1305,12 @@ function PaySchedulesPanel({ people, schedules, isLoading }) {
                       Archive
                     </Button>
                   </div>
-                }
-              />
-            );
-          })}
-        </DataList>
-      )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </PageSection>
 
       <PayScheduleFormDialog
         open={formOpen}
@@ -1564,104 +1639,103 @@ export function IncomePage() {
           between. Named "Variant schedule" rather than plain "Schedule"
           because pay schedules are on this page too, and they are a
           different calendar entirely. */}
-      <h2 className="text-lg font-semibold text-text">Variant schedule</h2>
-
-      {scheduleQuery.isLoading ? (
-        <PanelSkeleton height={140} label="Loading variant schedule" />
-      ) : schedule.length === 0 ? (
-        <EmptyState
-          icon={CalendarRangeIcon}
-          title="No schedule yet"
-          description="Add an entry so the app knows which variant is active on any given date. Until then, every date is a gap."
-        />
-      ) : (
-        <>
-          <div className="hidden md:block">
-            <ScheduleTimelineDesktop
-              entries={schedule}
-              variants={variants}
-              onEditEntry={(entry) => setScheduleForm({ entry })}
-            />
-          </div>
-          <div className="md:hidden">
-            <ScheduleTimelineMobile
-              entries={schedule}
-              variants={variants}
-              onEditEntry={(entry) => setScheduleForm({ entry })}
-            />
-          </div>
-        </>
-      )}
-
-      <h2 className="text-lg font-semibold text-text">Variants</h2>
-
-      {isLoading ? (
-        <CardsSkeleton cards={3} height={300} label="Loading income variants" />
-      ) : variants.length === 0 ? (
-        <EmptyState
-          icon={WalletIcon}
-          title="No income variants yet"
-          description="Add each income scenario the household goes through — Usual, and any parental-leave phases — starting with Usual."
-          action={
-            <Button onClick={() => setVariantFormOpen(true)}>
-              <PlusIcon />
-              Add income variant
-            </Button>
-          }
-        />
-      ) : (
-        <>
-          <div className="hidden gap-4 md:grid md:grid-cols-2 xl:grid-cols-3">
-            {variants.map((variant) => (
-              <VariantCard
-                key={variant.id}
-                variant={variant}
-                isActive={resolveQuery.data?.variantId === variant.id}
-                people={people}
-                payCadenceLabel={payCadenceLabel}
-                onEdit={() => {
-                  setEditingVariant(variant);
-                  setVariantFormOpen(true);
-                }}
-                onDuplicate={() => duplicateVariant.mutate(variant.id)}
-                onArchive={() => confirmArchiveVariant(variant)}
-                onAddLine={() => setLineForm({ variantId: variant.id, line: null })}
-                onEditLine={(line) => setLineForm({ variantId: variant.id, line })}
-                onDeleteLine={confirmDeleteLine}
+      <PageSection title="Variant schedule">
+        {scheduleQuery.isLoading ? (
+          <PanelSkeleton height={140} label="Loading variant schedule" />
+        ) : schedule.length === 0 ? (
+          <EmptyState
+            icon={CalendarRangeIcon}
+            title="No schedule yet"
+            description="Add an entry so the app knows which variant is active on any given date. Until then, every date is a gap."
+          />
+        ) : (
+          <>
+            <div className="hidden md:block">
+              <ScheduleTimelineDesktop
+                entries={schedule}
+                variants={variants}
+                onEditEntry={(entry) => setScheduleForm({ entry })}
               />
-            ))}
-          </div>
-
-          <DataList className="md:hidden">
-            {variants.map((variant) => (
-              <DataListRow
-                key={variant.id}
-                onClick={() => setDetailVariant(variant)}
-                primary={
-                  <span className="flex items-center gap-2">
-                    {variant.name}
-                    {resolveQuery.data?.variantId === variant.id ? <Badge variant="secondary">Active</Badge> : null}
-                  </span>
-                }
-                secondary={`${variant.lines.length} line${variant.lines.length === 1 ? "" : "s"}`}
-                trailing={
-                  variant.totals.totalCents.perPay != null ? (
-                    <Money value={variant.totals.totalCents.perPay} />
-                  ) : (
-                    <Money value={variant.totals.totalCents.perMonth} />
-                  )
-                }
+            </div>
+            <div className="md:hidden">
+              <ScheduleTimelineMobile
+                entries={schedule}
+                variants={variants}
+                onEditEntry={(entry) => setScheduleForm({ entry })}
               />
-            ))}
-          </DataList>
-        </>
-      )}
+            </div>
+          </>
+        )}
+      </PageSection>
+
+      <PageSection title="Variants">
+        {isLoading ? (
+          <CardsSkeleton cards={3} height={300} label="Loading income variants" />
+        ) : variants.length === 0 ? (
+          <EmptyState
+            icon={WalletIcon}
+            title="No income variants yet"
+            description="Add each income scenario the household goes through — Usual, and any parental-leave phases — starting with Usual."
+            action={
+              <Button onClick={() => setVariantFormOpen(true)}>
+                <PlusIcon />
+                Add income variant
+              </Button>
+            }
+          />
+        ) : (
+          <>
+            <div className="hidden gap-4 md:grid md:grid-cols-2 md:gap-6 xl:grid-cols-3">
+              {variants.map((variant) => (
+                <VariantCard
+                  key={variant.id}
+                  variant={variant}
+                  isActive={resolveQuery.data?.variantId === variant.id}
+                  people={people}
+                  payCadenceLabel={payCadenceLabel}
+                  onEdit={() => {
+                    setEditingVariant(variant);
+                    setVariantFormOpen(true);
+                  }}
+                  onDuplicate={() => duplicateVariant.mutate(variant.id)}
+                  onArchive={() => confirmArchiveVariant(variant)}
+                  onAddLine={() => setLineForm({ variantId: variant.id, line: null })}
+                  onEditLine={(line) => setLineForm({ variantId: variant.id, line })}
+                  onDeleteLine={confirmDeleteLine}
+                />
+              ))}
+            </div>
+
+            <DataList className="md:hidden">
+              {variants.map((variant) => (
+                <DataListRow
+                  key={variant.id}
+                  onClick={() => setDetailVariant(variant)}
+                  primary={
+                    <span className="flex items-center gap-2">
+                      {variant.name}
+                      {resolveQuery.data?.variantId === variant.id ? <Badge variant="secondary">Active</Badge> : null}
+                    </span>
+                  }
+                  secondary={`${variant.lines.length} line${variant.lines.length === 1 ? "" : "s"}`}
+                  trailing={
+                    variant.totals.totalCents.perPay != null ? (
+                      <Money value={variant.totals.totalCents.perPay} />
+                    ) : (
+                      <Money value={variant.totals.totalCents.perMonth} />
+                    )
+                  }
+                />
+              ))}
+            </DataList>
+          </>
+        )}
+      </PageSection>
 
       {variants.length >= 2 ? (
-        <div id="income-comparison" className="flex flex-col gap-3">
-          <h2 className="text-lg font-semibold text-text">Compare variants</h2>
+        <PageSection id="income-comparison" title="Compare variants">
           <ComparisonPanel variants={variants} people={people} payCadenceLabel={payCadenceLabel} />
-        </div>
+        </PageSection>
       ) : null}
 
       {/* Last on the page on purpose: set-once configuration, below the

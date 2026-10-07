@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { allocationBasis } from "../tables/allocation.js";
+import { cadence } from "../tables/pay-schedules.js";
 
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD.");
 
@@ -83,12 +84,58 @@ export const replaceAllocationLinesSchema = z.object({
 /** @typedef {{ stage: number, goalPct: number }} AllocationStageGoalInput */
 
 // POST /allocation-plans/:id/draft/apply — the note is the operator's own
-// "why", stored on the version that becomes active.
+// "why", stored on the version that becomes active. `on` is the date the
+// preview being applied was computed for (the screen can preview a future
+// cycle); the transfer amounts recorded at apply are resolved for that date.
+// Optional, and defaulted to today in the handler — a schema-level default
+// would freeze the date at module load.
 export const applyAllocationDraftSchema = z.object({
   note: z.string().trim().max(2000).nullable().optional(),
+  on: isoDate.optional(),
 });
 
 /** @typedef {z.infer<typeof applyAllocationDraftSchema>} ApplyAllocationDraftInput */
+
+// The standing-transfer amounts stored on a version when it is applied
+// (`allocation_versions.applied_snapshot`, see tables/allocation.js for why
+// it is jsonb). jsonb has no shape of its own in the database, so every read
+// parses it through this — a row that does not match reads as "not recorded"
+// rather than handing an unchecked blob to code that types money into a
+// sentence.
+export const appliedTransferSchema = z.object({
+  accountId: z.string().uuid(),
+  // The account's name on the day it was applied, copied rather than joined:
+  // a record of what the bank was told must not change when an account is
+  // renamed or archived afterwards.
+  accountName: z.string(),
+  perPayCents: z.number().int(),
+  perMonthCents: z.number().int(),
+  // The income-landing account's "transfer" — money that stays where it
+  // landed, so never a standing order to edit.
+  isNoOp: z.boolean(),
+});
+
+export const appliedSnapshotSchema = z.object({
+  // Bumped if the shape ever changes, so an old row can be told apart from a
+  // malformed one.
+  version: z.literal(1),
+  // The cadence `perPayCents` is in. A later change of the primary schedule's
+  // cadence is NOT converted across — the figures were typed into the bank at
+  // this cadence, and the plan needs re-applying to say what they are now.
+  payCadence: z.enum(cadence.enumValues),
+  // False when no primary pay schedule existed at apply, so `payCadence` was
+  // the monthly fallback rather than a real pay cycle.
+  hasPrimaryPaySchedule: z.boolean(),
+  // The date the amounts were resolved for (the preview's `on`).
+  computedOn: isoDate,
+  // The server's calendar day when the operator pressed Apply.
+  appliedOn: isoDate,
+  grossPerMonthCents: z.number().int(),
+  transfers: z.array(appliedTransferSchema),
+});
+
+/** @typedef {z.infer<typeof appliedTransferSchema>} AppliedTransfer */
+/** @typedef {z.infer<typeof appliedSnapshotSchema>} AppliedSnapshot */
 
 // GET /allocation/compute — `on` is optional and defaults to today in the
 // handler (a schema-level default would freeze the date at module load).

@@ -99,7 +99,7 @@ function stripQuotes(raw) {
  * @param {import("exceljs").Worksheet} sheet
  */
 function parseIncome(sheet) {
-  /** @type {{ key: RowKey, name: string, headerRow: number, totalRow: number, spreadsheetTotalCents: Cents | null, lines: { key: RowKey, personName: string, label: string | null, amountCents: Cents, cadence: Cadence, sourceRow: number }[] }[]} */
+  /** @type {{ key: RowKey, name: string, headerRow: number, totalRow: number, spreadsheetTotalCents: Cents | null, totalCadence: Cadence | null, lines: { key: RowKey, personName: string, label: string | null, amountCents: Cents, cadence: Cadence, sourceRow: number }[] }[]} */
   const variants = [];
   /** @type {Set<string>} */
   const people = new Set();
@@ -117,6 +117,8 @@ function parseIncome(sheet) {
     let totalRow = row;
     /** @type {Cents | null} */
     let spreadsheetTotalCents = null;
+    /** @type {Cadence | null} */
+    let totalCadence = null;
 
     for (let r = row + 1; r <= sheet.rowCount; r += 1) {
       const label = text(sheet, r, 1);
@@ -125,6 +127,9 @@ function parseIncome(sheet) {
         totalRow = r;
         const total = number(sheet, r, 2);
         spreadsheetTotalCents = total === null ? null : toCents(total);
+        // "Total (Fortnightly)" — the workbook stating, in its own words, the
+        // cadence its per-pay figures are in. Read rather than assumed.
+        totalCadence = cadenceFromLabel(/\(([^)]*)\)/.exec(label)?.[1] ?? "");
         break;
       }
       const amount = number(sheet, r, 2);
@@ -143,7 +148,7 @@ function parseIncome(sheet) {
     }
 
     if (lines.length > 0) {
-      variants.push({ key: `variant:${row}`, name, headerRow: row, totalRow, spreadsheetTotalCents, lines });
+      variants.push({ key: `variant:${row}`, name, headerRow: row, totalRow, spreadsheetTotalCents, totalCadence, lines });
     }
   }
 
@@ -452,9 +457,13 @@ function parseProjections(sheet) {
  * creates an account unless they explicitly ask for one
  * (phases/11-polish-mobile-import.md, workstream C, item 4).
  *
+ * Exported because the reconciliation lines the workbook's own transfer list
+ * up against the accounts its destinations were mapped to, and "ubank
+ * (House)" there has to land on the same key as "to ubank (House)" here.
+ *
  * @param {string} raw
  */
-function normaliseDestination(raw) {
+export function normaliseDestination(raw) {
   return raw
     .toLowerCase()
     .replace(/^to\s+/, "")
@@ -745,9 +754,17 @@ export async function parseImport(buffer, { fileName, accounts }) {
     });
   }
 
+  // The cadence the workbook's own per-pay figures are in, as its income
+  // blocks state it ("Total (Fortnightly)"). Null when they disagree or none
+  // says — the reconciliation then falls back, and says it did, rather than
+  // guessing which cadence a bare "per pay" meant.
+  const totalCadences = [...new Set(income.variants.map((v) => v.totalCadence))];
+  const payCadence = totalCadences.length === 1 ? (totalCadences[0] ?? null) : null;
+
   return {
     fileName,
     fileHash,
+    payCadence,
     people: income.people.map((name) => ({ key: `person:${name}`, name })),
     variants: income.variants.map((variant) => ({
       key: variant.key,

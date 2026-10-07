@@ -23,6 +23,7 @@ import {
   MoneyTooltip,
   SERIES,
   TIME_AXIS,
+  TOTAL,
   useChartMotion,
   useMoneyTick,
   useTimeAxis,
@@ -104,7 +105,7 @@ export function DevChartsPage() {
           <Chart
             height={280}
             ariaLabel="Demo area chart with fabricated data."
-            config={{ balance: { label: "Balance", color: SERIES[0] } }}
+            config={{ balance: { label: "Balance", color: TOTAL } }}
           >
             <AreaChart data={LINE_ROWS} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
               <CartesianGrid vertical={false} />
@@ -129,7 +130,7 @@ export function DevChartsPage() {
           <Chart
             height={280}
             ariaLabel="Demo bar chart with fabricated data."
-            config={{ spend: { label: "Spend", color: SERIES[1] } }}
+            config={{ spend: { label: "Spend", color: TOTAL } }}
           >
             <BarChart data={BAR_ROWS} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
               <CartesianGrid vertical={false} />
@@ -169,8 +170,8 @@ export function DevChartsPage() {
             height={280}
             ariaLabel="Demo stacked area chart with fabricated data."
             config={{
-              essential: { label: "Essential", color: SERIES[0] },
-              nonEssential: { label: "Non-essential", color: SERIES[3] },
+              essential: { label: "Essential", color: TOTAL },
+              nonEssential: { label: "Non-essential", color: SERIES[1] },
             }}
           >
             <AreaChart data={STACK_ROWS} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
@@ -210,8 +211,8 @@ export function DevChartsPage() {
             height={280}
             ariaLabel="Demo time-axis chart with fabricated data and sparse event markers."
             config={{
-              balance: { label: "Balance", color: SERIES[0] },
-              bill: { label: "Bill due", color: SERIES[3] },
+              balance: { label: "Balance", color: TOTAL },
+              bill: { label: "Bill due", color: "var(--negative)" },
             }}
           >
             <ComposedChart data={CURVE_ROWS} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
@@ -241,7 +242,7 @@ export function DevChartsPage() {
           <Chart
             height={280}
             ariaLabel="Demo bar chart of plain multipliers with fabricated data."
-            config={{ factor: { label: "Factor", color: SERIES[2] } }}
+            config={{ factor: { label: "Factor", color: TOTAL } }}
           >
             <BarChart
               data={MONTHS.map((label, i) => ({ label, factor: 1 + Math.sin(i / 2) * 0.3 }))}

@@ -7,6 +7,7 @@ import {
   findVersionByStatus,
   linesForVersion,
   loadAllocationContext,
+  resolveCurrentTransfers,
   serializeInputs,
   serializeVersion,
   stageGoalsForVersion,
@@ -133,15 +134,26 @@ export function createAllocationRoutes({ db }) {
       const active = activeVersion ? await resolveVersionPayload(context, grossPerMonthCents, activeVersion) : null;
       const draft = draftVersion ? await resolveVersionPayload(context, grossPerMonthCents, draftVersion) : null;
 
+      // "Current" is what the bank is doing: the amounts recorded when the
+      // active version was applied. `active.result` stays today's
+      // recomputation of the same version (the editor's starting point and
+      // the dashboard's live figure), so the two are separate fields rather
+      // than one quietly standing in for the other.
+      const resolvedCurrent =
+        active && activeVersion ? resolveCurrentTransfers(activeVersion, active.result, context.payCadence) : null;
+
       return c.json({
         plan: { id: plan.id, name: plan.name, incomeVariantId: plan.incomeVariantId },
         inputs: serializeInputs(context, grossPerMonthCents),
         active,
         draft,
+        current: resolvedCurrent?.current ?? null,
         // Null rather than an empty array when there is nothing to compare:
         // a first-ever plan has no active version, and "no changes" and "no
-        // baseline to change from" must not look the same on screen.
-        diff: active && draft ? diffAllocations(active.result, draft.result) : null,
+        // baseline to change from" must not look the same on screen. Against
+        // the recorded amounts when there are any, so an unchanged draft
+        // applied after a bill moved still lists the orders to edit.
+        diff: resolvedCurrent && draft ? diffAllocations(resolvedCurrent.baseline, draft.result) : null,
         warnings: context.warnings,
       });
     });

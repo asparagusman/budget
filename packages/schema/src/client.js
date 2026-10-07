@@ -13,6 +13,15 @@ import * as tables from "./tables/index.js";
  */
 export function createDb(databaseUrl) {
   const pool = new Pool({ connectionString: databaseUrl });
+  // node-postgres emits 'error' on the pool when an IDLE connection drops —
+  // Postgres restarted, the network blinked. An 'error' event nobody listens
+  // for is an uncaught exception, so without this the whole API would exit
+  // over a connection no request was using. The pool has already thrown the
+  // broken client away and the next query opens a fresh one; all that's left
+  // is to say so. The message only, never the error object.
+  pool.on("error", (err) => {
+    console.error(`Postgres: an idle connection failed and was discarded: ${err.message}`);
+  });
   return drizzle(pool, { schema: tables });
 }
 

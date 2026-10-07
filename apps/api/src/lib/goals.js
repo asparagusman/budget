@@ -159,33 +159,40 @@ export function serializeGoal(args) {
   const currentBalanceCents = balance?.amountCents ?? 0;
   const annualGrowthRate = account.annualGrowthRate ?? 0;
 
-  const withinHorizon = reachableWithinHorizon({
-    targetCents,
-    currentBalanceCents,
-    contributionPerPayCents,
-    payCadence,
-    annualGrowthRate,
-  });
+  // `targetCents` is null for a months-of-expenses goal while no costs are
+  // recorded — the engine won't call months of nothing a target. Nothing
+  // below can be measured against it, so every derived figure stays empty
+  // rather than reading as "Reached" against $0.
+  const withinHorizon =
+    targetCents !== null &&
+    reachableWithinHorizon({
+      targetCents,
+      currentBalanceCents,
+      contributionPerPayCents,
+      payCadence,
+      annualGrowthRate,
+    });
 
-  const projection = withinHorizon
-    ? goalEta({
-        targetCents,
-        currentBalanceCents,
-        contributionPerPayCents,
-        payCadence,
-        annualGrowthRate,
-        from: on,
-      })
-    : { eta: null, aheadBehindDays: null, curve: [{ date: on, balanceCents: currentBalanceCents }] };
+  const projection =
+    targetCents !== null && withinHorizon
+      ? goalEta({
+          targetCents,
+          currentBalanceCents,
+          contributionPerPayCents,
+          payCadence,
+          annualGrowthRate,
+          from: on,
+        })
+      : { eta: null, aheadBehindDays: null, curve: [{ date: on, balanceCents: currentBalanceCents }] };
 
   // A ratio of two figures the engine produced, for display — not a financial
   // rule of its own, which is why it isn't an engine function. Reported raw
   // rather than clamped: 112% is a goal that has been overshot, and hiding
   // that behind a capped bar would be a lie about the balance.
-  const progressPct = targetCents > 0 ? (currentBalanceCents / targetCents) * 100 : 0;
+  const progressPct = targetCents !== null && targetCents > 0 ? (currentBalanceCents / targetCents) * 100 : 0;
 
   const required =
-    goal.targetDate !== null
+    goal.targetDate !== null && targetCents !== null
       ? goalRequired({
           targetCents,
           currentBalanceCents,
@@ -197,10 +204,16 @@ export function serializeGoal(args) {
         })
       : null;
 
+  // With no computable target the figures that would carry one say 0, not
+  // null — the screens already reading them type them as plain cents, so
+  // `targetComputable` is what marks the 0 as meaningless. Make them null
+  // once every reader checks that flag first.
+  const reportedTargetCents = targetCents ?? 0;
+
   const curve = downsample(projection.curve, args.curvePoints ?? CURVE_POINTS_LIST).map((point) => ({
     date: point.date,
     projectedCents: point.balanceCents,
-    targetCents,
+    targetCents: reportedTargetCents,
   }));
 
   return {
@@ -217,7 +230,12 @@ export function serializeGoal(args) {
       createdAt: goal.createdAt.toISOString(),
     },
     account,
-    targetCents,
+    targetCents: reportedTargetCents,
+    // False only for a months-of-expenses goal before any essential cost is
+    // recorded. Then `targetCents` and `progressPct` are a placeholder 0,
+    // `reached` is false, and the ETA, required contribution and thresholds
+    // are null — "needs costs recorded", not "Reached".
+    targetComputable: targetCents !== null,
     currentBalanceCents,
     currentBalanceAsAt: balance?.asAt ?? null,
     contributionPerPayCents,
@@ -227,12 +245,12 @@ export function serializeGoal(args) {
     // "API").
     isFunded: args.isFunded,
     progressPct,
-    reached: currentBalanceCents >= targetCents,
+    reached: targetCents !== null && currentBalanceCents >= targetCents,
     eta: { date: projection.eta, aheadBehindDays: projection.aheadBehindDays },
     // Distinguishes "no contribution, so no ETA" from "so slow it never
     // arrives" — both report a null ETA, and the operator deserves to know
     // which one they're looking at.
-    beyondHorizon: !withinHorizon && contributionPerPayCents > 0,
+    beyondHorizon: targetCents !== null && !withinHorizon && contributionPerPayCents > 0,
     horizonYears: HORIZON_YEARS,
     required,
     curve,
@@ -244,8 +262,10 @@ export function serializeGoal(args) {
       goal.targetMode === "months_of_expenses" && burnPerMonthCents > 0
         ? currentBalanceCents / burnPerMonthCents
         : null,
+    // Null with no burn to multiply, for the same reason the target is: four
+    // thresholds of $0, all "covered", would be the same lie four times.
     thresholds:
-      goal.targetMode === "months_of_expenses"
+      goal.targetMode === "months_of_expenses" && burnPerMonthCents > 0
         ? EXPENSE_THRESHOLD_MONTHS.map((months) => {
             const thresholdCents = Math.round(burnPerMonthCents * months);
             const reachable = reachableWithinHorizon({
@@ -366,9 +386,9 @@ export async function loadGoals(db, { on, goalId, curvePoints, context: loadedCo
   // Active goals only: an achieved or abandoned goal is history, and counting
   // it would overstate what the household still needs to find.
   const active = goals.filter((g) => g.goal.status === "active");
-  const totalRequiredPerPayCents = sumCents(
-    active.map((g) => (g.required ? Math.max(0, g.required.perPayCents) : 0)),
-  );
+  // `goalRequired` never goes below zero itself now, so a goal already met
+  // adds nothing here without a clamp of this file's own.
+  const totalRequiredPerPayCents = sumCents(active.map((g) => g.required?.perPayCents ?? 0));
   const totalAllocatedToGoalsPerPayCents = sumCents(active.map((g) => g.contributionPerPayCents));
 
   /** @type {{ code: string, message: string }[]} */
@@ -406,10 +426,18 @@ export async function loadGoals(db, { on, goalId, curvePoints, context: loadedCo
  * @param {{ from: IsoDate, to: IsoDate }} window
  */
 export async function loadNetWorth(db, window) {
-  const accountRows = await db.query.accounts.findMany({
-    where: (a, { and: andCol, isNull: isNullCol, ne }) => andCol(isNullCol(a.archivedAt), ne(a.type, "external")),
+  // Archived accounts too. Archiving a closed account says it no longer
+  // counts from that day on, not that the household never owned what it
+  // held — filtering them out here erased their balances from every date in
+  // the history, and the chart drew a past that never happened.
+  const allAccountRows = await db.query.accounts.findMany({
+    where: (a, { ne }) => ne(a.type, "external"),
     orderBy: (a, { asc }) => [asc(a.sortOrder), asc(a.name)],
   });
+  const accountRows = allAccountRows
+    .map((account) => ({ ...account, archivedOn: account.archivedAt ? localCalendarDate(account.archivedAt) : null }))
+    // One archived before the window opened contributes nothing to it.
+    .filter((account) => account.archivedOn === null || account.archivedOn > window.from);
   const snapshots = await db.query.balanceSnapshots.findMany({
     orderBy: (b, { asc }) => [asc(b.asAt)],
   });
@@ -428,6 +456,12 @@ export async function loadNetWorth(db, window) {
     const own = snapshots.filter((s) => s.accountId === account.id);
     let index = -1;
     const points = dates.map((date) => {
+      // From the day it was archived the account is out of every total. Its
+      // `asAt` goes null with it, so a closed account's last balance can't
+      // make today's net worth read as stale.
+      if (account.archivedOn !== null && date >= account.archivedOn) {
+        return { date, balanceCents: 0, asAt: null };
+      }
       while (index + 1 < own.length && mustAt(own, index + 1, "snapshot").asAt <= date) index++;
       const current = index >= 0 ? mustAt(own, index, "snapshot") : null;
       return {
@@ -438,7 +472,7 @@ export async function loadNetWorth(db, window) {
         asAt: current?.asAt ?? null,
       };
     });
-    return { id: account.id, name: account.name, type: account.type, points };
+    return { id: account.id, name: account.name, type: account.type, archivedOn: account.archivedOn, points };
   });
 
   const totalPoints = dates.map((date, i) => ({
@@ -452,6 +486,20 @@ export async function loadNetWorth(db, window) {
   const knownFrom = snapshots.length > 0 ? mustAt(snapshots, 0, "earliest snapshot").asAt : null;
 
   return { window, knownFrom, accounts, totalPoints };
+}
+
+/**
+ * The calendar date a timestamp falls on in the server's own timezone — the
+ * same local reading `todayIso` makes of "now", so an account archived this
+ * afternoon is archived as of today's date on every screen.
+ *
+ * @param {Date} timestamp
+ */
+function localCalendarDate(timestamp) {
+  const y = timestamp.getFullYear();
+  const m = String(timestamp.getMonth() + 1).padStart(2, "0");
+  const d = String(timestamp.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
 }
 
 // About one point a week over a year, or one a month over five — enough shape

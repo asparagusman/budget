@@ -45,7 +45,7 @@ export function ThemeToggle({ className }) {
               "flex h-7 w-7 items-center justify-center rounded-full text-text-muted transition-colors",
               "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent)",
               active
-                ? "bg-surface text-accent-brand shadow-[0_1px_2px_var(--border)]"
+                ? "bg-accent-brand-soft text-accent-brand"
                 : "hover:text-text",
             )}
           >

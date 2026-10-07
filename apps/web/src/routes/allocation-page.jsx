@@ -54,9 +54,10 @@ import { FieldRow } from "@/components/field-row.jsx";
 import { FidelityBadge } from "@/components/fidelity-badge.jsx";
 import { GoodLifeFidelity } from "@/components/good-life-fidelity.jsx";
 import { Money } from "@/components/money.jsx";
+import { Notice } from "@/components/notice.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
 import { TopBarAction } from "@/components/topbar-action.jsx";
-import { UnallocatedIndicator } from "@/components/unallocated-indicator.jsx";
+import { UnallocatedIndicator, isBalanced } from "@/components/unallocated-indicator.jsx";
 import { useConfirm } from "@/components/confirm-dialog.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
@@ -86,6 +87,7 @@ import { formatIsoDate, todayIso } from "@/lib/dates.js";
 import { formatMoney } from "@/lib/format-money.js";
 import { useSettings } from "@/lib/settings.jsx";
 import { cn } from "@/lib/utils.js";
+import { ScrollArea } from "@/components/scroll-area.jsx";
 
 /** @import { AllocationResult, Basis, Cadence, Cents, TransferDelta } from "@budget/engine" */
 /** @import { DraftLine } from "@/lib/allocation-draft.js" */
@@ -266,10 +268,10 @@ function ContextBar({
     plan !== null && inputs?.resolvedVariantId != null && inputs.resolvedVariantId !== plan.incomeVariantId;
 
   return (
-    <div className="flex flex-col gap-4 rounded-(--radius-card) bg-surface p-5 shadow-(--shadow-card)">
+    <div className="flex flex-col gap-4 rounded-(--radius-card) bg-surface p-4 shadow-(--shadow-card) md:p-5">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-        <div className="flex flex-wrap items-end gap-4">
-          <FieldRow label="Plan" htmlFor="allocation-plan" className="w-56">
+        <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
+          <FieldRow label="Plan" htmlFor="allocation-plan" className="w-full sm:w-56">
             <Select value={plan?.id ?? ""} onValueChange={onPlanChange}>
               <SelectTrigger id="allocation-plan" className="w-full">
                 <SelectValue placeholder="Choose a plan" />
@@ -300,7 +302,7 @@ function ContextBar({
                   onClick={() => onViewChange(cadence)}
                   className={cn(
                     "rounded-[calc(var(--radius-control)-2px)] px-2.5 py-1 text-xs font-medium focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-(--accent)",
-                    view === cadence ? "bg-surface text-text shadow-(--shadow-card)" : "text-text-muted",
+                    view === cadence ? "bg-accent-brand-soft text-accent-brand" : "text-text-muted hover:text-text",
                   )}
                 >
                   {CADENCE_LABELS[cadence]}
@@ -314,7 +316,7 @@ function ContextBar({
               tick rather than a card. Anything else and the full indicator
               appears above the sections instead. */}
           {hasResult ? (
-            <p className={cn("flex items-center gap-1.5 font-medium", balanced ? "text-positive" : "text-text-muted")}>
+            <p className="flex items-center gap-1.5 font-medium text-text-muted">
               {balanced ? (
                 <>
                   <CheckIcon className="size-4" aria-hidden="true" />
@@ -322,7 +324,7 @@ function ContextBar({
                 </>
               ) : (
                 <>
-                  <AlertTriangleIcon className="size-4 text-negative" aria-hidden="true" />
+                  <AlertTriangleIcon className="size-4 text-warning-strong" aria-hidden="true" />
                   Not balanced — see above
                 </>
               )}
@@ -674,7 +676,7 @@ function RowMenu({ line, onMove, onStageChange, onRemove }) {
           </DropdownMenuItem>
         ))}
         <DropdownMenuSeparator />
-        <DropdownMenuItem variant="destructive" onSelect={onRemove}>
+        <DropdownMenuItem onSelect={onRemove}>
           <Trash2Icon />
           Remove line
         </DropdownMenuItem>
@@ -706,16 +708,40 @@ function AppliedLineRow({ line, resolved, accounts, view, payCadence }) {
             ? `×${line.valueText}`
             : "—";
 
+  // Below the container threshold the same cells reflow into two lines: the
+  // division and its amount, then how it is worked out and where it goes —
+  // "6.5% of gross → Raiz", with goal and actual labelled on the right. In a
+  // flat run of seven unlabelled figures ("% of gross 6.5% 10% 6.5% Raiz"),
+  // nobody could tell the value from the goal from the actual. `order` does
+  // the reflow so the DOM — and the wide grid — keep the column order.
   return (
-    <div className={cn("flex flex-col gap-0.5 px-1 py-2", ROW_GRID)}>
-      <p className="min-w-0 truncate font-medium text-text @min-[38rem]:pl-5">{line.label || "Untitled line"}</p>
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-text-muted @min-[38rem]:contents">
-        <span className="truncate">{ALLOCATION_BASIS_LABELS[line.basis]}</span>
-        <span className="tabular-nums @min-[38rem]:text-right">{valueText}</span>
-        <span className="tabular-nums @min-[38rem]:text-right">
-          {line.goalPctText === "" ? "—" : `${line.goalPctText}%`}
+    <div className={cn("flex flex-wrap items-baseline gap-x-2 gap-y-0.5 px-1 py-2 text-sm", ROW_GRID)}>
+      <p className="order-1 min-w-0 flex-1 truncate font-medium text-text @min-[38rem]:order-none @min-[38rem]:pl-5">
+        {line.label || "Untitled line"}
+      </p>
+      <div className="contents text-xs text-text-muted">
+        <span className="order-4 truncate @min-[38rem]:order-none">{ALLOCATION_BASIS_LABELS[line.basis]}</span>
+        <span
+          className={cn(
+            "order-5 tabular-nums @min-[38rem]:order-none @min-[38rem]:text-right",
+            // A basis with no value of its own ("Fixed-cost total") reads
+            // fine without a dash after it on one line.
+            valueText === "—" && "@max-[38rem]:hidden",
+          )}
+        >
+          {valueText}
         </span>
-        <span className="tabular-nums @min-[38rem]:text-right">
+        <span className="order-8 ml-auto tabular-nums @min-[38rem]:order-none @min-[38rem]:ml-0 @min-[38rem]:text-right">
+          {/* Narrow: goal and actual as one unit, so a long destination
+              wraps them to the next line together rather than splitting
+              "goal 10%" from its "actual 6.5%". */}
+          <span className="whitespace-nowrap @min-[38rem]:hidden">
+            {line.goalPctText === "" ? null : `goal ${line.goalPctText}% · `}
+            actual {resolved?.actualPct != null ? `${resolved.actualPct.toFixed(1)}%` : "—"}
+          </span>
+          <span className="hidden @min-[38rem]:inline">{line.goalPctText === "" ? "—" : `${line.goalPctText}%`}</span>
+        </span>
+        <span className="hidden tabular-nums @min-[38rem]:block @min-[38rem]:text-right">
           {resolved?.actualPct != null ? `${resolved.actualPct.toFixed(1)}%` : "—"}
         </span>
         <span className="min-w-0 overflow-hidden @max-[52rem]:hidden">
@@ -723,13 +749,16 @@ function AppliedLineRow({ line, resolved, accounts, view, payCadence }) {
             <FidelityBadge fidelity={resolved.fidelity} goalPct={Number(line.goalPctText)} compact />
           ) : null}
         </span>
-        <span className="truncate" title={accountName(accounts, line.accountId)}>
+        <span className="order-6 min-w-0 truncate @min-[38rem]:order-none" title={accountName(accounts, line.accountId)}>
+          <span aria-hidden="true" className="@min-[38rem]:hidden">→ </span>
           {accountName(accounts, line.accountId)}
         </span>
-        <span className="ml-auto font-semibold text-text tabular-nums @min-[38rem]:text-right">
+        <span className="order-2 shrink-0 text-sm font-semibold text-text tabular-nums @min-[38rem]:order-none @min-[38rem]:text-right">
           {resolved ? <Money value={inCadence(resolved, view, payCadence)} /> : "—"}
         </span>
       </div>
+      {/* Line break for the narrow layout only; not a cell of the wide grid. */}
+      <span aria-hidden="true" className="order-3 basis-full @min-[38rem]:hidden" />
     </div>
   );
 }
@@ -792,7 +821,10 @@ function SectionCard({
 
   return (
     <section className="@container flex flex-col gap-3 rounded-(--radius-card) bg-surface p-4 shadow-(--shadow-card) md:p-5">
-      <header className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+      {/* The goal stays in the header's top-right at every width; stacked
+          under the blurb on a phone it read as one more line of the
+          description. */}
+      <header className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h2 className="flex items-baseline gap-2 text-base font-semibold text-text">
             <span className="text-text-subtle">{section.letter}</span>
@@ -1022,18 +1054,22 @@ function SectionTotals({ section, stage, view, payCadence, cadenceLabel }) {
     payCadence,
   );
 
+  // A ledger: labels left, figures right — under the amount column of the
+  // rows above, so a subtotal reads as the sum of the figures over it. The
+  // right padding at the wide layout is the row menu column plus its gap.
   return (
-    <dl className="flex flex-col gap-1 border-t border-border pt-2.5 text-sm">
-      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+    <dl className="flex flex-col gap-1.5 border-t border-border pt-3 text-sm @min-[38rem]:pr-8.5">
+      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-baseline gap-x-3 gap-y-1">
         <dt className="font-medium text-text">Subtotal</dt>
-        <dd className="font-semibold text-text tabular-nums">
+        <dd className="text-right font-semibold text-text tabular-nums">
           <Money value={subtotal} tween />
           <span className="text-xs font-normal text-text-subtle">/{cadenceLabel}</span>
         </dd>
-        <dd className="text-xs text-text-muted tabular-nums">
-          {stage.actualPct != null ? `${stage.actualPct.toFixed(1)}% of income` : "—"}
-        </dd>
-        <dd className="flex items-center gap-1.5 text-xs text-text-muted">
+        <dd className="col-span-2 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-text-muted">
+          <span className="tabular-nums">
+            {stage.actualPct != null ? `${stage.actualPct.toFixed(1)}% of income` : "—"}
+          </span>
+          <span aria-hidden="true">·</span>
           {stage.goalPct != null ? (
             <>
               <span>
@@ -1072,9 +1108,9 @@ function SectionTotals({ section, stage, view, payCadence, cadenceLabel }) {
         </dd>
       </div>
 
-      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-baseline gap-x-3">
         <dt className="text-text-muted">{isLast ? "Unallocated" : "Left after this"}</dt>
-        <dd className="font-medium text-text tabular-nums">
+        <dd className="text-right font-medium text-text tabular-nums">
           <Money value={remaining} tween />
           <span className="text-xs font-normal text-text-subtle">/{cadenceLabel}</span>
         </dd>
@@ -1104,7 +1140,7 @@ function TransferRowItem({ row, editing, onCopy }) {
     <li
       className={cn(
         "flex flex-col gap-0.5 py-2",
-        changed && "-mx-2 rounded-(--radius-control) bg-accent-brand-soft/40 px-2",
+        changed && "-mx-2 rounded-(--radius-control) bg-warning-soft px-2",
         flashing && "animate-row-flash",
       )}
     >
@@ -1222,11 +1258,10 @@ function TransfersPanel({ rows, inputs, editing, totalPerPayCents }) {
           {cadenceLabel}.
         </p>
       ) : (
-        <p className="flex items-start gap-1.5 rounded-lg bg-negative-soft p-2 text-xs text-negative">
-          <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
+        <Notice compact>
           Transfers total {formatMoney(totalPerPayCents, { currency, locale })} but gross income is{" "}
           {formatMoney(inputs.grossPerPayCents, { currency, locale })}. That&apos;s a bug — please report it.
-        </p>
+        </Notice>
       )}
     </div>
   );
@@ -1263,8 +1298,8 @@ function PreviewPanel({ rows, inputs, editing, result, accounts, totalPerPayCent
  */
 function MobilePreviewDrawer({ open, onToggle, summary, children }) {
   return (
-    <div className="fixed inset-x-0 bottom-14 z-30 px-2 md:bottom-0 lg:hidden">
-      <div className="mx-auto max-w-2xl overflow-hidden rounded-t-(--radius-card) border border-border bg-surface shadow-(--shadow-raised)">
+    <div className="fixed inset-x-0 bottom-0 z-30 px-2 lg:hidden">
+      <div className="mx-auto max-w-2xl overflow-hidden rounded-t-(--radius-card) border border-border bg-surface pb-[env(safe-area-inset-bottom)] shadow-(--shadow-raised)">
         <button
           type="button"
           onClick={onToggle}
@@ -1278,7 +1313,11 @@ function MobilePreviewDrawer({ open, onToggle, summary, children }) {
             <ChevronUpIcon className="size-4 shrink-0 text-text-muted" aria-hidden="true" />
           )}
         </button>
-        {open ? <div className="max-h-[55vh] overflow-y-auto border-t border-border px-4 py-4">{children}</div> : null}
+        {open ? (
+          <ScrollArea className="max-h-[55vh] border-t border-border">
+            <div className="px-4 py-4">{children}</div>
+          </ScrollArea>
+        ) : null}
       </div>
     </div>
   );
@@ -1297,7 +1336,7 @@ function VersionHistory({ versions, accounts, activeVersionId, onRevert, reverti
   const right = compare ? versions.find((v) => v.id === compare[1]) ?? null : null;
 
   return (
-    <section className="flex flex-col gap-4 rounded-(--radius-card) bg-surface p-5 shadow-(--shadow-card)">
+    <section className="flex flex-col gap-3 rounded-(--radius-card) bg-surface p-4 shadow-(--shadow-card) md:p-5">
       <div className="flex items-center gap-2">
         <HistoryIcon className="size-4 text-text-muted" aria-hidden="true" />
         <h2 className="text-base font-semibold text-text">Version history</h2>
@@ -1305,13 +1344,13 @@ function VersionHistory({ versions, accounts, activeVersionId, onRevert, reverti
 
       <ol className="flex flex-col divide-y divide-border">
         {versions.map((version) => (
-          <li key={version.id} className="flex flex-wrap items-center justify-between gap-2 py-3">
+          <li key={version.id} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 py-2.5">
             <div className="min-w-0">
               <p className="flex items-center gap-2 text-sm font-medium text-text">
                 v{version.version}
                 <Badge
                   variant={
-                    version.status === "active" ? "default" : version.status === "draft" ? "secondary" : "outline"
+                    version.status === "active" ? "default" : version.status === "draft" ? "attention" : "outline"
                   }
                 >
                   {version.status}
@@ -1326,7 +1365,9 @@ function VersionHistory({ versions, accounts, activeVersionId, onRevert, reverti
                 {version.note ? ` · ${version.note}` : ""}
               </p>
             </div>
-            <div className="flex items-center gap-2">
+            {/* `ml-auto`: when the row wraps on a phone, the actions keep to
+                the right edge they sit on everywhere else. */}
+            <div className="ml-auto flex items-center gap-2">
               <Button
                 size="sm"
                 variant="ghost"
@@ -1491,11 +1532,10 @@ function ApplyDialog({ open, onOpenChange, rows, inputs, unallocatedPerMonthCent
         <p className="text-xs text-text-muted">Amounts are per {cadenceLabel}.</p>
 
         {unallocatedPerMonthCents !== 0 ? (
-          <p className="flex items-start gap-2 rounded-lg bg-negative-soft p-3 text-sm text-negative">
-            <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+          <Notice className="p-3">
             Unallocated is <Money value={unallocatedPerMonthCents} signed /> per month, not zero. You can still apply
             this — nothing will be rebalanced for you.
-          </p>
+          </Notice>
         ) : null}
 
         <FieldRow label="Note" htmlFor="allocation-apply-note" hint="Optional — why this changed.">
@@ -2008,13 +2048,20 @@ export function AllocationPage() {
                 <Button variant="ghost" disabled={discardDraft.isPending} onClick={confirmDiscard}>
                   Discard
                 </Button>
-                <Button onClick={() => setApplyOpen(true)}>
+                {/* The phone's top bar already carries Apply/Edit (below); a
+                    second copy of the same primary here was two blue buttons
+                    for one action on one screen. */}
+                <Button className="max-md:hidden" onClick={() => setApplyOpen(true)}>
                   <CheckIcon />
                   Apply draft
                 </Button>
               </>
             ) : (
-              <Button disabled={createDraft.isPending || !selectedPlanId} onClick={() => createDraft.mutate()}>
+              <Button
+                className="max-md:hidden"
+                disabled={createDraft.isPending || !selectedPlanId}
+                onClick={() => createDraft.mutate()}
+              >
                 <PencilIcon />
                 Edit allocation
               </Button>
@@ -2061,7 +2108,7 @@ export function AllocationPage() {
         <div className="flex flex-col gap-2 rounded-(--radius-card) bg-warning-soft p-4">
           {preview.warnings.map((w, i) => (
             <p key={i} className="flex items-start gap-2 text-sm text-text">
-              <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+              <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-warning-strong" aria-hidden="true" />
               {w.message}
             </p>
           ))}
@@ -2202,8 +2249,20 @@ export function AllocationPage() {
             summary={
               <span className="flex flex-wrap items-center gap-x-2">
                 <span className="font-medium text-text">Preview</span>
-                <span className={shownResult.unallocatedPerMonthCents === 0 ? "text-positive" : "text-negative"}>
-                  Unallocated <Money value={shownResult.unallocatedPerMonthCents} />
+                <span
+                  className={cn(
+                    "inline-flex items-center gap-1",
+                    isBalanced(shownResult) ? "text-text-muted" : "text-warning-strong",
+                  )}
+                >
+                  {isBalanced(shownResult) ? (
+                    <CheckIcon className="size-3.5 shrink-0" aria-hidden="true" />
+                  ) : (
+                    <AlertTriangleIcon className="size-3.5 shrink-0" aria-hidden="true" />
+                  )}
+                  <span>
+                    Unallocated <Money value={shownResult.unallocatedPerMonthCents} />
+                  </span>
                 </span>
                 {editing ? (
                   <span className="text-text-muted">

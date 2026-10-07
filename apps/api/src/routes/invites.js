@@ -35,6 +35,11 @@ export function createInvitesRoutes({ db }) {
       });
     })
 
+    // A `new_device` invite may be for ANY active member, not just the
+    // caller: two people, no roles, and "add a device for Ben" from Ada's
+    // laptop is the ordinary way Ben gets his first phone back. A recovery
+    // session can do the same — its screen is "pick a user" by design
+    // (phases/03-auth.md, the recovery-password revision).
     .post("/", zValidator("json", createInviteSchema, handleValidation), async (c) => {
       const data = c.req.valid("json");
       const targetUserId = data.purpose === "new_device" ? data.targetUserId : null;
@@ -44,6 +49,19 @@ export function createInvitesRoutes({ db }) {
         });
         if (!target) {
           return c.json({ error: { code: "not_found", message: "User not found." } }, 404);
+        }
+        // Registration would refuse it anyway (routes/auth.js); saying so
+        // now beats a link that fails on the other device.
+        if (!target.isActive) {
+          return c.json(
+            {
+              error: {
+                code: "inactive_user",
+                message: `${target.displayName} is deactivated. Reactivate them before adding a device.`,
+              },
+            },
+            400,
+          );
         }
       }
 

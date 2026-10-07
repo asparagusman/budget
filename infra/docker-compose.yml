@@ -1,18 +1,47 @@
+# NEVER CHANGE THIS. The project name prefixes every volume compose owns, so
+# the database lives in a volume called `infra_db-data`. Compose used to derive
+# the name from this file's directory (infra/); it is pinned to that same value
+# so it can't drift with how compose is invoked. Renaming the project would not
+# move or delete the data — it would quietly start a fresh, empty database
+# beside it, which looks exactly like data loss.
+name: infra
+
+# Docker's default json-file driver never rotates on its own, and a thin
+# client's disk is small. 3 x 10 MB per service is weeks of request logs.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+# Every required variable below is `${VAR:?…}` once, so a missing .env fails
+# with the variable's name rather than compose's "no port specified: :<empty>".
+# Compose reads .env from THIS directory, not the repo root — hence the
+# `infra/.env -> ../.env` symlink in infra/README.md step 3.
 services:
   db:
     image: postgres:16-alpine
     restart: unless-stopped
+    logging: *logging
     environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:?compose reads infra/.env - see infra/README.md step 3}
+      # Only read when the volume is first initialised. Changing it in .env
+      # later changes what the api sends, not what Postgres accepts.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?compose reads infra/.env - see infra/README.md step 3}
+      POSTGRES_DB: ${POSTGRES_DB:?compose reads infra/.env - see infra/README.md step 3}
     volumes:
       - db-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      # Over TCP, not the default unix socket: on first init the image runs a
+      # temporary socket-only server for its setup scripts and then restarts,
+      # and a socket probe reports that temporary server as ready — letting
+      # `migrate` start against a database that is about to go away.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 10
+      # First init on a slow disk takes longer than retries x interval.
+      start_period: 30s
     # Deliberately no `ports:` mapping — the database is reachable only on
     # this compose network. Do not add one for convenience; use
     # docker-compose.dev.yml instead.
@@ -30,11 +59,14 @@ services:
         APP_VERSION: ${APP_VERSION:-dev}
     restart: "no"
     command: ["node", "dist/migrate.js"]
+    init: true
+    logging: *logging
     depends_on:
       db:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      TZ: ${TZ:-Australia/Sydney}
 
   api:
     build:
@@ -43,6 +75,12 @@ services:
       args:
         APP_VERSION: ${APP_VERSION:-dev}
     restart: unless-stopped
+    # Node as PID 1 gets no default signal handlers, so it ignores the
+    # SIGTERM `docker stop` sends and is SIGKILLed 10s later. A tiny init
+    # forwards the signal and reaps zombies. (nginx is built to be PID 1, so
+    # `web` doesn't need it.)
+    init: true
+    logging: *logging
     depends_on:
       db:
         condition: service_healthy
@@ -54,12 +92,17 @@ services:
       # set in .env for host-side tooling (pnpm db:migrate/db:seed use
       # docker-compose.dev.yml's published port + localhost instead).
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
-      PORT: ${PORT}
-      SESSION_SECRET: ${SESSION_SECRET}
-      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN}
+      PORT: ${PORT:?compose reads infra/.env - see infra/README.md step 3}
+      SESSION_SECRET: ${SESSION_SECRET:?compose reads infra/.env - see infra/README.md step 3}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?compose reads infra/.env - see infra/README.md step 3}
       APP_VERSION: ${APP_VERSION:-dev}
+      # Containers default to UTC, and the api's "today" is local time — so
+      # without this, today is still yesterday until 10–11am in Australia.
+      TZ: ${TZ:-Australia/Sydney}
+    # Loopback only: the host itself (curl localhost:3001/health) is the one
+    # thing that needs this. Browsers reach the api through web's /api/.
     ports:
-      - "${PORT}:${PORT}"
+      - "127.0.0.1:${PORT}:${PORT}"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${PORT}/health || exit 1"]
       interval: 5s
@@ -73,11 +116,15 @@ services:
       args:
         VITE_API_URL: /api
     restart: unless-stopped
+    logging: *logging
     depends_on:
       api:
         condition: service_healthy
+    # Loopback only. `tailscale serve` on this host is what makes the app
+    # reachable from other devices; publishing on every interface would put
+    # the bootstrap screen on the LAN too.
     ports:
-      - "8080:80"
+      - "127.0.0.1:8080:80"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/ || exit 1"]
       interval: 5s

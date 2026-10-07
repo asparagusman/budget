@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { equivalent, toCents } from "@budget/engine";
-import { AlertTriangleIcon, PlusIcon, Trash2Icon } from "lucide-react";
+import { PlusIcon, Trash2Icon } from "lucide-react";
 import { toast } from "sonner";
 import { BarChart, Bar, CartesianGrid, XAxis } from "recharts";
 import { Badge } from "@/components/ui/badge.jsx";
@@ -18,12 +18,13 @@ import { Input } from "@/components/ui/input.jsx";
 import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/components/ui/input-group.jsx";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet.jsx";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs.jsx";
-import { AXIS, Chart, ChartTooltip, ChartTooltipContent, SERIES, useChartMotion } from "@/components/chart.jsx";
+import { AXIS, Chart, ChartTooltip, ChartTooltipContent, TOTAL, useChartMotion } from "@/components/chart.jsx";
 import { BillHistoryEntry } from "@/components/bill-history-entry.jsx";
 import { DataList, DataListRow } from "@/components/data-list.jsx";
 import { DatePicker } from "@/components/date-picker.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
 import { Money } from "@/components/money.jsx";
+import { InlineError, Notice } from "@/components/notice.jsx";
 import { useConfirm } from "@/components/confirm-dialog.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
@@ -95,10 +96,10 @@ function StepChangeFormDialog({ open, onOpenChange, stepChange, submitting, onSu
           <FieldRow label="Note" htmlFor="step-note" hint="Optional.">
             <Input id="step-note" value={note} onChange={(e) => setNote(e.target.value)} />
           </FieldRow>
-          {error ? <p className="text-sm text-negative">{error}</p> : null}
+          {error ? <InlineError>{error}</InlineError> : null}
           <DialogFooter className={onDelete ? "sm:justify-between!" : undefined}>
             {onDelete ? (
-              <Button type="button" variant="ghost" className="text-negative" onClick={onDelete}>
+              <Button type="button" variant="ghost" className="text-text-muted hover:text-text" onClick={onDelete}>
                 Delete
               </Button>
             ) : null}
@@ -298,7 +299,7 @@ function SeasonalFactorEditor({ bill }) {
       <Chart
         height={120}
         ariaLabel={`Seasonal factor per month for ${bill.name}, shown as bars. The same twelve values are editable below.`}
-        config={{ factor: { label: "Factor", color: SERIES[0] } }}
+        config={{ factor: { label: "Factor", color: TOTAL } }}
       >
         <BarChart data={factorRows} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
           <CartesianGrid vertical={false} />
@@ -323,7 +324,7 @@ function SeasonalFactorEditor({ bill }) {
           </FieldRow>
         ))}
       </div>
-      {error ? <p className="text-sm text-negative">{error}</p> : null}
+      {error ? <InlineError>{error}</InlineError> : null}
       <Button size="sm" className="self-start" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>
         {saveMutation.isPending ? "Saving…" : "Save factors"}
       </Button>
@@ -429,28 +430,23 @@ function OrphanedInstancesPanel({ bill }) {
   if (orphans.length === 0) return null;
 
   return (
-    <div className="flex flex-col gap-2 rounded-(--radius-card) bg-negative-soft p-4">
-      <div className="flex flex-col gap-1 text-sm text-negative">
-        <div className="flex items-start gap-2">
-          <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
-          <p>
-            {orphans.length} stored instance{orphans.length === 1 ? "" : "s"} no longer line up with this bill's
-            schedule — real history, kept, never auto-deleted. Delete one to realign, then re-enter it under History.
-          </p>
-        </div>
-        {/* Said explicitly because the alternative is a contradiction the
-            operator has to work out for themselves: an orphan is still an
-            actual, so it still feeds a rolling average, and without this line
-            the bill's row can claim to be averaging six actuals while the
-            History tab below shows six empty slots. */}
-        {bill.amountModel === "rolling_average" ? (
-          <p className="pl-6 text-xs">
-            These are still averaged into the forecast — an orphan is a real amount this bill really cost. What they are
-            not is editable under History, which only offers the dates the current schedule derives.
-          </p>
-        ) : null}
-      </div>
-      <ul className="flex flex-col divide-y divide-border">
+    <Notice>
+      <p>
+        {orphans.length} stored instance{orphans.length === 1 ? "" : "s"} no longer line up with this bill's
+        schedule — real history, kept, never auto-deleted. Delete one to realign, then re-enter it under History.
+      </p>
+      {/* Said explicitly because the alternative is a contradiction the
+          operator has to work out for themselves: an orphan is still an
+          actual, so it still feeds a rolling average, and without this line
+          the bill's row can claim to be averaging six actuals while the
+          History tab below shows six empty slots. */}
+      {bill.amountModel === "rolling_average" ? (
+        <p className="mt-1 text-xs">
+          These are still averaged into the forecast — an orphan is a real amount this bill really cost. What they are
+          not is editable under History, which only offers the dates the current schedule derives.
+        </p>
+      ) : null}
+      <ul className="mt-2 flex flex-col divide-y divide-border">
         {orphans.map((o) => (
           <li key={o.dueDate} className="flex items-center justify-between gap-3 py-2 text-sm">
             <span className="text-text">
@@ -459,7 +455,7 @@ function OrphanedInstancesPanel({ bill }) {
             <Button
               size="sm"
               variant="ghost"
-              className="text-negative"
+              className="text-text-muted hover:text-text"
               disabled={o.id === null}
               onClick={async () => {
                 if (!o.id) return;
@@ -476,7 +472,7 @@ function OrphanedInstancesPanel({ bill }) {
           </li>
         ))}
       </ul>
-    </div>
+    </Notice>
   );
 }
 
@@ -541,7 +537,7 @@ export function BillDetailSheet({ billId, onOpenChange, categories, people, onAr
 
   return (
     <Sheet open={billId !== null} onOpenChange={onOpenChange}>
-      <SheetContent side="bottom" className="max-h-[90vh] overflow-y-auto">
+      <SheetContent side="bottom" scrollable className="max-h-[90vh]">
         <SheetHeader>
           <SheetTitle className="flex flex-wrap items-center gap-2">
             {bill?.name ?? "Bill"}
@@ -607,7 +603,7 @@ export function BillDetailSheet({ billId, onOpenChange, categories, people, onAr
             </Tabs>
 
             <div className="flex flex-wrap gap-2 border-t border-border pt-4">
-              <Button variant="ghost" className="text-negative" onClick={() => onArchive(bill.id)}>
+              <Button variant="ghost" className="text-text-muted hover:text-text" onClick={() => onArchive(bill.id)}>
                 <Trash2Icon />
                 Archive bill
               </Button>

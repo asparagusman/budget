@@ -1,6 +1,6 @@
 import { MIGRATION_JOURNAL, migrationTagFor } from "@budget/schema";
 import { sql } from "drizzle-orm";
-import { isUndefinedTable } from "./db-errors.js";
+import { describeError, isUndefinedTable } from "./db-errors.js";
 
 /**
  * What `/health` reports about the database's migration state. `applied` is
@@ -69,7 +69,7 @@ export async function readMigrationHealth(db) {
         pending: EXPECTED,
       };
     }
-    console.error("Migration health probe failed:", err);
+    console.error(`Migration health probe failed: ${describeError(err)}`);
     return {
       applied: null,
       expected: EXPECTED,

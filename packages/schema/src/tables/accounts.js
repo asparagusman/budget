@@ -44,8 +44,14 @@ export const accounts = pgTable(
     // the API — a partial unique index on the true value (phases/README.md
     // "Database", phases/04-accounts-people.md "Constraints to enforce in
     // the database, not just the API").
+    //
+    // Live accounts only. Every computation already ignores an archived
+    // account, so an index that still counted one let archiving the landing
+    // account leave a flag nothing could see blocking every other account
+    // from taking it — with no way out in the UI. Archiving now clears the
+    // flag as well (routes/accounts.js); this is the guarantee under it.
     uniqueIndex("accounts_income_landing_unique")
       .on(table.isIncomeLanding)
-      .where(sql`${table.isIncomeLanding}`),
+      .where(sql`${table.isIncomeLanding} AND ${table.archivedAt} IS NULL`),
   ],
 );

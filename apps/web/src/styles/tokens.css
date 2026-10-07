@@ -6,8 +6,27 @@
  *
  *   - No phase after this one invents a colour, radius, shadow or spacing
  *     value. If a token you need doesn't exist, add it here.
- *   - Green/red (--positive / --negative) are reserved for financial
- *     direction only — never UI chrome.
+ *
+ * THE COLOUR VOCABULARY. The household opens this app about once a month, so
+ * every colour has exactly one meaning, on every screen, small enough to
+ * re-learn in seconds:
+ *
+ *   green / red   money in / money out, and under / over a budget or target.
+ *                 Nothing else — not errors, not delete buttons, not
+ *                 "everything is fine". (--positive / --negative)
+ *   amber         needs a look: a warning, a conflict, a stale balance, a
+ *                 defect in imported data, an edit not yet applied, an error.
+ *                 If nothing on a screen is amber, nothing needs you.
+ *                 (--warning family)
+ *   blue          you are here / do this: navigation, the selected option,
+ *                 the primary action, focus, today. Never data. (--accent)
+ *   grey          everything neutral — including zero-sum moves, delete and
+ *                 archive buttons, and "done". A check icon says done; colour
+ *                 doesn't have to.
+ *
+ * Charts follow the same rules: ink for a total or a lone series, one fixed
+ * colour per account or category (lib/entity-colors.js), dashed for anything
+ * projected (components/chart.jsx `PROJECTED`).
  *
  * Bare :root holds the COMPLETE light palette. The media-query block and the
  * [data-theme="dark"] block only ever *redefine* names that already exist
@@ -18,26 +37,39 @@
   /* ---- ground & surfaces ---- */
   --bg: oklch(0.969 0.004 264);
   --surface: oklch(1 0 0);
-  --surface-muted: oklch(0.958 0.005 264);
+  /* Far enough from --bg (0.969) that a muted panel sitting on the page
+     ground still reads as a panel; at 0.958 the two were 1% apart and a
+     muted block on the page simply vanished. */
+  --surface-muted: oklch(0.946 0.006 264);
   --border: oklch(0.906 0.006 264);
+  /* The edge of something you type into or toggle. --border is a hairline
+     between rows; on an input it made an empty field look like empty card. */
+  --border-strong: oklch(0.84 0.008 264);
 
   /* ---- text ---- */
   --text: oklch(0.205 0.012 264);
   --text-muted: oklch(0.478 0.014 264);
   --text-subtle: oklch(0.596 0.014 264);
 
-  /* ---- accent (the one restrained brand colour) ---- */
+  /* ---- blue: you are here / do this ---- */
   --accent: oklch(0.551 0.176 259);
   --accent-fg: oklch(0.99 0 0);
   --accent-soft: oklch(0.926 0.032 259);
 
-  /* ---- financial direction — never used as UI chrome ---- */
+  /* ---- green / red: money direction only ---- */
   --positive: oklch(0.6 0.14 152);
   --positive-soft: oklch(0.937 0.045 152);
   --negative: oklch(0.577 0.192 25);
   --negative-soft: oklch(0.936 0.05 25);
+
+  /* ---- amber: needs a look ----
+     --warning is a fill or a large mark; --warning-strong is amber you have
+     to READ (a badge's text, an inline error, an icon on a pale panel) —
+     plain --warning on white is too faint to notice, which defeats a colour
+     whose only job is to be noticed. */
   --warning: oklch(0.75 0.15 80);
   --warning-soft: oklch(0.951 0.06 85);
+  --warning-strong: oklch(0.54 0.115 70);
 
   /* ---- elevation ---- */
   --shadow-card: 0 1px 2px oklch(0.2 0.02 264 / 4%), 0 8px 24px oklch(0.2 0.02 264 / 6%);
@@ -51,14 +83,23 @@
      rare non-Tailwind consumer (an inline style, an SVG clip-path). */
   --radius-pill: 9999px;
 
-  /* ---- charts (categorical series + gridlines/axis, token-driven) ---- */
-  --chart-line-1: var(--accent);
-  --chart-line-2: oklch(0.7 0.15 200);
-  --chart-line-3: oklch(0.75 0.15 130);
-  --chart-line-4: oklch(0.7 0.16 40);
-  --chart-line-5: oklch(0.65 0.14 320);
-  --chart-grid: var(--border);
-  --chart-axis-label: var(--text-subtle);
+  /* ---- charts ----
+     --chart-total is ink: a household total, or a chart with one series.
+     --chart-line-1…5 are IDENTITY colours — "which account / which
+     category" — handed out per id by lib/entity-colors.js so the same
+     account is the same colour on every chart. Teal, violet, pink, brown,
+     slate: each a different family from the four hues that already mean
+     something (red 25, amber 80, green 152, the accent blue 259), and
+     separated from them and from each other by lightness as well as hue. A
+     series in red or green would read as money out or in; one in blue would
+     read as "click here". Five, not more: a sixth hue that clears all of
+     that doesn't exist, and past five a legend does the identifying anyway. */
+  --chart-total: oklch(0.42 0.02 264);
+  --chart-line-1: oklch(0.55 0.09 195);
+  --chart-line-2: oklch(0.52 0.15 305);
+  --chart-line-3: oklch(0.7 0.13 350);
+  --chart-line-4: oklch(0.48 0.07 55);
+  --chart-line-5: oklch(0.7 0.04 235);
 }
 
 /* ---- dark by system preference, unless explicitly set to light ---- */
@@ -68,6 +109,7 @@
     --surface: oklch(0.257 0.009 264);
     --surface-muted: oklch(0.303 0.01 264);
     --border: oklch(0.354 0.012 264);
+    --border-strong: oklch(0.43 0.012 264);
 
     --text: oklch(0.946 0.004 264);
     --text-muted: oklch(0.72 0.012 264);
@@ -82,16 +124,18 @@
     --negative: oklch(0.7 0.17 25);
     --negative-soft: oklch(0.34 0.07 25);
     --warning: oklch(0.8 0.13 85);
-    --warning-soft: oklch(0.36 0.07 85);
+    --warning-soft: oklch(0.33 0.055 82);
+    --warning-strong: oklch(0.82 0.13 85);
 
     --shadow-card: 0 1px 2px oklch(0 0 0 / 30%), 0 8px 24px oklch(0 0 0 / 40%);
     --shadow-raised: 0 4px 10px oklch(0 0 0 / 35%), 0 20px 48px oklch(0 0 0 / 50%);
 
-    --chart-line-1: var(--accent);
-    --chart-line-2: oklch(0.72 0.13 200);
-    --chart-line-3: oklch(0.78 0.14 130);
-    --chart-line-4: oklch(0.74 0.15 40);
-    --chart-line-5: oklch(0.72 0.13 320);
+    --chart-total: oklch(0.86 0.01 264);
+    --chart-line-1: oklch(0.7 0.09 195);
+    --chart-line-2: oklch(0.68 0.13 305);
+    --chart-line-3: oklch(0.8 0.1 350);
+    --chart-line-4: oklch(0.56 0.08 55);
+    --chart-line-5: oklch(0.78 0.04 235);
   }
 }
 
@@ -101,6 +145,7 @@
   --surface: oklch(0.257 0.009 264);
   --surface-muted: oklch(0.303 0.01 264);
   --border: oklch(0.354 0.012 264);
+  --border-strong: oklch(0.43 0.012 264);
 
   --text: oklch(0.946 0.004 264);
   --text-muted: oklch(0.72 0.012 264);
@@ -115,16 +160,18 @@
   --negative: oklch(0.7 0.17 25);
   --negative-soft: oklch(0.34 0.07 25);
   --warning: oklch(0.8 0.13 85);
-  --warning-soft: oklch(0.36 0.07 85);
+  --warning-soft: oklch(0.33 0.055 82);
+  --warning-strong: oklch(0.82 0.13 85);
 
   --shadow-card: 0 1px 2px oklch(0 0 0 / 30%), 0 8px 24px oklch(0 0 0 / 40%);
   --shadow-raised: 0 4px 10px oklch(0 0 0 / 35%), 0 20px 48px oklch(0 0 0 / 50%);
 
-  --chart-line-1: var(--accent);
-  --chart-line-2: oklch(0.72 0.13 200);
-  --chart-line-3: oklch(0.78 0.14 130);
-  --chart-line-4: oklch(0.74 0.15 40);
-  --chart-line-5: oklch(0.72 0.13 320);
+  --chart-total: oklch(0.86 0.01 264);
+  --chart-line-1: oklch(0.7 0.09 195);
+  --chart-line-2: oklch(0.68 0.13 305);
+  --chart-line-3: oklch(0.8 0.1 350);
+  --chart-line-4: oklch(0.56 0.08 55);
+  --chart-line-5: oklch(0.78 0.04 235);
 }
 
 @theme {
@@ -138,6 +185,7 @@
   --color-surface: var(--surface);
   --color-surface-muted: var(--surface-muted);
   --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
 
   --color-text: var(--text);
   --color-text-muted: var(--text-muted);
@@ -158,6 +206,7 @@
   --color-negative-soft: var(--negative-soft);
   --color-warning: var(--warning);
   --color-warning-soft: var(--warning-soft);
+  --color-warning-strong: var(--warning-strong);
 
   /* Radius, shadow and chart tokens stay off this block deliberately: their
      names are already the ones Tailwind's own namespaces would generate
@@ -186,8 +235,13 @@
      rows) — a different concept from our brand --accent above. */
   --color-accent: var(--accent-soft);
   --color-accent-foreground: var(--text);
-  --color-destructive: var(--negative);
-  --color-input: var(--border);
+  /* shadcn's "destructive" is what its primitives paint an INVALID field
+     with (aria-invalid borders and rings). In this app that is an error, and
+     errors are amber, not red — red means money out. Nothing in the app
+     uses a destructive *button* or badge any more: deleting is neutral, and
+     the confirm dialog's wording carries the weight. */
+  --color-destructive: var(--warning-strong);
+  --color-input: var(--border-strong);
   --color-ring: var(--accent);
 
   --radius: var(--radius-control);

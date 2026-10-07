@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { BanknoteIcon, LandmarkIcon, PencilIcon, PlusIcon, Trash2Icon } from "lucide-react";
+import { BanknoteIcon, CheckCircle2Icon, ClockIcon, LandmarkIcon, PencilIcon, PlusIcon, Trash2Icon } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge.jsx";
 import { Button } from "@/components/ui/button.jsx";
@@ -24,7 +24,8 @@ import {
   Chart,
   ChartTooltip,
   MoneyTooltip,
-  SERIES,
+  PROJECTED,
+  TOTAL,
   useChartMotion,
   useMoneyTick,
 } from "@/components/chart.jsx";
@@ -35,17 +36,20 @@ import { EmptyState } from "@/components/empty-state.jsx";
 import { ReorderControls } from "@/components/reorder-controls.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
 import { Money } from "@/components/money.jsx";
+import { InlineError } from "@/components/notice.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
 import { useConfirm } from "@/components/confirm-dialog.jsx";
-import { StatTile } from "@/components/stat-tile.jsx";
+import { Stat, StatGroup } from "@/components/stat-tile.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
 import { registerCommands } from "@/lib/commands.js";
 import { moveWithinGroup } from "@/lib/reorder.js";
 import { ACCOUNT_TYPE_LABELS, ACCOUNT_TYPES, CADENCE_PERIOD_NOUNS } from "@/lib/constants.js";
 import { daysSinceIso, formatIsoDate } from "@/lib/dates.js";
+import { colorFor, entityColors } from "@/lib/entity-colors.js";
 import { formatMoney } from "@/lib/format-money.js";
 import { useSettings } from "@/lib/settings.jsx";
+import { ScrollArea } from "@/components/scroll-area.jsx";
 
 /** @import { Cents } from "@budget/engine" */
 /** @typedef {{ amountCents: Cents, asAt: string }} LatestBalance */
@@ -180,7 +184,7 @@ function AccountFormDialog({ open, onOpenChange, account, submitting, onSubmit }
           >
             <Switch id="account-income-landing" checked={isIncomeLanding} onCheckedChange={setIsIncomeLanding} />
           </FieldRow>
-          {error ? <p className="text-sm text-negative">{error}</p> : null}
+          {error ? <InlineError>{error}</InlineError> : null}
           <DialogFooter>
             <Button type="submit" disabled={submitting}>
               {submitting ? "Saving…" : "Save"}
@@ -235,7 +239,7 @@ function AccountGoalsPanel({ accountId }) {
               primary={
                 <span className="flex items-center gap-2">
                   {g.goal.name}
-                  {g.isFunded ? null : <Badge variant="outline">not currently funded</Badge>}
+                  {g.isFunded ? null : <Badge variant="attention">not currently funded</Badge>}
                 </span>
               }
               secondary={
@@ -252,7 +256,10 @@ function AccountGoalsPanel({ accountId }) {
               }
               trailing={
                 g.reached ? (
-                  <span className="text-positive">Reached</span>
+                  <span className="inline-flex items-center gap-1">
+                    <CheckCircle2Icon className="size-3.5 shrink-0 text-text-muted" aria-hidden="true" />
+                    Reached
+                  </span>
                 ) : g.eta.date ? (
                   formatIsoDate(g.eta.date, locale)
                 ) : (
@@ -273,9 +280,9 @@ function AccountGoalsPanel({ accountId }) {
  * for its own — the figures must agree, and the cheapest way to guarantee that
  * is to read the same ones.
  *
- * @param {{ accountId: string, accountType: string }} props
+ * @param {{ accountId: string, accountType: string, color: string }} props `color` is this account's entity colour.
  */
-function AccountProjectionPanel({ accountId, accountType }) {
+function AccountProjectionPanel({ accountId, accountType, color }) {
   const { currency, locale } = useSettings();
   const moneyTick = useMoneyTick();
   const motion = useChartMotion();
@@ -347,7 +354,7 @@ function AccountProjectionPanel({ accountId, accountType }) {
               }
             : null
         }
-        config={{ projected: { label: "Projected", color: SERIES[1] } }}
+        config={{ projected: { label: "Projected", color } }}
       >
         <AreaChart data={projectionRows} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
           <CartesianGrid vertical={false} />
@@ -359,7 +366,7 @@ function AccountProjectionPanel({ accountId, accountType }) {
             type="monotone"
             stroke="var(--color-projected)"
             fill="var(--color-projected)"
-            fillOpacity={0.15}
+            {...PROJECTED}
             strokeWidth={2}
             dot={false}
             {...motion}
@@ -374,9 +381,12 @@ function AccountProjectionPanel({ accountId, accountType }) {
  * Balance history table plus a line chart of balance over time
  * (phases/04-accounts-people.md "/accounts" per-account detail).
  *
- * @param {{ account: Account | null, onOpenChange: (open: boolean) => void, onQuickUpdate: () => void }} props
+ * @param {{ account: Account | null, accountColors: Map<string, string>, onOpenChange: (open: boolean) => void, onQuickUpdate: () => void, reorder?: import("react").ReactNode }} props
+ *   `accountColors` is `entityColors()` over every account on the page, so
+ *   this account's charts wear the colour it has everywhere else.
  */
-function AccountDetailSheet({ account, onOpenChange, onQuickUpdate }) {
+function AccountDetailSheet({ account, accountColors, onOpenChange, onQuickUpdate, reorder }) {
+  const color = account ? colorFor(accountColors, account.id) : TOTAL;
   const { currency, locale } = useSettings();
   const moneyTick = useMoneyTick();
   const motion = useChartMotion();
@@ -415,7 +425,7 @@ function AccountDetailSheet({ account, onOpenChange, onQuickUpdate }) {
 
   return (
     <Sheet open={account !== null} onOpenChange={onOpenChange}>
-      <SheetContent side="bottom" className="max-h-[85vh] overflow-y-auto">
+      <SheetContent side="bottom" scrollable className="max-h-[85vh]">
         <SheetHeader>
           <SheetTitle>{account?.name}</SheetTitle>
           <SheetDescription>
@@ -423,9 +433,19 @@ function AccountDetailSheet({ account, onOpenChange, onQuickUpdate }) {
           </SheetDescription>
         </SheetHeader>
         <div className="flex flex-col gap-4 px-4 pb-6">
-          <Button variant="outline" className="self-start" onClick={onQuickUpdate}>
-            Update balance
-          </Button>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <Button variant="outline" onClick={onQuickUpdate}>
+              Update balance
+            </Button>
+            {/* Desktop has these in the table row; a phone's row is kept for
+                the balance, so the order is set from here instead. */}
+            {reorder ? (
+              <div className="flex items-center gap-1 text-xs text-text-muted md:hidden">
+                Order
+                {reorder}
+              </div>
+            ) : null}
+          </div>
 
           {/* No data table here: every point on this line is already listed
               as a row in the balance <DataList> further down the sheet. */}
@@ -436,7 +456,7 @@ function AccountDetailSheet({ account, onOpenChange, onQuickUpdate }) {
             emptyDescription="Add the first balance to start tracking this account over time."
             height={220}
             ariaLabel={`Balance over time for ${account?.name ?? "this account"}, ${ascending.length} recorded points. Every figure is listed in the balance history below.`}
-            config={{ balance: { label: "Balance", color: SERIES[0] } }}
+            config={{ balance: { label: "Balance", color } }}
           >
             <AreaChart data={balanceRows} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
               <CartesianGrid vertical={false} />
@@ -457,7 +477,7 @@ function AccountDetailSheet({ account, onOpenChange, onQuickUpdate }) {
           </Chart>
 
           {account ? <AccountGoalsPanel accountId={account.id} /> : null}
-          {account ? <AccountProjectionPanel accountId={account.id} accountType={account.type} /> : null}
+          {account ? <AccountProjectionPanel accountId={account.id} accountType={account.type} color={color} /> : null}
 
           {balances.length > 0 ? (
             <DataList>
@@ -470,7 +490,7 @@ function AccountDetailSheet({ account, onOpenChange, onQuickUpdate }) {
                     <Button
                       size="icon-sm"
                       variant="ghost"
-                      className="text-negative"
+                      className="text-text-muted hover:text-text"
                       onClick={async () => {
                         const ok = await confirm({
                           title: "Delete this balance?",
@@ -520,6 +540,10 @@ export function AccountsPage() {
   });
 
   const accounts = accountsQuery.data ?? [];
+  const accountColors = useMemo(
+    () => entityColors((accountsQuery.data ?? []).map((a) => a.id)),
+    [accountsQuery.data],
+  );
 
   const createMutation = useMutation({
     mutationFn: async (/** @type {AccountFormData} */ data) => {
@@ -634,6 +658,21 @@ export function AccountsPage() {
     (g) => g.items.length > 0,
   );
 
+  // The open sheet's account, found afresh in the current list so its arrows
+  // follow it as it moves.
+  const detailGroup = detailAccount ? groups.find((g) => g.items.some((a) => a.id === detailAccount.id)) : undefined;
+  const detailIndex = detailGroup && detailAccount ? detailGroup.items.findIndex((a) => a.id === detailAccount.id) : -1;
+  const detailReorder =
+    detailGroup && detailAccount && detailIndex >= 0 ? (
+      <ReorderControls
+        index={detailIndex}
+        count={detailGroup.items.length}
+        label={detailAccount.name}
+        disabled={reorderMutation.isPending}
+        onMove={(direction) => moveAccount(detailGroup.items, detailIndex, direction)}
+      />
+    ) : null;
+
   return (
     <>
       <PageHeader
@@ -653,13 +692,13 @@ export function AccountsPage() {
       />
 
       {accounts.length > 0 ? (
-        <div className="grid grid-cols-2 gap-4">
+        <StatGroup aria-label="Accounts summary">
           {/* compact — a full-precision "$68,975.88" headline overflows its
-              half-width card at 375px and collides with the tile next to it;
+              half-width cell at 375px and collides with the one next to it;
               every account's exact balance is still one row below. */}
-          <StatTile label="Net worth" value={<Money value={netWorthCents} compact />} />
-          <StatTile label="Stale balances" value={staleCount} />
-        </div>
+          <Stat label="Net worth" value={<Money value={netWorthCents} compact />} />
+          <Stat label="Stale balances" value={staleCount} tone={staleCount > 0 ? "attention" : "default"} />
+        </StatGroup>
       ) : null}
 
       {accountsQuery.isLoading ? (
@@ -677,148 +716,178 @@ export function AccountsPage() {
           }
         />
       ) : (
-        groups.map((group) => (
-          <div key={group.type} className="flex flex-col gap-3">
-            <h2 className="text-sm font-semibold text-text-muted">{ACCOUNT_TYPE_LABELS[group.type]}</h2>
+        // The account types are parts of one list, so they sit closer to each
+        // other than the page's own blocks do.
+        <div className="flex flex-col gap-5 md:gap-6">
+          {groups.map((group) => (
+            <div key={group.type} className="flex flex-col gap-2">
+              <h2 className="px-1 text-sm font-semibold text-text-muted">{ACCOUNT_TYPE_LABELS[group.type]}</h2>
 
-            <div className="hidden overflow-x-auto rounded-(--radius-card) bg-surface shadow-(--shadow-card) md:block">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-border text-left text-xs text-text-muted">
-                    <th className="px-4 py-3 font-medium">Name</th>
-                    <th className="px-4 py-3 font-medium">Institution</th>
-                    <th className="px-4 py-3 font-medium">Balance</th>
-                    <th className="px-4 py-3 font-medium">As at</th>
-                    <th className="px-4 py-3 font-medium">Growth</th>
-                    <th className="px-4 py-3 font-medium" />
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border">
-                  {group.items.map((account, index) => (
-                    <tr key={account.id}>
-                      <td className="px-4 py-3 text-text">
-                        <button
-                          type="button"
-                          className="text-left hover:underline"
-                          onClick={() => setDetailAccount(account)}
-                        >
-                          {account.name}
-                        </button>
-                        {account.isIncomeLanding ? (
-                          <Badge variant="secondary" className="ml-2">
-                            Income landing
-                          </Badge>
-                        ) : null}
-                      </td>
-                      <td className="px-4 py-3 text-text-muted">{account.institution ?? "—"}</td>
-                      <td className="px-4 py-3 text-text">
-                        {account.latestBalance ? <Money value={account.latestBalance.amountCents} /> : "—"}
-                      </td>
-                      <td className="px-4 py-3 text-text-muted">
-                        {account.latestBalance ? (
-                          <span
-                            className={
-                              daysSinceIso(account.latestBalance.asAt) > STALE_DAYS ? "text-negative" : undefined
-                            }
-                          >
-                            {formatIsoDate(account.latestBalance.asAt, locale)}
-                          </span>
-                        ) : (
-                          "—"
-                        )}
-                      </td>
-                      <td className="px-4 py-3 text-text-muted">
-                        {account.annualGrowthRate != null ? `${(account.annualGrowthRate * 100).toFixed(2)}%` : "—"}
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        <div className="flex justify-end gap-1">
-                          <ReorderControls
-                            index={index}
-                            count={group.items.length}
-                            label={account.name}
-                            disabled={reorderMutation.isPending}
-                            onMove={(direction) => moveAccount(group.items, index, direction)}
-                          />
-                          <Button size="sm" variant="outline" onClick={() => setQuickUpdate({ accountId: account.id })}>
-                            Update balance
-                          </Button>
-                          <Button
-                            size="icon-sm"
-                            variant="ghost"
-                            aria-label="Edit account"
-                            onClick={() => {
-                              setEditingAccount(account);
-                              setFormOpen(true);
-                            }}
-                          >
-                            <PencilIcon />
-                          </Button>
-                          <Button
-                            size="icon-sm"
-                            variant="ghost"
-                            className="text-negative"
-                            aria-label="Archive account"
-                            onClick={async () => {
-                              const ok = await confirm({
-                                title: `Archive ${account.name}?`,
-                                description:
-                                  "It stops appearing in lists and allocation destinations. Its balance history is kept.",
-                                confirmLabel: "Archive",
-                              });
-                              if (ok) archiveMutation.mutate(account.id);
-                            }}
-                          >
-                            <Trash2Icon />
-                          </Button>
-                        </div>
-                      </td>
+              <ScrollArea axis="x" className="hidden rounded-(--radius-card) bg-surface shadow-(--shadow-card) md:block">
+                {/* Fixed column shares, so Balance and As at line up from one
+                    account type's table to the next instead of each table
+                    sizing itself to its own longest name. */}
+                <table className="w-full min-w-184 table-fixed text-sm">
+                  <colgroup>
+                    <col style={{ width: "28%" }} />
+                    <col style={{ width: "12%" }} />
+                    <col style={{ width: "14%" }} />
+                    <col style={{ width: "13%" }} />
+                    <col style={{ width: "9%" }} />
+                    <col style={{ width: "24%" }} />
+                  </colgroup>
+                  <thead>
+                    <tr className="border-b border-border text-left text-xs text-text-muted">
+                      <th className="px-4 py-3 font-medium">Name</th>
+                      <th className="px-4 py-3 font-medium">Institution</th>
+                      <th className="px-4 py-3 text-right font-medium">Balance</th>
+                      <th className="px-4 py-3 font-medium">As at</th>
+                      <th className="px-4 py-3 text-right font-medium">Growth</th>
+                      <th className="px-4 py-3 font-medium">
+                        <span className="sr-only">Actions</span>
+                      </th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody className="divide-y divide-border">
+                    {group.items.map((account, index) => (
+                      <tr key={account.id}>
+                        <td className="px-4 py-3 text-text">
+                          <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                            <button
+                              type="button"
+                              className="text-left hover:underline"
+                              onClick={() => setDetailAccount(account)}
+                            >
+                              {account.name}
+                            </button>
+                            {account.isIncomeLanding ? <Badge variant="secondary">Income landing</Badge> : null}
+                          </span>
+                        </td>
+                        <td className="truncate px-4 py-3 text-text-muted">{account.institution ?? "—"}</td>
+                        <td className="px-4 py-3 text-right text-text tabular-nums">
+                          {account.latestBalance ? <Money value={account.latestBalance.amountCents} /> : "—"}
+                        </td>
+                        <td className="px-4 py-3 text-text-muted">
+                          {account.latestBalance ? (
+                            <span
+                              className={
+                                daysSinceIso(account.latestBalance.asAt) > STALE_DAYS ? "text-warning-strong" : undefined
+                              }
+                            >
+                              {daysSinceIso(account.latestBalance.asAt) > STALE_DAYS ? (
+                                <ClockIcon className="mr-1 inline size-3.5" aria-hidden="true" />
+                              ) : null}
+                              {formatIsoDate(account.latestBalance.asAt, locale)}
+                            </span>
+                          ) : (
+                            "—"
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-right text-text-muted tabular-nums">
+                          {account.annualGrowthRate != null ? `${(account.annualGrowthRate * 100).toFixed(2)}%` : "—"}
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <div className="flex justify-end gap-1">
+                            <ReorderControls
+                              index={index}
+                              count={group.items.length}
+                              label={account.name}
+                              disabled={reorderMutation.isPending}
+                              onMove={(direction) => moveAccount(group.items, index, direction)}
+                            />
+                            <Button size="sm" variant="outline" onClick={() => setQuickUpdate({ accountId: account.id })}>
+                              Update balance
+                            </Button>
+                            <Button
+                              size="icon-sm"
+                              variant="ghost"
+                              aria-label="Edit account"
+                              onClick={() => {
+                                setEditingAccount(account);
+                                setFormOpen(true);
+                              }}
+                            >
+                              <PencilIcon />
+                            </Button>
+                            <Button
+                              size="icon-sm"
+                              variant="ghost"
+                              className="text-text-muted hover:text-text"
+                              aria-label="Archive account"
+                              onClick={async () => {
+                                const ok = await confirm({
+                                  title: `Archive ${account.name}?`,
+                                  description:
+                                    "It stops appearing in lists and allocation destinations. Its balance history is kept.",
+                                  confirmLabel: "Archive",
+                                });
+                                if (ok) archiveMutation.mutate(account.id);
+                              }}
+                            >
+                              <Trash2Icon />
+                            </Button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </ScrollArea>
 
-            <DataList className="md:hidden">
-              {group.items.map((account, index) => (
-                <DataListRow
-                  key={account.id}
-                  primary={
-                    // data-touch-target: a bespoke button, so it does not
-                    // inherit the coarse-pointer minimum the shared <Button>
-                    // gets (see app.css).
-                    <button
-                      type="button"
-                      data-touch-target
-                      className="flex items-center text-left"
-                      onClick={() => setDetailAccount(account)}
-                    >
-                      {account.name}
-                    </button>
-                  }
-                  secondary={
-                    account.latestBalance
-                      ? `${account.institution ?? "No institution"} · as at ${formatIsoDate(account.latestBalance.asAt, locale)}`
-                      : (account.institution ?? "No balance yet")
-                  }
-                  trailing={
-                    <div className="flex items-center gap-1">
-                      <ReorderControls
-                        index={index}
-                        count={group.items.length}
-                        label={account.name}
-                        disabled={reorderMutation.isPending}
-                        onMove={(direction) => moveAccount(group.items, index, direction)}
-                      />
-                      <Button size="sm" variant="outline" onClick={() => setQuickUpdate({ accountId: account.id })}>
-                        Update
-                      </Button>
-                    </div>
-                  }
-                />
-              ))}
-            </DataList>
-          </div>
-        ))
+              {/* Phone: one tap target per account — name, where it's held
+                  and how fresh the figure is on the left, the balance on the
+                  right — with Update beside it, because refreshing a balance is
+                  the thing a phone visit is usually for. The balance was not
+                  on a phone at all before: the trailing slot went to the
+                  reorder arrows, which now live in the account's sheet (an
+                  order is set once, a balance every week). */}
+              <ul className="flex flex-col divide-y divide-border overflow-hidden rounded-(--radius-card) bg-surface shadow-(--shadow-card) md:hidden">
+                {group.items.map((account) => {
+                  const stale = account.latestBalance ? daysSinceIso(account.latestBalance.asAt) > STALE_DAYS : false;
+                  return (
+                    <li key={account.id} className="flex items-stretch">
+                      <button
+                        type="button"
+                        className="flex min-w-0 flex-1 items-center justify-between gap-3 py-2.5 pr-2 pl-4 text-left transition-colors hover:bg-surface-muted focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-(--accent)"
+                        onClick={() => setDetailAccount(account)}
+                      >
+                        <span className="min-w-0">
+                          <span className="block truncate text-sm font-medium text-text">{account.name}</span>
+                          <span className="block truncate text-xs text-text-muted">
+                            {account.institution ?? "No institution"}
+                            {" · "}
+                            {account.latestBalance ? (
+                              <span className={stale ? "text-warning-strong" : undefined}>
+                                {stale ? <ClockIcon className="mr-1 inline size-3.5" aria-hidden="true" /> : null}
+                                {formatIsoDate(account.latestBalance.asAt, locale)}
+                              </span>
+                            ) : (
+                              "no balance yet"
+                            )}
+                          </span>
+                        </span>
+                        <span className="shrink-0 text-sm font-semibold text-text tabular-nums">
+                          {account.latestBalance ? <Money value={account.latestBalance.amountCents} /> : "—"}
+                        </span>
+                      </button>
+                      <div className="flex shrink-0 items-center pr-2">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="text-accent-brand"
+                          aria-label={`Update ${account.name} balance`}
+                          onClick={() => setQuickUpdate({ accountId: account.id })}
+                        >
+                          Update
+                        </Button>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ))}
+        </div>
       )}
 
       <AccountFormDialog
@@ -848,8 +917,10 @@ export function AccountsPage() {
 
       <AccountDetailSheet
         account={detailAccount}
+        accountColors={accountColors}
         onOpenChange={(open) => !open && setDetailAccount(null)}
         onQuickUpdate={() => detailAccount && setQuickUpdate({ accountId: detailAccount.id })}
+        reorder={detailReorder}
       />
     </>
   );

@@ -13,8 +13,9 @@ import {
   variableBudgets,
 } from "@budget/schema";
 import { eq } from "drizzle-orm";
+import { normaliseDestination } from "./parse.js";
 
-/** @import { AllocationLine, Cadence } from "@budget/engine" */
+/** @import { AllocationLine, Cadence, Cents } from "@budget/engine" */
 /** @import { ImportPlan } from "./parse.js" */
 
 // Writes a parsed, operator-confirmed import plan to the database.
@@ -26,6 +27,13 @@ import { eq } from "drizzle-orm";
 //   re-importing the same workbook updates rather than duplicating. That is
 //   an acceptance criterion, and it is also what makes the import safe to
 //   retry after a half-answered mapping step.
+//
+//   Only LIVE rows are matched. An archived row is hidden from every screen,
+//   so a re-import that wrote into one changed something nobody could see;
+//   its natural key now creates a fresh row instead, which is visible and
+//   honest. And a match updates only the fields the workbook is the source
+//   of — everything the operator tuned after the first import is left alone
+//   (see REIMPORT_RULES, which is also what the preview tells them).
 //
 //   NEVER ACTIVATES AN ALLOCATION. Imported plan lines land in a DRAFT
 //   version. An active version's lines are immutable (phases/08-allocation.md
@@ -121,6 +129,33 @@ function findExisting(existing, match) {
 }
 
 /**
+ * Natural keys compare names case-insensitively — "Rent" and "rent" are one
+ * bill to a household, and a re-import must not duplicate it over a capital.
+ *
+ * @param {string} a
+ * @param {string} b
+ */
+function sameName(a, b) {
+  return a.toLowerCase() === b.toLowerCase();
+}
+
+/**
+ * What a re-import changes on a row it MATCHES, entity by entity — the one
+ * statement of it. `applyImport` writes exactly these fields and no others,
+ * and the preview hands this list to the operator before anything is written,
+ * so the two cannot say different things.
+ */
+export const REIMPORT_RULES = [
+  "Rows are matched by name, ignoring case. Archived rows are never matched or written to — a name that only an archived row has imports as a new row.",
+  "Bills: only the amount and the frequency are updated. The due date, amount model, escalation, rolling window, seasonal factors, step changes, owner, paid-from account, notes and order are left as you set them.",
+  "Income lines: the amount and the cadence are updated.",
+  "Variable-cost categories: whether the category is essential is updated, and a monthly budget effective from the import date is added (or replaces one already on that date).",
+  "Allocation plans: the income variant the plan divides is updated, and its open draft is replaced by the workbook's lines. The active version — your standing orders — is never touched.",
+  "Balances: a balance on the import date is added (or replaces one already on that date), and the account's growth rate is updated.",
+  "People, income variants, accounts and fixed-cost categories are only ever reused or created, never changed.",
+];
+
+/**
  * Applies the plan. Returns a reconciliation: what the spreadsheet said,
  * beside what the app now holds, for every figure the operator would check.
  *
@@ -136,7 +171,10 @@ export async function applyImport(db, { plan, selection, actorId }) {
     const createdAccountNames = [];
 
     // ---- accounts (mapped, or explicitly created by name) -----------------
-    const existingAccounts = await tx.query.accounts.findMany({});
+    // Live accounts only: the preview only ever offered live ones, so an
+    // `accountId` that is no longer among them was archived in between, and
+    // money must not be routed to an account nobody can see.
+    const existingAccounts = await tx.query.accounts.findMany({ where: (a, { isNull }) => isNull(a.archivedAt) });
     /** @type {Map<string, string>} */
     const accountIdByDestination = new Map();
 
@@ -151,7 +189,7 @@ export async function applyImport(db, { plan, selection, actorId }) {
       // path that creates an account, and it still reuses one of the same
       // name rather than making a second (phases/11-polish-mobile-import.md,
       // workstream C, item 4: "Do not create accounts silently").
-      const byName = findExisting(existingAccounts, (a) => a.name.toLowerCase() === choice.create.name.toLowerCase());
+      const byName = findExisting(existingAccounts, (a) => sameName(a.name, choice.create.name));
       if (byName) {
         accountIdByDestination.set(destinationKey, byName.id);
         continue;
@@ -169,11 +207,11 @@ export async function applyImport(db, { plan, selection, actorId }) {
     // ---- people -----------------------------------------------------------
     const selectedIncomeLines = plan.variants.flatMap((v) => v.lines).filter((l) => selected.has(l.key));
     const neededPeople = [...new Set(selectedIncomeLines.map((l) => l.personName))];
-    const existingPeople = await tx.query.people.findMany({});
+    const existingPeople = await tx.query.people.findMany({ where: (p, { isNull }) => isNull(p.archivedAt) });
     /** @type {Map<string, string>} */
     const personIdByName = new Map();
     for (const [index, name] of neededPeople.entries()) {
-      const existing = findExisting(existingPeople, (p) => p.name.toLowerCase() === name.toLowerCase());
+      const existing = findExisting(existingPeople, (p) => sameName(p.name, name));
       if (existing) {
         personIdByName.set(name, existing.id);
         continue;
@@ -183,7 +221,7 @@ export async function applyImport(db, { plan, selection, actorId }) {
     }
 
     // ---- income variants and lines ----------------------------------------
-    const existingVariants = await tx.query.incomeVariants.findMany({});
+    const existingVariants = await tx.query.incomeVariants.findMany({ where: (v, { isNull }) => isNull(v.archivedAt) });
     /** @type {Map<string, string>} */
     const variantIdByKey = new Map();
     let incomeLineCount = 0;
@@ -199,7 +237,7 @@ export async function applyImport(db, { plan, selection, actorId }) {
       );
       if (variantLines.length === 0 && !neededByPlan) continue;
 
-      const existing = findExisting(existingVariants, (v) => v.name.toLowerCase() === variant.name.toLowerCase());
+      const existing = findExisting(existingVariants, (v) => sameName(v.name, variant.name));
       let variantId;
       if (existing) {
         variantId = existing.id;
@@ -224,23 +262,30 @@ export async function applyImport(db, { plan, selection, actorId }) {
         const match = storedLines.find(
           (l) => l.personId === personId && (l.label ?? "") === (line.label ?? ""),
         );
-        const values = {
-          variantId,
-          personId,
-          label: line.label,
-          amountCents: line.amountCents,
-          cadence: line.cadence,
-          sortOrder: lineIndex,
-        };
-        if (match) await tx.update(incomeLines).set(values).where(eq(incomeLines.id, match.id));
-        else await tx.insert(incomeLines).values(values);
+        // A matched line takes the workbook's amount and cadence and nothing
+        // else (REIMPORT_RULES) — its order and notes are the operator's.
+        if (match) {
+          await tx
+            .update(incomeLines)
+            .set({ amountCents: line.amountCents, cadence: line.cadence })
+            .where(eq(incomeLines.id, match.id));
+        } else {
+          await tx.insert(incomeLines).values({
+            variantId,
+            personId,
+            label: line.label,
+            amountCents: line.amountCents,
+            cadence: line.cadence,
+            sortOrder: lineIndex,
+          });
+        }
         incomeLineCount += 1;
       }
     }
 
     // ---- fixed-cost categories and bills ----------------------------------
     const selectedBills = plan.bills.filter((b) => selected.has(b.key));
-    const existingCategories = await tx.query.costCategories.findMany({});
+    const existingCategories = await tx.query.costCategories.findMany({ where: (c, { isNull }) => isNull(c.archivedAt) });
     /** @type {Map<string, string>} */
     const categoryIdByName = new Map();
 
@@ -254,12 +299,12 @@ export async function applyImport(db, { plan, selection, actorId }) {
       const cacheKey = `${kind}:${name.toLowerCase()}`;
       const cached = categoryIdByName.get(cacheKey);
       if (cached) return cached;
-      const existing = findExisting(
-        existingCategories,
-        (c) => c.kind === kind && c.name.toLowerCase() === name.toLowerCase(),
-      );
+      const existing = findExisting(existingCategories, (c) => c.kind === kind && sameName(c.name, name));
       if (existing) {
-        if (existing.isEssential !== isEssential) {
+        // Only a variable category's flag is the workbook's to say — its
+        // Essentials/Non-Essentials grouping. A fixed-cost category's `true`
+        // here is a default, not something the sheet states (REIMPORT_RULES).
+        if (kind === "variable" && existing.isEssential !== isEssential) {
           await tx.update(costCategories).set({ isEssential }).where(eq(costCategories.id, existing.id));
         }
         categoryIdByName.set(cacheKey, existing.id);
@@ -276,6 +321,7 @@ export async function applyImport(db, { plan, selection, actorId }) {
     }
 
     let billCount = 0;
+    let createdBillCount = 0;
     for (const [index, bill] of selectedBills.entries()) {
       const categoryId = await upsertCategory(
         bill.categoryName,
@@ -284,24 +330,39 @@ export async function applyImport(db, { plan, selection, actorId }) {
         plan.fixedCategories.findIndex((c) => c.name === bill.categoryName),
       );
       const stored = await tx.query.bills.findMany({
-        where: (b, { eq: eqCol }) => eqCol(b.categoryId, categoryId),
+        where: (b, { and, eq: eqCol, isNull }) => and(eqCol(b.categoryId, categoryId), isNull(b.archivedAt)),
       });
-      const match = stored.find((b) => b.name.toLowerCase() === bill.name.toLowerCase());
-      const values = {
-        categoryId,
-        name: bill.name,
-        baseAmountCents: bill.amountCents,
-        frequency: bill.frequency,
-        amountModel: /** @type {const} */ ("flat"),
-        sortOrder: index,
-      };
+      const match = stored.find((b) => sameName(b.name, bill.name));
       if (match) {
-        // anchorDate is deliberately NOT overwritten on a re-import: the
-        // operator may have set a real due date since, and the workbook has
-        // no due dates to restore it from.
-        await tx.update(billsTable).set(values).where(eq(billsTable.id, match.id));
+        // A re-import updates a matched bill's AMOUNT AND FREQUENCY, and
+        // nothing else (REIMPORT_RULES). Those two are what the workbook
+        // actually says about a bill. Everything else on the row is the
+        // operator's own work since the first import, and the workbook has no
+        // column to restore any of it from: the due date (it holds none at
+        // all), the amount model with its escalation, rolling window and
+        // seasonal factors (resetting `amountModel` to "flat" here used to
+        // wipe a seasonal or escalating setup without a word), step changes,
+        // owner, paid-from account, notes, the order on the table, and
+        // whether the due date has been confirmed.
+        await tx
+          .update(billsTable)
+          .set({ baseAmountCents: bill.amountCents, frequency: bill.frequency })
+          .where(eq(billsTable.id, match.id));
       } else {
-        await tx.insert(billsTable).values({ ...values, anchorDate });
+        await tx.insert(billsTable).values({
+          categoryId,
+          name: bill.name,
+          baseAmountCents: bill.amountCents,
+          frequency: bill.frequency,
+          amountModel: "flat",
+          sortOrder: index,
+          // The workbook has no due dates, so every bill it creates is dated
+          // to the one day the operator picked — a placeholder, flagged as
+          // one until it is set (tables/bills.js).
+          anchorDate,
+          dueDateConfirmed: false,
+        });
+        createdBillCount += 1;
       }
       billCount += 1;
     }
@@ -328,7 +389,7 @@ export async function applyImport(db, { plan, selection, actorId }) {
     }
 
     // ---- allocation plans, as drafts --------------------------------------
-    const existingPlans = await tx.query.allocationPlans.findMany({});
+    const existingPlans = await tx.query.allocationPlans.findMany({ where: (p, { isNull }) => isNull(p.archivedAt) });
     /** @type {{ planKey: string, planId: string, versionId: string, versionNumber: number }[]} */
     const importedPlans = [];
 
@@ -342,7 +403,7 @@ export async function applyImport(db, { plan, selection, actorId }) {
         throw new ImportSelectionError(`"${sheetPlan.name}" has no income variant to divide.`);
       }
 
-      const existing = findExisting(existingPlans, (p) => p.name.toLowerCase() === sheetPlan.name.toLowerCase());
+      const existing = findExisting(existingPlans, (p) => sameName(p.name, sheetPlan.name));
       let planId;
       if (existing) {
         planId = existing.id;
@@ -457,11 +518,197 @@ export async function applyImport(db, { plan, selection, actorId }) {
         accountsCreated: createdAccountNames.length,
       },
       createdAccountNames,
+      // Kept out of `counts`, which the summary screen renders entry by entry:
+      // this one is for the next-steps text, not a figure of its own.
+      createdBillCount,
       importedPlans,
       accountIdByDestination: Object.fromEntries(accountIdByDestination),
       variantIdByKey: Object.fromEntries(variantIdByKey),
     };
   });
+}
+
+/**
+ * @typedef {{
+ *   field: "amount" | "frequency" | "cadence" | "isEssential" | "budget" | "budgetCadence" | "incomeVariant" | "draft",
+ *   from: string | number | boolean | null,
+ *   to: string | number | boolean | null,
+ * }} ReimportChange
+ *
+ * `amount` and `budget` are cents; `frequency`, `cadence` and `budgetCadence`
+ * are cadence values; `incomeVariant` is a variant name; `draft` is the
+ * replaced draft's version number (`to` is null).
+ */
+
+/**
+ * @typedef {{
+ *   rowKeys: string[],
+ *   kind: "bill" | "income_line" | "variable_category" | "plan",
+ *   name: string,
+ *   changes: ReimportChange[],
+ *   message: string,
+ * }} ReimportOverwrite
+ *
+ * `rowKeys` — the preview rows whose selection causes this overwrite (a
+ * plan's are its lines), so the screen can drop it when they are deselected.
+ */
+
+/** @param {Cents} cents */
+const plainMoney = (cents) => (cents / 100).toFixed(2);
+
+/** @param {string} cadence */
+const cadenceWords = (cadence) => cadence.replace(/_/g, " ");
+
+/**
+ * What importing this workbook would OVERWRITE, row by row, measured against
+ * the live database before anything is written — so the preview can say
+ * plainly what a re-import changes rather than leaving the operator to find
+ * out afterwards.
+ *
+ * It matches exactly as `applyImport` does (live rows, `sameName`) and
+ * compares exactly the fields `applyImport` writes on a match
+ * (REIMPORT_RULES), listing each matched row whose stored value would change.
+ * A row that would be created is not an overwrite and is not listed. Balances
+ * are not listed either: which account a Projections row lands on is not
+ * known until its destination is mapped, so the rules say what happens to
+ * them instead.
+ *
+ * @param {import("@budget/schema").Db} db
+ * @param {ImportPlan} plan
+ */
+export async function describeReimport(db, plan) {
+  const [people, variants, lines, categories, budgets, bills, plans, drafts] = await Promise.all([
+    db.query.people.findMany({ where: (p, { isNull }) => isNull(p.archivedAt) }),
+    // Every variant, for naming the one a plan divides today even if it has
+    // since been archived; matching below still only considers live ones.
+    db.query.incomeVariants.findMany({}),
+    db.query.incomeLines.findMany({}),
+    db.query.costCategories.findMany({ where: (c, { isNull }) => isNull(c.archivedAt) }),
+    db.query.variableBudgets.findMany({ orderBy: (b, { desc }) => [desc(b.effectiveFrom)] }),
+    db.query.bills.findMany({ where: (b, { isNull }) => isNull(b.archivedAt) }),
+    db.query.allocationPlans.findMany({ where: (p, { isNull }) => isNull(p.archivedAt) }),
+    db.query.allocationVersions.findMany({ where: (v, { eq: eqCol }) => eqCol(v.status, "draft") }),
+  ]);
+  const liveVariants = variants.filter((v) => v.archivedAt === null);
+
+  /** @type {ReimportOverwrite[]} */
+  const overwrites = [];
+  let matchedCount = 0;
+
+  /**
+   * @param {Omit<ReimportOverwrite, "message">} entry
+   * @param {string[]} parts
+   */
+  function record(entry, parts) {
+    matchedCount += 1;
+    if (entry.changes.length > 0) overwrites.push({ ...entry, message: `${entry.name}: ${parts.join("; ")}.` });
+  }
+
+  for (const bill of plan.bills) {
+    const category = categories.find((c) => c.kind === "fixed" && sameName(c.name, bill.categoryName));
+    const match = category ? bills.find((b) => b.categoryId === category.id && sameName(b.name, bill.name)) : undefined;
+    if (!match) continue;
+    /** @type {ReimportChange[]} */
+    const changes = [];
+    /** @type {string[]} */
+    const parts = [];
+    if (match.baseAmountCents !== bill.amountCents) {
+      changes.push({ field: "amount", from: match.baseAmountCents, to: bill.amountCents });
+      parts.push(`amount ${plainMoney(match.baseAmountCents)} → ${plainMoney(bill.amountCents)}`);
+    }
+    if (match.frequency !== bill.frequency) {
+      changes.push({ field: "frequency", from: match.frequency, to: bill.frequency });
+      parts.push(`${cadenceWords(match.frequency)} → ${cadenceWords(bill.frequency)}`);
+    }
+    record({ rowKeys: [bill.key], kind: "bill", name: `${bill.name} (${bill.categoryName})`, changes }, parts);
+  }
+
+  for (const variant of plan.variants) {
+    const liveVariant = liveVariants.find((v) => sameName(v.name, variant.name));
+    if (!liveVariant) continue;
+    for (const line of variant.lines) {
+      const person = people.find((p) => sameName(p.name, line.personName));
+      const match = person
+        ? lines.find(
+            (l) => l.variantId === liveVariant.id && l.personId === person.id && (l.label ?? "") === (line.label ?? ""),
+          )
+        : undefined;
+      if (!match) continue;
+      /** @type {ReimportChange[]} */
+      const changes = [];
+      /** @type {string[]} */
+      const parts = [];
+      if (match.amountCents !== line.amountCents) {
+        changes.push({ field: "amount", from: match.amountCents, to: line.amountCents });
+        parts.push(`amount ${plainMoney(match.amountCents)} → ${plainMoney(line.amountCents)}`);
+      }
+      if (match.cadence !== line.cadence) {
+        changes.push({ field: "cadence", from: match.cadence, to: line.cadence });
+        parts.push(`${cadenceWords(match.cadence)} → ${cadenceWords(line.cadence)}`);
+      }
+      const who = line.label ? `${line.personName} (${line.label})` : line.personName;
+      record({ rowKeys: [line.key], kind: "income_line", name: `${who} in ${variant.name}`, changes }, parts);
+    }
+  }
+
+  for (const category of plan.variableCategories) {
+    const match = categories.find((c) => c.kind === "variable" && sameName(c.name, category.name));
+    if (!match) continue;
+    /** @type {ReimportChange[]} */
+    const changes = [];
+    /** @type {string[]} */
+    const parts = [];
+    if (match.isEssential !== category.isEssential) {
+      changes.push({ field: "isEssential", from: match.isEssential, to: category.isEssential });
+      parts.push(category.isEssential ? "becomes essential" : "stops being essential");
+    }
+    // Newest first, so this is the budget the operator most recently set.
+    const latest = budgets.find((b) => b.categoryId === match.id) ?? null;
+    if (latest && (latest.amountCents !== category.monthlyCents || latest.cadence !== "monthly")) {
+      changes.push({ field: "budget", from: latest.amountCents, to: category.monthlyCents });
+      if (latest.cadence !== "monthly") changes.push({ field: "budgetCadence", from: latest.cadence, to: "monthly" });
+      parts.push(
+        `budget ${plainMoney(latest.amountCents)} ${cadenceWords(latest.cadence)} → ${plainMoney(category.monthlyCents)} monthly from the import date`,
+      );
+    }
+    record({ rowKeys: [category.key], kind: "variable_category", name: category.name, changes }, parts);
+  }
+
+  for (const sheetPlan of plan.plans) {
+    const match = plans.find((p) => sameName(p.name, sheetPlan.name));
+    if (!match) continue;
+    /** @type {ReimportChange[]} */
+    const changes = [];
+    /** @type {string[]} */
+    const parts = [];
+    // Only when the workbook says unambiguously which variant the sheet
+    // divides; an ambiguous one is the operator's pick on the next screen.
+    const sheetVariant = sheetPlan.variantAmbiguous
+      ? null
+      : (plan.variants.find((v) => v.key === sheetPlan.variantKey) ?? null);
+    const currentVariantName = variants.find((v) => v.id === match.incomeVariantId)?.name ?? null;
+    if (sheetVariant && (currentVariantName === null || !sameName(currentVariantName, sheetVariant.name))) {
+      changes.push({ field: "incomeVariant", from: currentVariantName, to: sheetVariant.name });
+      parts.push(`divides ${sheetVariant.name} instead of ${currentVariantName ?? "an unknown variant"}`);
+    }
+    const draft = drafts.find((d) => d.planId === match.id);
+    if (draft) {
+      changes.push({ field: "draft", from: draft.version, to: null });
+      parts.push(`its open draft (v${draft.version}) is replaced by the workbook's lines, losing any unapplied edits in it`);
+    }
+    record(
+      { rowKeys: sheetPlan.lines.map((line) => line.key), kind: "plan", name: `${sheetPlan.name} plan`, changes },
+      parts,
+    );
+  }
+
+  return {
+    // Nothing matched means this is a first import, and the screen can leave
+    // the whole section out.
+    matchedCount,
+    overwrites,
+    rules: REIMPORT_RULES,
+  };
 }
 
 /**
@@ -486,10 +733,42 @@ function mustGetDestination(map, key) {
  * the database, so it says what THIS import did rather than what the database
  * happens to contain.
  *
- * @param {{ plan: ImportPlan, selection: ImportSelection, accountIdByDestination: Record<string, string>, incomeLandingAccountId: string | null, payCadence: Cadence }} args
+ * Every per-pay figure is stated in the WORKBOOK's own cadence when it says
+ * what that is ("Total (Fortnightly)"): its per-pay totals are in that
+ * cadence, and converting the app's side to anything else made every variant
+ * read "differs" — always, before a pay schedule existed, when the fallback
+ * was monthly. The household's primary schedule is the next choice and
+ * monthly the last; `cadence.source` says which was used.
+ *
+ * @param {{
+ *   plan: ImportPlan,
+ *   selection: ImportSelection,
+ *   accountIdByDestination: Record<string, string>,
+ *   accountNameById: Record<string, string>,
+ *   incomeLandingAccountId: string | null,
+ *   householdPayCadence: Cadence | null,
+ * }} args
  */
-export function reconcileImport({ plan, selection, accountIdByDestination, incomeLandingAccountId, payCadence }) {
+export function reconcileImport({
+  plan,
+  selection,
+  accountIdByDestination,
+  accountNameById,
+  incomeLandingAccountId,
+  householdPayCadence,
+}) {
   const selected = new Set(selection.selected);
+
+  /** @type {{ payCadence: Cadence, source: "workbook" | "pay_schedule" | "fallback" }} */
+  const cadence = plan.payCadence
+    ? { payCadence: plan.payCadence, source: "workbook" }
+    : householdPayCadence
+      ? { payCadence: householdPayCadence, source: "pay_schedule" }
+      : { payCadence: "monthly", source: "fallback" };
+  const payCadence = cadence.payCadence;
+
+  /** @param {string} accountId */
+  const nameOf = (accountId) => accountNameById[accountId] ?? null;
 
   const selectedBills = plan.bills.filter((b) => selected.has(b.key));
   const fixedPerYearCents = selectedBills.reduce((sum, b) => sum + b.perYearCents, 0);
@@ -578,6 +857,7 @@ export function reconcileImport({ plan, selection, accountIdByDestination, incom
     });
 
     const importedTotalPerPayCents = result.transfers.reduce((sum, t) => sum + t.perPayCents, 0);
+    const destinationByLineKey = new Map(lines.map((line) => [line.key, line.destination]));
 
     return [
       {
@@ -586,10 +866,29 @@ export function reconcileImport({ plan, selection, accountIdByDestination, incom
         variantName: variant?.name ?? null,
         grossPerPayCents,
         spreadsheetGrossPerPayCents: sheetPlan.spreadsheetGrossPerPayCents,
-        spreadsheetTransfers: sheetPlan.spreadsheetTransfers,
+        // The workbook's own transfer list, each label resolved to the account
+        // its destination was mapped to where one was — so the two columns
+        // can be read across, account by account.
+        spreadsheetTransfers: sheetPlan.spreadsheetTransfers.map((t) => {
+          const accountId = accountIdByDestination[`dest:${normaliseDestination(t.label)}`] ?? null;
+          return { ...t, accountId, accountName: accountId === null ? null : nameOf(accountId) };
+        }),
         spreadsheetTransferTotalCents: sheetPlan.spreadsheetTransferTotalCents,
         importedTransfers: result.transfers.map((t) => ({
           accountId: t.accountId,
+          // The mapped account's real name, so no row ever has to be labelled
+          // "New account" for want of one.
+          accountName: nameOf(t.accountId),
+          // Every destination the workbook wrote for the lines that land here,
+          // in its own words ("to ubank (House)").
+          destinations: [
+            ...new Set(
+              t.lineIds.flatMap((id) => {
+                const raw = destinationByLineKey.get(id);
+                return raw ? [raw] : [];
+              }),
+            ),
+          ],
           perPayCents: t.perPayCents,
           isNoOp: t.isNoOp,
         })),
@@ -603,6 +902,7 @@ export function reconcileImport({ plan, selection, accountIdByDestination, incom
   });
 
   return {
+    cadence,
     fixedCosts: {
       spreadsheetPerYearCents: plan.spreadsheet.fixedTotalPerYearCents,
       importedPerYearCents: fixedPerYearCents,
@@ -627,12 +927,25 @@ export function reconcileImport({ plan, selection, accountIdByDestination, incom
 }
 
 /**
- * What the operator still has to do by hand. Every one of these is a decision
- * the app refuses to make on its own.
+ * What the operator still has to do by hand, worded for the moment straight
+ * after an import. Every one of these is a decision the app refuses to make
+ * on its own.
  *
- * @param {{ importedPlans: { versionNumber: number }[], incomeLandingAccountId: string | null, hasPrimaryPaySchedule: boolean, createdAccountNames: string[] }} args
+ * This is the import's own account of itself, not the to-do list: that is
+ * the dashboard's setup checklist (`loadSetup`), derived from the database so
+ * it survives the operator leaving this page. The commit response carries it
+ * too, and the last line here says where it lives.
+ *
+ * @param {{ importedPlans: { versionNumber: number }[], incomeLandingAccountId: string | null, hasPrimaryPaySchedule: boolean, createdAccountNames: string[], createdBillCount: number, anchorDate: string }} args
  */
-export function importNextSteps({ importedPlans, incomeLandingAccountId, hasPrimaryPaySchedule, createdAccountNames }) {
+export function importNextSteps({
+  importedPlans,
+  incomeLandingAccountId,
+  hasPrimaryPaySchedule,
+  createdAccountNames,
+  createdBillCount,
+  anchorDate,
+}) {
   /** @type {string[]} */
   const steps = [];
   if (importedPlans.length > 0) {
@@ -649,7 +962,7 @@ export function importNextSteps({ importedPlans, incomeLandingAccountId, hasPrim
   }
   if (!hasPrimaryPaySchedule) {
     steps.push(
-      "No primary pay schedule is set. Add one on Settings → Pay schedules so transfers can be stated per pay " +
+      "No primary pay schedule is set. Add one under Pay schedules on Income so transfers can be stated per pay " +
         "rather than per month.",
     );
   }
@@ -659,9 +972,16 @@ export function importNextSteps({ importedPlans, incomeLandingAccountId, hasPrim
         `${createdAccountNames.join(", ")}. Set each one's type and growth rate on Accounts.`,
     );
   }
+  if (createdBillCount > 0) {
+    steps.push(
+      `${createdBillCount} new bill${createdBillCount === 1 ? " is" : "s are"} dated ${anchorDate} — a placeholder, ` +
+        "because the workbook has no due dates. Set each real due date on Fixed Costs; until then the calendar and " +
+        "the bills buffer are working from the placeholder. Bills that already existed kept their dates.",
+    );
+  }
   steps.push(
-    "Every imported bill is anchored to the import date. Set real due dates on Fixed Costs so the calendar and the " +
-      "bills buffer are right.",
+    "You don't need to remember any of this: the dashboard's setup checklist keeps the list, and each item ticks " +
+      "itself off once it's done.",
   );
   return steps;
 }

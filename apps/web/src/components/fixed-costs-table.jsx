@@ -7,10 +7,12 @@ import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select.jsx";
 import { DatePicker } from "@/components/date-picker.jsx";
 import { Money } from "@/components/money.jsx";
+import { InlineError } from "@/components/notice.jsx";
 import { AMOUNT_MODEL_LABELS, AMOUNT_MODELS, CADENCES, CADENCE_LABELS } from "@/lib/constants.js";
 import { formatIsoDate } from "@/lib/dates.js";
-import { isBlankGhost } from "@/lib/fixed-costs-draft.js";
+import { billToDraft, draftSignature, isBlankGhost } from "@/lib/fixed-costs-draft.js";
 import { cn } from "@/lib/utils.js";
+import { ScrollArea } from "@/components/scroll-area.jsx";
 
 /** @import { AmountModel, Cadence, Cents, WindowFigures } from "@budget/engine" */
 /** @import { Bill, DraftBill } from "@/lib/fixed-costs-draft.js" */
@@ -41,6 +43,19 @@ import { cn } from "@/lib/utils.js";
  *   perYearCents: Cents,
  * }} GroupTotals
  */
+
+/**
+ * An unsaved edit: the draft no longer matches its saved bill, or a new row
+ * has something in it. The same test the page's "N unsaved changes" count
+ * uses, so every change it counts is visibly marked — edited rows amber,
+ * removed rows faded (and not amber).
+ *
+ * @param {Pick<BillRow, "draft" | "bill">} row
+ */
+function isEdited({ draft, bill }) {
+  if (draft.removed) return false;
+  return bill ? draftSignature(draft) !== draftSignature(billToDraft(bill)) : !isBlankGhost(draft);
+}
 
 /** @param {Person[]} people @param {string | null} personId */
 function personName(people, personId) {
@@ -122,18 +137,18 @@ function ViewRow({ row, people, locale, onOpenBill }) {
   return (
     <tr>
       <td className="px-4 py-3 text-text">
-        <button
-          type="button"
-          className="text-left hover:underline"
-          onClick={() => bill && onOpenBill(bill.id)}
-        >
-          {draft.name}
-        </button>
-        {draft.amountModel !== "flat" ? (
-          <Badge variant="secondary" className="ml-2">
-            {AMOUNT_MODEL_LABELS[draft.amountModel]}
-          </Badge>
-        ) : null}
+        <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <button
+            type="button"
+            className="text-left hover:underline"
+            onClick={() => bill && onOpenBill(bill.id)}
+          >
+            {draft.name}
+          </button>
+          {draft.amountModel !== "flat" ? (
+            <Badge variant="secondary">{AMOUNT_MODEL_LABELS[draft.amountModel]}</Badge>
+          ) : null}
+        </span>
       </td>
       <td className="px-4 py-3 text-text-muted">{personName(people, draft.ownerPersonId)}</td>
       <td className="px-4 py-3 text-text">
@@ -145,7 +160,7 @@ function ViewRow({ row, people, locale, onOpenBill }) {
           <AmountBasis draft={draft} bill={bill} figures={figures} spread={spread} />
         </div>
       </td>
-      <td className="px-4 py-3 text-text-muted">
+      <td className="px-4 py-3 whitespace-nowrap text-text-muted">
         {figures?.nextDueDate ? formatIsoDate(figures.nextDueDate, locale) : "—"}
       </td>
       <td className="px-4 py-3 text-right text-text-muted">
@@ -178,7 +193,7 @@ function EditRow({ row, people, accounts, onChange, onRemove, onOpenBill }) {
   const blank = isBlankGhost(draft);
 
   return (
-    <tr className={cn(draft.removed && "opacity-45", blank && "text-text-subtle")}>
+    <tr className={cn(draft.removed && "opacity-45", blank && "text-text-subtle", isEdited(row) && "bg-warning-soft")}>
       <td className="px-2 py-2 align-top">
         <Input
           className="h-8 min-w-36"
@@ -188,7 +203,7 @@ function EditRow({ row, people, accounts, onChange, onRemove, onOpenBill }) {
           disabled={draft.removed}
           onChange={(e) => onChange(draft.key, { name: e.target.value })}
         />
-        {error ? <p className="mt-1 text-xs text-negative">{error}</p> : null}
+        {error ? <InlineError size="xs" className="mt-1">{error}</InlineError> : null}
       </td>
       <td className="px-2 py-2 align-top">
         <Select
@@ -329,7 +344,7 @@ function EditRow({ row, people, accounts, onChange, onRemove, onOpenBill }) {
           <Button
             size="icon-sm"
             variant="ghost"
-            className={draft.removed ? undefined : "text-negative"}
+            className={draft.removed ? undefined : "text-text-muted hover:text-text"}
             aria-label={draft.removed ? `Keep ${draft.name}` : `Remove ${draft.name || "this row"}`}
             onClick={() => onRemove(draft.key)}
           >
@@ -346,6 +361,14 @@ function EditRow({ row, people, accounts, onChange, onRemove, onOpenBill }) {
 // occurrence the view-mode column reports.
 const EDIT_HEADINGS = ["Name", "Owner", "Amount", "Cadence", "Anchor date", "Model", "Annual", ""];
 const VIEW_HEADINGS = ["Name", "Owner", "Amount", "Next due", "Weekly", "Monthly", "Quarterly", "Annual"];
+
+// Fixed shares of the table's width, so every category's table puts "Owner",
+// "Next due" and the four restated amounts at the same x. With automatic
+// layout each table sized its columns to its own content, and the columns
+// stepped left and right from one category to the next — the eye could not
+// run down "Monthly" across the page. Edit mode keeps automatic layout: its
+// cells are controls with their own minimum widths.
+const VIEW_COLUMN_WIDTHS = ["22%", "8%", "20%", "12%", "8%", "9%", "10%", "11%"];
 
 /**
  * @param {{
@@ -374,9 +397,9 @@ function CategoryGroupDesktop({
 
   return (
     <div className="flex flex-col gap-2">
-      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 px-1">
         <h3 className="text-sm font-semibold text-text-muted">{category.name}</h3>
-        <div className="flex items-center gap-4 text-xs text-text-muted">
+        <div className="flex items-center gap-4 text-xs text-text-muted tabular-nums">
           <span>
             {billCount} bill{billCount === 1 ? "" : "s"}
           </span>
@@ -394,8 +417,15 @@ function CategoryGroupDesktop({
           </span>
         </div>
       </div>
-      <div className="overflow-x-auto rounded-(--radius-card) bg-surface shadow-(--shadow-card)">
-        <table className="w-full text-sm">
+      <ScrollArea axis="x" className="rounded-(--radius-card) bg-surface shadow-(--shadow-card)">
+        <table className={cn("w-full text-sm", !editing && "min-w-208 table-fixed")}>
+          {editing ? null : (
+            <colgroup>
+              {VIEW_COLUMN_WIDTHS.map((width, i) => (
+                <col key={i} style={{ width }} />
+              ))}
+            </colgroup>
+          )}
           <thead>
             <tr className="border-b border-border text-left text-xs text-text-muted">
               {headings.map((heading, i) => (
@@ -427,7 +457,7 @@ function CategoryGroupDesktop({
             )}
           </tbody>
         </table>
-      </div>
+      </ScrollArea>
     </div>
   );
 }
@@ -450,20 +480,29 @@ function CategoryGroupMobile({ category, rows, totals, editing, people, locale, 
         type="button"
         data-touch-target
         aria-expanded={open}
-        className="flex items-center justify-between gap-2 text-left"
+        className="flex items-center justify-between gap-2 rounded-(--radius-control) px-1 text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent)"
         onClick={() => setOpen((o) => !o)}
       >
         <span className="flex items-center gap-1 text-sm font-semibold text-text-muted">
           {open ? <ChevronDownIcon className="size-4" /> : <ChevronRightIcon className="size-4" />}
           {category.name}
         </span>
-        <span className="text-xs text-text-muted">
+        <span className="text-xs text-text-muted tabular-nums">
           <Money value={totals.perMonthCents} className="font-medium text-text" />
           /mo
         </span>
       </button>
       {open ? (
-        <div className="flex flex-col gap-2">
+        // Editing, each bill is a small form and earns its own card. Reading,
+        // they are rows of one list: eighteen floating cards with eighteen
+        // shadows made a category boundary no stronger than a bill boundary.
+        <div
+          className={cn(
+            editing
+              ? "flex flex-col gap-2"
+              : "flex flex-col divide-y divide-border overflow-hidden rounded-(--radius-card) bg-surface shadow-(--shadow-card)",
+          )}
+        >
           {rows.map(({ draft, bill, figures, spread, error }) =>
             editing ? (
               <div
@@ -471,6 +510,7 @@ function CategoryGroupMobile({ category, rows, totals, editing, people, locale, 
                 className={cn(
                   "flex flex-col gap-3 rounded-(--radius-card) bg-surface p-4 shadow-(--shadow-card)",
                   draft.removed && "opacity-45",
+                  isEdited({ draft, bill }) && "bg-warning-soft",
                 )}
               >
                 <div className="flex items-center gap-2">
@@ -486,7 +526,7 @@ function CategoryGroupMobile({ category, rows, totals, editing, people, locale, 
                     <Button
                       size="icon-sm"
                       variant="ghost"
-                      className={draft.removed ? undefined : "text-negative"}
+                      className={draft.removed ? undefined : "text-text-muted hover:text-text"}
                       aria-label={draft.removed ? `Keep ${draft.name}` : `Remove ${draft.name || "this row"}`}
                       onClick={() => onRemove(draft.key)}
                     >
@@ -589,7 +629,7 @@ function CategoryGroupMobile({ category, rows, totals, editing, people, locale, 
                     ) : null}
                   </p>
                 </div>
-                {error ? <p className="text-xs text-negative">{error}</p> : null}
+                {error ? <InlineError size="xs">{error}</InlineError> : null}
                 {draft.billId && draft.amountModel !== "flat" ? (
                   <Button size="sm" variant="outline" className="self-start" onClick={() => onOpenBill(/** @type {string} */ (draft.billId))}>
                     <SlidersHorizontalIcon />
@@ -602,7 +642,7 @@ function CategoryGroupMobile({ category, rows, totals, editing, people, locale, 
                 key={draft.key}
                 type="button"
                 data-touch-target
-                className="flex items-start justify-between gap-3 rounded-(--radius-card) bg-surface p-4 text-left shadow-(--shadow-card)"
+                className="flex items-start justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-surface-muted focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-(--accent)"
                 onClick={() => bill && onOpenBill(bill.id)}
               >
                 <span className="flex min-w-0 flex-col gap-0.5">
@@ -618,7 +658,7 @@ function CategoryGroupMobile({ category, rows, totals, editing, people, locale, 
                   </span>
                   <AmountBasis draft={draft} bill={bill} figures={figures} spread={spread} />
                 </span>
-                <span className="flex shrink-0 flex-col items-end gap-0.5 text-sm">
+                <span className="flex shrink-0 flex-col items-end gap-0.5 text-sm tabular-nums">
                   <span className="font-medium text-text">
                     {figures?.nextAmountCents != null ? <Money value={figures.nextAmountCents} /> : "—"}
                   </span>

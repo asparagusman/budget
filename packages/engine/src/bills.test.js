@@ -7,6 +7,8 @@ import {
   simulateBalance,
   sumWindowFigures,
 } from "./bills.js";
+import { addDaysIso, countPaydays } from "./calendar.js";
+import { equivalent } from "./cadence.js";
 import { toCents } from "./money.js";
 import { mustAt } from "./invariant.js";
 
@@ -25,10 +27,12 @@ const baseBill = {
 describe("projectInstances", () => {
   it("projects a flat bill's due dates and amounts", () => {
     const instances = projectInstances(baseBill, { from: "2026-01-01", to: "2026-04-01" });
+    // `frequency` rides along on every instance so a pooled list can still be
+    // annualised one series at a time (see billsContribution).
     expect(instances).toEqual([
-      { billId: "internet", dueDate: "2026-01-15", expectedCents: toCents(90), actualCents: null, isOverride: false },
-      { billId: "internet", dueDate: "2026-02-15", expectedCents: toCents(90), actualCents: null, isOverride: false },
-      { billId: "internet", dueDate: "2026-03-15", expectedCents: toCents(90), actualCents: null, isOverride: false },
+      { billId: "internet", dueDate: "2026-01-15", expectedCents: toCents(90), actualCents: null, isOverride: false, frequency: "monthly" },
+      { billId: "internet", dueDate: "2026-02-15", expectedCents: toCents(90), actualCents: null, isOverride: false, frequency: "monthly" },
+      { billId: "internet", dueDate: "2026-03-15", expectedCents: toCents(90), actualCents: null, isOverride: false, frequency: "monthly" },
     ]);
   });
 
@@ -87,6 +91,66 @@ describe("projectInstances", () => {
     ]);
   });
 
+  it("restarts escalation from a step change, since a step is a new base", () => {
+    /** @type {Bill} */
+    const bill = {
+      id: "rent",
+      baseAmountCents: toCents(1000),
+      frequency: "yearly",
+      anchorDate: "2020-06-01",
+      amountModel: "escalating",
+      escalationPct: 10,
+      stepChanges: [{ effectiveFrom: "2023-06-01", newAmountCents: toCents(2000) }],
+    };
+    const instances = projectInstances(bill, { from: "2020-01-01", to: "2025-01-01" });
+    // Compounding the $2,000 from the 2020 anchor read $2,662.00 on the day
+    // it took effect and $2,928.20 a year later.
+    expect(instances.map((i) => [i.dueDate, i.expectedCents])).toEqual([
+      ["2020-06-01", toCents(1000)],
+      ["2021-06-01", toCents(1100)],
+      ["2022-06-01", toCents(1210)],
+      ["2023-06-01", toCents(2000)],
+      ["2024-06-01", toCents(2200)],
+    ]);
+  });
+
+  it("counts escalation years from the anchor when a step predates it", () => {
+    /** @type {Bill} */
+    const bill = {
+      id: "rent",
+      baseAmountCents: toCents(1000),
+      frequency: "yearly",
+      anchorDate: "2020-06-01",
+      amountModel: "escalating",
+      escalationPct: 10,
+      stepChanges: [{ effectiveFrom: "2019-01-01", newAmountCents: toCents(2000) }],
+    };
+    const instances = projectInstances(bill, { from: "2020-01-01", to: "2022-01-01" });
+    expect(instances.map((i) => i.expectedCents)).toEqual([toCents(2000), toCents(2200)]);
+  });
+
+  it("completes a 29 February anchor's year on the 28th it actually falls due", () => {
+    /** @type {Bill} */
+    const bill = {
+      id: "rego",
+      baseAmountCents: toCents(100),
+      frequency: "yearly",
+      anchorDate: "2024-02-29",
+      amountModel: "escalating",
+      escalationPct: 10,
+    };
+    const instances = projectInstances(bill, { from: "2024-01-01", to: "2029-01-01" });
+    // Compared against the unclamped 29th, 2025-02-28 had completed no year
+    // at all, and 2028 then jumped from $121.00 to $146.41 past $133.10.
+    expect(instances.map((i) => [i.dueDate, i.expectedCents])).toEqual([
+      ["2024-02-29", toCents(100)],
+      ["2025-02-28", toCents(110)],
+      ["2026-02-28", toCents(121)],
+      ["2027-02-28", toCents(133.1)],
+      ["2028-02-29", toCents(146.41)],
+    ]);
+  });
+
   it("rolling_average falls back to base with insufficient history, and never throws", () => {
     /** @type {Bill} */
     const bill = {
@@ -136,6 +200,7 @@ describe("projectInstances", () => {
       expectedCents: toCents(90),
       actualCents: toCents(12345),
       isOverride: true,
+      frequency: "monthly",
     });
   });
 
@@ -200,6 +265,70 @@ describe("billsContribution", () => {
     const narrowWindow = { from: "2026-01-01", to: "2026-06-01" };
     const result = billsContribution(instances, narrowWindow, noPaySchedule);
     expect(result.perPayCents).toBe(0);
+  });
+
+  it("annualises weekly and fortnightly bills by occurrences per year, whatever day the window starts", () => {
+    // 1461 days holds 104 or 105 fortnights (208 or 209 weeks) depending on
+    // the start. Counting them made this loan $1,093.75/month on 1-2 October
+    // and $1,083.33 on 5-10 October, and the standing transfer with it.
+    /** @type {Bill} */
+    const loan = { id: "loan", baseAmountCents: toCents(500), frequency: "fortnightly", anchorDate: "2026-10-02", amountModel: "flat" };
+    /** @type {Bill} */
+    const childcare = { id: "cc", baseAmountCents: toCents(300), frequency: "weekly", anchorDate: "2026-10-05", amountModel: "flat" };
+    /** @type {PaySchedule} */
+    const pay = { anchorDate: "2026-10-01", cadence: "fortnightly" };
+
+    for (let day = 1; day <= 14; day++) {
+      const from = `2026-10-${String(day).padStart(2, "0")}`;
+      const to = addDaysIso(from, 1461);
+      const w = { from, to };
+      const loanFigures = billsContribution(projectInstances(loan, w), w, pay);
+      const childcareFigures = billsContribution(projectInstances(childcare, w), w, pay);
+      const pooled = billsContribution([...projectInstances(loan, w), ...projectInstances(childcare, w)], w, pay);
+
+      expect(loanFigures.perYearCents, from).toBe(toCents(500) * 26);
+      expect(loanFigures.perMonthCents, from).toBe(equivalent(toCents(500), "fortnightly", "monthly"));
+      expect(childcareFigures.perYearCents, from).toBe(toCents(300) * 52);
+      expect(childcareFigures.perMonthCents, from).toBe(equivalent(toCents(300), "weekly", "monthly"));
+      // Pooled, each series still annualises on its own cadence.
+      expect(pooled.perYearCents, from).toBe(toCents(500) * 26 + toCents(300) * 52);
+      // Per pay still divides by the paydays really in the window — the
+      // deliberate todo.md [P10-12] behaviour — just from the nominal total.
+      expect(loanFigures.perPayCents, from).toBe(
+        Math.round((toCents(500) * 26 * 4) / countPaydays(pay, w)),
+      );
+    }
+  });
+
+  it("prices a day-based series at its average occurrence, so an escalation still counts", () => {
+    /** @type {Bill} */
+    const bill = {
+      id: "b",
+      baseAmountCents: toCents(100),
+      frequency: "weekly",
+      anchorDate: "2024-01-01",
+      amountModel: "escalating",
+      escalationPct: 10,
+    };
+    const instances = projectInstances(bill, window);
+    const average = instances.reduce((sum, i) => sum + i.expectedCents, 0) / instances.length;
+    expect(billsContribution(instances, window, paySchedule).perYearCents).toBe(Math.round(average * 52));
+  });
+
+  it("counts instances with no frequency as they fall, as it always has", () => {
+    // Hand-built instances (no `projectInstances`, so no cadence to go on):
+    // 105 fortnightly $500 dues over the 1461-day window, scaled by the window.
+    /** @type {BillInstance[]} */
+    const instances = Array.from({ length: 105 }, (_, k) => ({
+      billId: "loan",
+      dueDate: addDaysIso(window.from, k * 14),
+      expectedCents: toCents(500),
+      actualCents: null,
+      isOverride: false,
+    }));
+    expect(billsContribution(instances, window, paySchedule).perYearCents).toBe(
+      Math.round((105 * toCents(500) * 365.25) / 1461),
+    );
   });
 });
 

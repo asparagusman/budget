@@ -6,6 +6,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet.jsx";
 import { DatePicker } from "@/components/date-picker.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
+import { InlineError } from "@/components/notice.jsx";
 import { todayIso } from "@/lib/dates.js";
 
 /** @typedef {{ id: string, name: string, type: string, latestBalance: { amountCents: number, asAt: string } | null }} BalanceAccount */
@@ -124,7 +125,7 @@ export function QuickBalanceSheet({ open, onOpenChange, accounts, accountId, sub
           <FieldRow label="As at" htmlFor="balance-as-at">
             <DatePicker id="balance-as-at" value={asAt} onChange={setAsAt} />
           </FieldRow>
-          {error ? <p className="text-sm text-negative">{error}</p> : null}
+          {error ? <InlineError>{error}</InlineError> : null}
           <Button type="submit" disabled={submitting}>
             {submitting ? "Saving…" : "Update balance"}
           </Button>

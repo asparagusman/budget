@@ -1,9 +1,13 @@
 import { defineConfig } from "tsup";
 
 export default defineConfig({
-  // Two entries: the server, and the one-shot migrator the compose
-  // `migrate` service runs before the API starts (see apps/api/src/migrate.js).
-  entry: ["src/index.js", "src/migrate.js"],
+  // Three entries: the server; the one-shot migrator the compose `migrate`
+  // service runs before the API starts (see apps/api/src/migrate.js); and the
+  // break-glass invite CLI. The runtime image has no pnpm and no src/, so
+  // `pnpm auth:invite` cannot run there — `node dist/scripts/auth-invite.js`
+  // can (infra/README.md, "Recovering when every passkey is gone"). Output
+  // paths mirror src/, because src/ is the entries' common root.
+  entry: ["src/index.js", "src/migrate.js", "src/scripts/auth-invite.js"],
   format: ["esm"],
   target: "node22",
   outDir: "dist",

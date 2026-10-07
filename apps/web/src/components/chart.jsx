@@ -14,6 +14,7 @@ import {
 import { formatMoney } from "@/lib/format-money.js";
 import { useReducedMotion } from "@/lib/motion.js";
 import { useSettings } from "@/lib/settings.jsx";
+import { ScrollArea } from "@/components/scroll-area.jsx";
 
 // The app's chart layer. Two files, deliberately:
 //
@@ -39,9 +40,26 @@ import { useSettings } from "@/lib/settings.jsx";
 export { ChartTooltip, ChartTooltipContent, ChartLegend, ChartLegendContent };
 
 /**
- * The five series colours, in order, as CSS variables — never as resolved
- * strings. Passing the variable is what lets a series re-colour itself on a
- * theme change without React knowing the theme changed at all.
+ * Chart colour rules, the same on every chart (see the vocabulary at the top
+ * of styles/tokens.css):
+ *
+ *   - `TOTAL` (ink) for a household total or a chart with a single series.
+ *   - An account / category / variant gets ITS colour from
+ *     `entityColors()` in lib/entity-colors.js — never `SERIES[i]` by list
+ *     position, which gave one account two colours on two screens.
+ *   - Money out (a bill, an outflow) is `var(--negative)`; nothing else is
+ *     red or green, so a series never reads as money it isn't.
+ *   - Anything projected spreads `PROJECTED`; anything recorded stays solid.
+ *
+ * All as CSS variables, never resolved strings: passing the variable is what
+ * lets a series re-colour itself on a theme change without React knowing the
+ * theme changed at all.
+ */
+export const TOTAL = "var(--chart-total)";
+
+/**
+ * The identity palette, for a fixed PAIR of kinds that aren't entities
+ * (essential vs non-essential) — index it by meaning, not by loop position.
  */
 export const SERIES = /** @type {const} */ ([
   "var(--chart-line-1)",
@@ -50,6 +68,28 @@ export const SERIES = /** @type {const} */ ([
   "var(--chart-line-4)",
   "var(--chart-line-5)",
 ]);
+
+/**
+ * Spread onto any `<Area>` or `<Line>` that shows a FORECAST rather than a
+ * recorded figure: `<Area {...PROJECTED} … />`. Half the screens here are
+ * projections, and a returning household's first question is "what actually
+ * happened, and what does the app expect?" — so a modelled line is dashed and
+ * lightly filled everywhere, and a solid line always means recorded.
+ */
+export const PROJECTED = /** @type {const} */ ({
+  strokeDasharray: "6 4",
+  fillOpacity: 0.06,
+});
+
+/**
+ * A reference value drawn across a chart — a target, a budget — rather than
+ * data: thin, solid and grey, so it never competes with the series it is
+ * measured against. `<Line {...REFERENCE} … />`.
+ */
+export const REFERENCE = /** @type {const} */ ({
+  stroke: "var(--text-subtle)",
+  strokeWidth: 1.25,
+});
 
 /** Shared axis chrome: no spines, no ticks, muted labels set by the container. */
 export const AXIS = /** @type {const} */ ({
@@ -239,7 +279,7 @@ export function MoneyTooltip(props) {
 /** @param {{ table: ChartDataTable, id: string }} props */
 function DataTableView({ table, id }) {
   return (
-    <div className="overflow-x-auto rounded-(--radius-control) border border-border" id={id}>
+    <ScrollArea axis="x" className="rounded-(--radius-control) border border-border" id={id}>
       <table className="w-full text-sm">
         {table.caption ? <caption className="sr-only">{table.caption}</caption> : null}
         <thead>
@@ -276,7 +316,7 @@ function DataTableView({ table, id }) {
           ))}
         </tbody>
       </table>
-    </div>
+    </ScrollArea>
   );
 }
 

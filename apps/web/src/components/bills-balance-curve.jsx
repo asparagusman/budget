@@ -11,8 +11,9 @@ import {
   Chart,
   ChartTooltip,
   MoneyTooltip,
-  SERIES,
+  PROJECTED,
   TIME_AXIS,
+  TOTAL,
   isoToMs,
   useChartMotion,
   useMoneyTick,
@@ -20,6 +21,7 @@ import {
 } from "@/components/chart.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
 import { Money } from "@/components/money.jsx";
+import { InlineError } from "@/components/notice.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
 import { formatIsoDate } from "@/lib/dates.js";
@@ -207,8 +209,8 @@ export function BillsBalanceCurve({ window }) {
               ]),
             }}
             config={{
-              balance: { label: "Balance", color: SERIES[0] },
-              bill: { label: "Bill due", color: SERIES[3] },
+              balance: { label: "Balance", color: TOTAL },
+              bill: { label: "Bill due", color: "var(--negative)" },
             }}
           >
             <ComposedChart data={curveRows} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
@@ -225,7 +227,7 @@ export function BillsBalanceCurve({ window }) {
                 type="monotone"
                 stroke="var(--color-balance)"
                 fill="var(--color-balance)"
-                fillOpacity={0.15}
+                {...PROJECTED}
                 strokeWidth={2}
                 dot={false}
                 {...motion}
@@ -240,7 +242,7 @@ export function BillsBalanceCurve({ window }) {
               <Money value={curveQuery.data.requiredOpeningBalanceCents} className="font-medium text-text" /> keeps it above your buffer.
             </p>
           ) : null}
-          {curveQuery.error ? <p className="text-sm text-negative">{/** @type {Error} */ (curveQuery.error).message}</p> : null}
+          {curveQuery.error ? <InlineError>{/** @type {Error} */ (curveQuery.error).message}</InlineError> : null}
         </div>
       ) : null}
     </div>

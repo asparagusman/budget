@@ -56,6 +56,7 @@ export { computeAllocation, diffAllocations, ALLOCATION_SECTIONS, sectionForStag
 /** @typedef {import("./allocation.js").Transfer} Transfer */
 /** @typedef {import("./allocation.js").AllocationResult} AllocationResult */
 /** @typedef {import("./allocation.js").TransferDelta} TransferDelta */
+/** @typedef {import("./allocation.js").OverAllocation} OverAllocation */
 
 export { resolveTargetCents, goalEta, goalRequired } from "./goals.js";
 /** @typedef {import("./goals.js").TargetMode} TargetMode */

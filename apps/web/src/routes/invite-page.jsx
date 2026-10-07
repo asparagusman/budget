@@ -9,6 +9,7 @@ import {
   CardTitle,
 } from "@/components/ui/card.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
+import { InlineError } from "@/components/notice.jsx";
 import { Input } from "@/components/ui/input.jsx";
 import { readApiError } from "@/lib/api-error.js";
 import { api } from "@/lib/api.js";
@@ -123,7 +124,7 @@ export function InvitePage() {
                 />
               </FieldRow>
             ) : null}
-            {error ? <p className="text-sm text-negative">{error}</p> : null}
+            {error ? <InlineError>{error}</InlineError> : null}
             <Button type="submit" disabled={busy}>
               {busy ? "Setting up…" : "Create passkey"}
             </Button>

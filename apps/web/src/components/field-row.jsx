@@ -1,4 +1,5 @@
 import { Label } from "@/components/ui/label.jsx";
+import { InlineError } from "@/components/notice.jsx";
 import { cn } from "@/lib/utils.js";
 
 /**
@@ -20,11 +21,13 @@ export function FieldRow({ label, htmlFor, hint, error, required, children, clas
     <div className={cn("flex flex-col gap-1.5", className)}>
       <Label htmlFor={htmlFor}>
         {label}
-        {required ? <span className="text-negative">*</span> : null}
+        {/* Muted, not red: "required" isn't money out, and it isn't a
+            problem until the field is left empty — then the error says so. */}
+        {required ? <span className="text-text-muted">*</span> : null}
       </Label>
       {children}
       {error ? (
-        <p className="text-xs text-negative">{error}</p>
+        <InlineError size="xs">{error}</InlineError>
       ) : hint ? (
         <p className="text-xs text-text-muted">{hint}</p>
       ) : null}

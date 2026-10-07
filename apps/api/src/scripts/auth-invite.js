@@ -8,9 +8,15 @@ import { generateInviteCode, hashInviteCode } from "../lib/invite.js";
 
 // Recovery path for losing every passkey: the operator has shell access to
 // the box, so recovery is this CLI command rather than recovery codes to
-// lose. See phases/03-auth.md "Recovery" and infra/backup/README.md.
+// lose. See phases/03-auth.md "Recovery" and infra/README.md "Recovering
+// when every passkey is gone".
 //
-//   docker compose exec api pnpm auth:invite --user "Lachlan" --purpose new_device
+// The production image has no pnpm and no src/ — tsup bundles this file as
+// its own entry, so on the box it is:
+//
+//   docker compose -f infra/docker-compose.yml exec api node dist/scripts/auth-invite.js --user "Lachlan" --purpose new_device
+//
+// and in local dev, `pnpm auth:invite --user … --purpose …`.
 
 loadDotenv({
   path: fileURLToPath(new URL("../../../../.env", import.meta.url)),
@@ -36,7 +42,7 @@ async function main() {
   const { user: userName, purpose } = parseArgs(process.argv.slice(2));
 
   if (purpose !== "new_user" && purpose !== "new_device") {
-    console.error("Usage: pnpm auth:invite --user <displayName> --purpose <new_user|new_device>");
+    console.error("Usage: auth-invite --user <displayName> --purpose <new_user|new_device>");
     process.exitCode = 1;
     return;
   }

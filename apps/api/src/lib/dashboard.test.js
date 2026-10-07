@@ -1,6 +1,16 @@
 import { addDaysIso } from "@budget/engine";
-import { allocationPlans, allocationVersions, balanceSnapshots, variantSchedule } from "@budget/schema";
-import { eq } from "drizzle-orm";
+import {
+  accounts,
+  allocationLines,
+  allocationPlans,
+  allocationVersions,
+  balanceSnapshots,
+  bills,
+  invites,
+  users,
+  variantSchedule,
+} from "@budget/schema";
+import { eq, inArray } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createReadApp, get } from "../test/app.js";
 import { createTestDb } from "../test/db.js";
@@ -100,11 +110,26 @@ describe("loadDashboard, against the endpoints that own each figure", () => {
     const computed = await get(app, `/allocation/compute?versionId=${versionId}&on=${ON}`);
 
     expect(dashboard.allocation.grossPerMonthCents).toBe(computed.inputs.grossPerMonthCents);
-    expect(dashboard.allocation.transfers).toEqual(computed.result.transfers);
+    // Each transfer is the engine's own, plus what was recorded at apply.
+    // The fixture's active version predates recorded amounts, so it reads as
+    // "not recorded" — no applied figure and no drift, never a recomputation
+    // passed off as one.
+    expect(
+      dashboard.allocation.transfers.map(
+        (/** @type {any} */ { appliedPerPayCents, driftPerPayCents, ...transfer }) => transfer,
+      ),
+    ).toEqual(computed.result.transfers);
+    for (const transfer of dashboard.allocation.transfers) {
+      expect(transfer.appliedPerPayCents).toBeNull();
+      expect(transfer.driftPerPayCents).toBeNull();
+    }
+    expect(dashboard.allocation.applied.status).toBe("not_recorded");
     expect(dashboard.allocation.stages).toEqual(computed.result.stages);
     expect(dashboard.allocation.resolvedLines).toEqual(computed.result.lines);
     expect(dashboard.allocation.unallocatedPerMonthCents).toBe(computed.result.unallocatedPerMonthCents);
     expect(dashboard.allocation.goodLifeFidelityCents).toBe(computed.result.goodLifeFidelityCents);
+    expect(dashboard.allocation.overAllocation).toEqual(computed.result.overAllocation);
+    expect(dashboard.allocation.overAllocation).toBeNull();
   });
 
   it("reports the goals and the cover projection /goals computes", async () => {
@@ -206,6 +231,14 @@ describe("loadDashboard, against the endpoints that own each figure", () => {
       expect(warning.href, `${warning.code} has no href`).toMatch(/^\//);
     }
   });
+
+  it("has nothing left to set up for a complete household", () => {
+    expect(dashboard.setup.complete).toBe(true);
+    expect(dashboard.setup.steps.every((/** @type {any} */ s) => s.done)).toBe(true);
+    // No users exist in this fixture, so there is nobody to invite on behalf of.
+    expect(dashboard.setup.steps.some((/** @type {any} */ s) => s.key === "invite")).toBe(false);
+    expect(dashboard.setup.importHref).toBeNull();
+  });
 });
 
 describe("loadDashboard, on a database with nothing in it", () => {
@@ -245,14 +278,32 @@ describe("loadDashboard, on a database with nothing in it", () => {
   });
 
   it("says where to start", () => {
-    expect(dashboard.setup).toEqual({
+    // The five booleans an older client reads, still there and still false.
+    expect(dashboard.setup).toMatchObject({
       people: false,
       paySchedule: false,
       accounts: false,
       bills: false,
       allocation: false,
       complete: false,
+      // An empty household is offered the importer.
+      importHref: "/import",
     });
+    expect(dashboard.setup.steps.map((/** @type {any} */ s) => s.key)).toEqual([
+      "people",
+      "income_landing_account",
+      "pay_schedule",
+      "income_variant",
+      "variant_schedule",
+      "bills",
+      "variable_budgets",
+      "allocation",
+    ]);
+    expect(dashboard.setup.steps.every((/** @type {any} */ s) => !s.done)).toBe(true);
+    // Pay schedules live on /income now, not in Settings or on Accounts.
+    expect(dashboard.setup.steps.find((/** @type {any} */ s) => s.key === "pay_schedule").href).toBe(
+      "/income#pay-schedules",
+    );
   });
 
   it("raises each missing prerequisite once", () => {
@@ -379,5 +430,116 @@ describe("loadDashboard, when the data itself is the problem", () => {
     expect(dashboard.allocation.unallocatedPerMonthCents).toBe(dashboard.allocation.grossPerMonthCents);
     const warning = dashboard.warnings.find((/** @type {any} */ w) => w.code === "unallocated");
     expect(warning.message).toContain("not allocated");
+  });
+
+  it("keeps the setup list honest about what is only half done", async () => {
+    const dashboard = await dashboardAfter(async (db) => {
+      // Accounts exist, but none is where income lands.
+      await db.update(accounts).set({ isIncomeLanding: false }).where(eq(accounts.id, HOUSEHOLD_IDS.everyday));
+      // A variant with lines, but nothing saying it is running.
+      await db.delete(variantSchedule);
+      // A plan drafted — as an import leaves it — but never applied.
+      await db
+        .update(allocationVersions)
+        .set({ status: "draft" })
+        .where(eq(allocationVersions.id, HOUSEHOLD_IDS.activeVersion));
+      // Two bills still on the importer's placeholder date.
+      await db.update(bills).set({ dueDateConfirmed: false }).where(inArray(bills.id, [HOUSEHOLD_IDS.power, HOUSEHOLD_IDS.water]));
+      // A household of one so far.
+      await db.insert(users).values({ displayName: "Ada" });
+    });
+    /** @param {string} key */
+    const step = (key) => dashboard.setup.steps.find((/** @type {any} */ s) => s.key === key);
+
+    // "Accounts" ticks for an income-landing account, not for any account.
+    expect(dashboard.setup.accounts).toBe(false);
+    expect(step("income_landing_account").done).toBe(false);
+    expect(step("income_landing_account").hint).toContain("None of your accounts");
+
+    expect(step("income_variant").done).toBe(true);
+    expect(step("variant_schedule").done).toBe(false);
+    expect(step("variant_schedule").hint).toBe("One open-ended schedule entry is enough, even with a single variant.");
+
+    expect(step("allocation").done).toBe(false);
+    expect(step("allocation").hint).toContain("drafted but not applied");
+
+    expect(step("due_dates")).toMatchObject({
+      done: false,
+      label: "Set the real due date of 2 imported bills",
+      href: "/costs/fixed",
+    });
+    const dueDates = dashboard.warnings.find((/** @type {any} */ w) => w.code === "unconfirmed_due_dates");
+    expect(dueDates).toEqual({
+      code: "unconfirmed_due_dates",
+      message: "2 bills still have a placeholder due date from the import — set their real dates on Fixed Costs.",
+      href: "/costs/fixed",
+    });
+
+    expect(step("invite")).toMatchObject({ done: false, optional: true, href: "/admin/invites" });
+    expect(dashboard.setup.complete).toBe(false);
+  });
+
+  it("counts an invite in flight, and never lets the invite step hold up completion", async () => {
+    const dashboard = await dashboardAfter(async (db) => {
+      await db.update(bills).set({ dueDateConfirmed: false }).where(eq(bills.id, HOUSEHOLD_IDS.power));
+      const [user] = await db.insert(users).values({ displayName: "Ada" }).returning();
+      await db.insert(invites).values({
+        codeHash: "not-a-real-hash",
+        purpose: "new_user",
+        createdBy: user?.id ?? null,
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      });
+    });
+
+    const invite = dashboard.setup.steps.find((/** @type {any} */ s) => s.key === "invite");
+    expect(invite.done).toBe(true);
+    // The only thing left is the placeholder date, in the singular.
+    expect(
+      dashboard.setup.steps.filter((/** @type {any} */ s) => !s.done && !s.optional).map((/** @type {any} */ s) => s.key),
+    ).toEqual(["due_dates"]);
+    const dueDates = dashboard.warnings.find((/** @type {any} */ w) => w.code === "unconfirmed_due_dates");
+    expect(dueDates.message).toBe(
+      "1 bill still has a placeholder due date from the import — set its real date on Fixed Costs.",
+    );
+    // And the upcoming list says which dates are real.
+    for (const bill of dashboard.bills.upcoming) {
+      expect(bill.dueDateConfirmed).toBe(bill.billId !== HOUSEHOLD_IDS.power);
+    }
+  });
+
+  it("says so when a plan commits more than it has, even though the sweep balances the books", async () => {
+    const dashboard = await dashboardAfter(async (db) => {
+      // $20,000 a month to savings is far past what this household earns.
+      // The Spending sweep in section C absorbs the gap by going negative,
+      // so unallocated stays at zero and the transfers still sum to gross.
+      await db.insert(allocationLines).values({
+        versionId: HOUSEHOLD_IDS.activeVersion,
+        stage: 2,
+        label: "Far too much",
+        basis: "fixed_amount",
+        value: 2_000_000,
+        accountId: HOUSEHOLD_IDS.savings,
+        sortOrder: 5,
+      });
+    });
+    const { overAllocation, unallocatedPerMonthCents, stages } = dashboard.allocation;
+
+    expect(unallocatedPerMonthCents).toBe(0);
+    expect(overAllocation.negativeStages).toEqual([2]);
+    expect(overAllocation.negativeLineIds).toHaveLength(1);
+    // The deepest the plan went past gross, which is where section B left it.
+    expect(overAllocation.shortfallPerMonthCents).toBe(-stages[1].remainingPerMonthCents);
+
+    const codes = dashboard.warnings.map((/** @type {any} */ w) => w.code);
+    expect(codes).toContain("over_allocated");
+    expect(codes).not.toContain("unallocated");
+    const warning = dashboard.warnings.find((/** @type {any} */ w) => w.code === "over_allocated");
+    // Named in the household's own currency, from settings.
+    const amount = new Intl.NumberFormat("en-AU", { style: "currency", currency: "AUD" }).format(
+      overAllocation.shortfallPerMonthCents / 100,
+    );
+    expect(warning.message).toContain(`commits ${amount} a month more`);
+    expect(warning.message).toContain("1 line goes below zero");
+    expect(warning.href).toBe("/allocation");
   });
 });

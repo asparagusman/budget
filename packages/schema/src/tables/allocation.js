@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { integer, numeric, pgEnum, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { integer, jsonb, numeric, pgEnum, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { accounts } from "./accounts.js";
 import { incomeVariants } from "./income-variants.js";
 import { users } from "./users.js";
@@ -56,6 +56,30 @@ export const allocationVersions = pgTable(
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     activatedAt: timestamp("activated_at", { withTimezone: true }),
+    // The standing-transfer amounts as they were resolved at the moment this
+    // version was applied: per destination, per pay, with the pay cadence,
+    // the date they were computed for and the account names of the day. A
+    // version stores rules (basis + value), so without this every later
+    // change to a bill, a budget or an income line silently moved the figure
+    // the operator had typed into the bank, and nothing could say the bank
+    // orders were now stale. Shape: `appliedSnapshotSchema` in
+    // zod/allocation.js, which every read goes through.
+    //
+    // jsonb on the version rather than a child table, deliberately. It is
+    // written exactly once, in the same statement that flips the version to
+    // active, and is only ever read whole — never filtered or joined by
+    // destination, never edited. It is a record of what was true at apply,
+    // the same kind of thing as audit_log.metadata, which is why the account
+    // NAMES are copied in rather than joined: a renamed or archived account
+    // must not rewrite what the record says the bank was told. A child table
+    // would buy per-row types for data no query ever looks inside, at the
+    // cost of a second write that could land without the first.
+    //
+    // Null for a draft, and for a version applied before this column existed.
+    // Those read as "not recorded" and show no drift: computing today's
+    // figures for them and calling those "applied" would be a fabrication.
+    // The next apply records it.
+    appliedSnapshot: jsonb("applied_snapshot"),
   },
   (table) => [
     uniqueIndex("allocation_versions_plan_id_version_unique").on(table.planId, table.version),
