@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate, useSearch } from "@tanstack/react-router";
+import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { useStore } from "zustand";
 import { ALLOCATION_SECTIONS, computeAllocation, diffAllocations, equivalent, sumCents } from "@budget/engine";
 import {
@@ -46,7 +46,7 @@ import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select.jsx";
 import { Textarea } from "@/components/ui/textarea.jsx";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip.jsx";
-import { AllocationProportionBar, accountName } from "@/components/allocation-flow.jsx";
+import { AllocationProportionBar, accountName } from "@/components/allocation-proportion-bar.jsx";
 import { DatePicker } from "@/components/date-picker.jsx";
 import { Delta } from "@/components/delta.jsx";
 import { EmptyState } from "@/components/empty-state.jsx";
@@ -54,19 +54,21 @@ import { FieldRow } from "@/components/field-row.jsx";
 import { FidelityBadge } from "@/components/fidelity-badge.jsx";
 import { GoodLifeFidelity } from "@/components/good-life-fidelity.jsx";
 import { Money } from "@/components/money.jsx";
-import { Notice } from "@/components/notice.jsx";
+import { InlineError, Notice } from "@/components/notice.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
+import { QueryError } from "@/components/query-error.jsx";
 import { TopBarAction } from "@/components/topbar-action.jsx";
 import { UnallocatedIndicator, isBalanced } from "@/components/unallocated-indicator.jsx";
 import { useConfirm } from "@/components/confirm-dialog.jsx";
 import { api } from "@/lib/api.js";
-import { readApiError } from "@/lib/api-error.js";
+import { ApiError, apiErrorFrom, readApiError } from "@/lib/api-error.js";
 import { useFlashOnChange } from "@/lib/motion.js";
 import {
   allocationDraftHistory,
   draftLineToEngine,
   draftLinesSignature,
   draftLinesToPayload,
+  draftProblems,
   draftStageGoalsToPayload,
   lineValueToText,
   serverLinesSignature,
@@ -82,22 +84,48 @@ import {
   ALLOCATION_BASIS_LABELS,
   ALLOCATION_BASIS_VALUE_KIND,
   CADENCE_LABELS,
+  CADENCE_PERIOD_NOUNS,
 } from "@/lib/constants.js";
-import { formatIsoDate, todayIso } from "@/lib/dates.js";
+import { formatIsoDate, localIsoDate, todayIso } from "@/lib/dates.js";
 import { formatMoney } from "@/lib/format-money.js";
 import { useSettings } from "@/lib/settings.jsx";
 import { cn } from "@/lib/utils.js";
 import { ScrollArea } from "@/components/scroll-area.jsx";
 
 /** @import { AllocationResult, Basis, Cadence, Cents, TransferDelta } from "@budget/engine" */
-/** @import { DraftLine } from "@/lib/allocation-draft.js" */
+/** @import { DraftLine, DraftStageGoals, LineProblem } from "@/lib/allocation-draft.js" */
 
 /** @typedef {{ id: string, name: string, sortOrder: number }} Account */
 /** @typedef {{ id: string, name: string, incomeVariantId: string, incomeVariantName: string | null, activeVersion: VersionSummary | null, draftVersion: VersionSummary | null, versionCount: number }} Plan */
 /** @typedef {{ id: string, version: number, status: "draft" | "active" | "archived", note: string | null, createdAt: string, activatedAt: string | null }} VersionSummary */
 /** @typedef {{ id: string, stage: number, label: string, basis: Basis, value: number | null, goalPct: number | null, accountId: string, sortOrder: number }} ServerLine */
 /** @typedef {{ stage: number, goalPct: number }} ServerStageGoal */
-/** @typedef {{ id: string, planId: string, version: number, status: "draft" | "active" | "archived", basedOnVersionId: string | null, note: string | null, createdBy: string | null, createdByName: string | null, createdAt: string, activatedAt: string | null, lines: ServerLine[], stageGoals: ServerStageGoal[] }} Version */
+/**
+ * What the standing transfers were set to when a version was applied — the
+ * amounts at the bank. Recorded once, at apply, and never recomputed
+ * (apps/api/src/lib/allocation.js "Applied amounts").
+ *
+ * @typedef {{
+ *   version: 1, payCadence: Cadence, hasPrimaryPaySchedule: boolean,
+ *   computedOn: string, appliedOn: string, grossPerMonthCents: Cents,
+ *   transfers: { accountId: string, accountName: string, perPayCents: Cents, perMonthCents: Cents, isNoOp: boolean }[],
+ * }} AppliedSnapshot
+ */
+/** @typedef {{ id: string, planId: string, version: number, status: "draft" | "active" | "archived", basedOnVersionId: string | null, note: string | null, createdBy: string | null, createdByName: string | null, createdAt: string, activatedAt: string | null, lines: ServerLine[], stageGoals: ServerStageGoal[], applied: AppliedSnapshot | null }} Version */
+/**
+ * The preview's "Current": the amounts recorded when the active version was
+ * applied (`source: "applied"`), or — when there are none to compare,
+ * `reason` says why — today's recomputation of it. `drift` is live − applied
+ * per destination, and only exists for recorded amounts.
+ *
+ * @typedef {{
+ *   source: "applied" | "recomputed",
+ *   reason: "not_recorded" | "cadence_changed" | null,
+ *   applied: AppliedSnapshot | null,
+ *   transfers: { accountId: string, accountName: string | null, perPayCents: Cents, perMonthCents: Cents, isNoOp: boolean }[],
+ *   drift: TransferDelta[] | null,
+ * }} CurrentTransfers
+ */
 /**
  * @typedef {{
  *   on: string,
@@ -197,14 +225,21 @@ function remainingAtStageStart(result, stage, inputs, view) {
  * engine's own delta. Actionable destinations first, then the income-landing
  * account — money that stays where it landed is not a transfer to make.
  *
+ * `active` is the "was" side — the amounts recorded at the last apply, where
+ * there are any — and `draft` the "now" side: the draft being edited, or,
+ * with no draft open, the active plan as it resolves today. `recordedNames`
+ * names a destination that has since been archived (the live account list
+ * no longer carries it) by the name it had when the amounts were recorded.
+ *
  * @param {{
  *   active: AllocationResult | null,
  *   draft: AllocationResult | null,
  *   diff: TransferDelta[] | null,
  *   accounts: Account[],
+ *   recordedNames?: Map<string, string>,
  * }} args
  */
-function buildTransferRows({ active, draft, diff, accounts }) {
+function buildTransferRows({ active, draft, diff, accounts, recordedNames }) {
   const ids = Array.from(
     new Set([...(active?.transfers ?? []).map((t) => t.accountId), ...(draft?.transfers ?? []).map((t) => t.accountId)]),
   );
@@ -213,9 +248,10 @@ function buildTransferRows({ active, draft, diff, accounts }) {
     const current = active?.transfers.find((t) => t.accountId === accountId) ?? null;
     const next = draft?.transfers.find((t) => t.accountId === accountId) ?? null;
     const delta = diff?.find((d) => d.accountId === accountId) ?? null;
+    const live = accounts.some((a) => a.id === accountId);
     return {
       accountId,
-      name: accountName(accounts, accountId),
+      name: live ? accountName(accounts, accountId) : (recordedNames?.get(accountId) ?? accountName(accounts, accountId)),
       currentPerPayCents: current?.perPayCents ?? null,
       newPerPayCents: next?.perPayCents ?? null,
       newPerMonthCents: next?.perMonthCents ?? current?.perMonthCents ?? 0,
@@ -364,9 +400,9 @@ function ContextBar({
 }
 
 /**
- * @param {{ line: DraftLine, onChange: (patch: Partial<DraftLine>) => void }} props
+ * @param {{ line: DraftLine, invalid: boolean, onChange: (patch: Partial<DraftLine>) => void }} props
  */
-function LineValueInput({ line, onChange }) {
+function LineValueInput({ line, invalid, onChange }) {
   const kind = ALLOCATION_BASIS_VALUE_KIND[line.basis];
   // One step is one of whatever the column is counting — a percentage point,
   // a dollar, a share of the sweep — with Shift for ten and Alt for a tenth.
@@ -395,6 +431,7 @@ function LineValueInput({ line, onChange }) {
       ) : null}
       <InputGroupInput
         aria-label={`${line.label || "Line"} value`}
+        aria-invalid={invalid || undefined}
         className="text-right tabular-nums"
         {...numeric}
       />
@@ -472,9 +509,13 @@ function SectionColumnHeader({ readOnly, cadenceLabel }) {
  * use the row menu — the same moves without a pointer, since a drag handle
  * alone is not keyboard reachable.
  *
+ * `problem` is why the line can't be saved yet ("Needs a value."), shown under
+ * the row it belongs to. While any line has one the draft is not autosaved —
+ * sending it would only be refused — and the status line above says so.
+ *
  * @param {{
  *   line: DraftLine, resolved: AllocationResult["lines"][number] | undefined, accounts: Account[],
- *   view: Cadence, payCadence: Cadence, isDragTarget: boolean,
+ *   view: Cadence, payCadence: Cadence, isDragTarget: boolean, problem: LineProblem | null,
  *   onChange: (patch: Partial<DraftLine>) => void, onRemove: () => void,
  *   onMove: (direction: -1 | 1) => void, onStageChange: (stage: number) => void,
  *   onDragStart: () => void, onDragOver: () => void, onDrop: () => void, onDragEnd: () => void,
@@ -487,6 +528,7 @@ function DraftLineRow({
   view,
   payCadence,
   isDragTarget,
+  problem,
   onChange,
   onRemove,
   onMove,
@@ -551,6 +593,7 @@ function DraftLineRow({
         />
         <Input
           aria-label="Division"
+          aria-invalid={problem?.field === "label" || undefined}
           className="h-8 min-w-0 flex-1"
           value={line.label}
           placeholder="Division"
@@ -575,7 +618,11 @@ function DraftLineRow({
           </Tooltip>
         ) : (
           <Select value={line.basis} onValueChange={(v) => onChange({ basis: /** @type {Basis} */ (v) })}>
-            <SelectTrigger className="h-8 w-34 min-w-0 @min-[38rem]:w-full" aria-label="Basis">
+            <SelectTrigger
+              className="h-8 w-34 min-w-0 @min-[38rem]:w-full"
+              aria-label="Basis"
+              aria-invalid={problem?.field === "basis" || undefined}
+            >
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -588,11 +635,12 @@ function DraftLineRow({
           </Select>
         )}
 
-        <LineValueInput line={line} onChange={onChange} />
+        <LineValueInput line={line} invalid={problem?.field === "value"} onChange={onChange} />
 
         <InputGroup className="h-8 w-20 min-w-0 @min-[38rem]:w-full">
           <InputGroupInput
             aria-label="Goal percent of gross"
+            aria-invalid={problem?.field === "goal" || undefined}
             className="text-right tabular-nums"
             {...goalNumeric}
           />
@@ -614,7 +662,11 @@ function DraftLineRow({
         </span>
 
         <Select value={line.accountId} onValueChange={(v) => onChange({ accountId: v })}>
-          <SelectTrigger className="h-8 w-34 min-w-0 @min-[38rem]:w-full" aria-label="Destination">
+          <SelectTrigger
+            className="h-8 w-34 min-w-0 @min-[38rem]:w-full"
+            aria-label="Destination"
+            aria-invalid={problem?.field === "destination" || undefined}
+          >
             <SelectValue placeholder="Destination" />
           </SelectTrigger>
           <SelectContent>
@@ -626,12 +678,28 @@ function DraftLineRow({
           </SelectContent>
         </Select>
 
-        <p className="ml-auto font-semibold text-text tabular-nums @min-[38rem]:text-right">
+        <p
+          className={cn(
+            "ml-auto font-semibold tabular-nums @min-[38rem]:text-right",
+            // No bank transfer can be negative: a line resolving below zero
+            // is the plan committing more than it has, flagged on the row it
+            // happens in as well as in the indicator above.
+            resolved && resolved.perMonthCents < 0 ? "text-warning-strong" : "text-text",
+          )}
+        >
           {resolved ? <Money value={inCadence(resolved, view, payCadence)} tween={!typing} /> : "—"}
         </p>
 
         <RowMenu line={line} onMove={onMove} onStageChange={onStageChange} onRemove={onRemove} />
       </div>
+
+      {problem ? (
+        // The whole width of the row in the wide grid, so the reason sits
+        // under the fields it is about rather than squeezed into a column.
+        <InlineError size="xs" className="@min-[38rem]:col-span-full @min-[38rem]:pl-5">
+          {problem.message} Changes are saved once it&apos;s fixed.
+        </InlineError>
+      ) : null}
     </div>
   );
 }
@@ -778,6 +846,7 @@ function AppliedLineRow({ line, resolved, accounts, view, payCadence }) {
  *   section: (typeof ALLOCATION_SECTIONS)[number], lines: DraftLine[], result: AllocationResult,
  *   inputs: AllocationInputs, accounts: Account[], view: Cadence, readOnly: boolean,
  *   goalText: string, dragTargetId: string | null,
+ *   problems: ReturnType<typeof draftProblems> | null,
  *   onGoalChange: (text: string) => void,
  *   onChange: (id: string, patch: Partial<DraftLine>) => void, onRemove: (id: string) => void,
  *   onMove: (id: string, direction: -1 | 1) => void, onStageChange: (id: string, stage: number) => void,
@@ -797,6 +866,7 @@ function SectionCard({
   readOnly,
   goalText,
   dragTargetId,
+  problems,
   onGoalChange,
   onChange,
   onRemove,
@@ -810,6 +880,7 @@ function SectionCard({
   footer,
 }) {
   const stage = sectionResult(result, section.stage);
+  const goalProblem = problems?.byStage.get(section.stage) ?? null;
   const cadenceLabel = CADENCE_LABELS[view].toLowerCase();
   const entryRemaining = remainingAtStageStart(result, section.stage, inputs, view);
   // Stated only where it changes an amount — `pct_of_remaining` and `sweep`
@@ -856,6 +927,7 @@ function SectionCard({
               <InputGroupInput
                 id={`section-goal-${section.stage}`}
                 aria-label={`${section.name} goal percent of income`}
+                aria-invalid={goalProblem !== null || undefined}
                 className="text-right tabular-nums"
                 {...goalNumeric}
               />
@@ -866,6 +938,12 @@ function SectionCard({
           )}
         </div>
       </header>
+
+      {goalProblem ? (
+        <InlineError size="xs" className="-mt-1 justify-end">
+          Section goal: {goalProblem} Changes are saved once it&apos;s fixed.
+        </InlineError>
+      ) : null}
 
       {lines.length > 0 ? <SectionColumnHeader readOnly={readOnly} cadenceLabel={cadenceLabel} /> : null}
 
@@ -889,6 +967,7 @@ function SectionCard({
               view={view}
               payCadence={inputs.payCadence}
               isDragTarget={dragTargetId === line.id}
+              problem={problems?.byLine.get(line.id) ?? null}
               onChange={(patch) => onChange(line.id, patch)}
               onRemove={() => onRemove(line.id)}
               onMove={(direction) => onMove(line.id, direction)}
@@ -1129,6 +1208,10 @@ function SectionTotals({ section, stage, view, payCadence, cadenceLabel }) {
  * Keyed on the per-pay amount, not on the row identity — the row is there
  * either way; what is worth announcing is the figure changing.
  *
+ * With no draft open the same "was → now" shape says something else: the
+ * amount applied to the bank against what the plan resolves to today, so a
+ * row reads "bank order $X" rather than "was $X".
+ *
  * @param {{ row: TransferRow, editing: boolean, onCopy: (cents: Cents) => void }} props
  */
 function TransferRowItem({ row, editing, onCopy }) {
@@ -1189,7 +1272,7 @@ function TransferRowItem({ row, editing, onCopy }) {
         {changed && row.currentPerPayCents !== null ? (
           <>
             <span>
-              was <Money value={row.currentPerPayCents} />
+              {editing ? "was" : "bank order"} <Money value={row.currentPerPayCents} />
             </span>
             <Delta value={row.deltaPerPayCents ?? 0} kind="cents" />
           </>
@@ -1209,13 +1292,21 @@ function TransferRowItem({ row, editing, onCopy }) {
  * full width of a phone, and a Destination/Current/New/Change table clips the
  * change — the one column the operator is here to read — at both sizes.
  *
- * @param {{ rows: TransferRow[], inputs: AllocationInputs, editing: boolean, totalPerPayCents: Cents }} props
+ * `current` says what "was" is: the amounts recorded when the active version
+ * was applied — what the bank holds — or, when there are none to compare,
+ * today's figures for it and why.
+ *
+ * @param {{
+ *   rows: TransferRow[], inputs: AllocationInputs, editing: boolean, totalPerPayCents: Cents,
+ *   current: CurrentTransfers | null,
+ * }} props
  */
-function TransfersPanel({ rows, inputs, editing, totalPerPayCents }) {
+function TransfersPanel({ rows, inputs, editing, totalPerPayCents, current }) {
   const { currency, locale } = useSettings();
   const cadenceLabel = inputs.hasPrimaryPaySchedule ? CADENCE_LABELS[inputs.payCadence].toLowerCase() : "month";
   const reconciles = totalPerPayCents === inputs.grossPerPayCents;
   const actionable = rows.filter((r) => !r.isNoOp && r.deltaPerPayCents !== null && r.deltaPerPayCents !== 0);
+  const appliedOn = current?.applied ? formatIsoDate(current.applied.appliedOn, locale) : null;
 
   /** @param {Cents} cents */
   async function copyAmount(cents) {
@@ -1239,6 +1330,33 @@ function TransfersPanel({ rows, inputs, editing, totalPerPayCents }) {
           </p>
         ) : null}
       </div>
+
+      {/* What "was" is measured against, said once above the rows. The bank
+          does not move when a bill or an income line does, so the amounts
+          recorded at apply are the honest baseline — and when there are none
+          to compare, the screen says so rather than passing today's figures
+          off as what was applied. */}
+      {!editing && current?.source === "applied" && actionable.length > 0 ? (
+        <Notice compact>
+          {actionable.length === 1 ? "One standing order no longer matches" : `${actionable.length} standing orders no longer match`}{" "}
+          this plan — bills or income have moved since it was applied on {appliedOn}. Update{" "}
+          {actionable.length === 1 ? "it" : "them"} at the bank, or edit and apply the plan to record the new amounts.
+        </Notice>
+      ) : current?.reason === "cadence_changed" && current.applied ? (
+        <Notice compact>
+          The amounts applied on {appliedOn} were {CADENCE_LABELS[current.applied.payCadence].toLowerCase()} amounts,
+          but pay is now {CADENCE_LABELS[inputs.payCadence].toLowerCase()}, so they can&apos;t be compared.{" "}
+          {editing ? "Applying this draft" : "Applying the plan again"} records amounts in the new cadence.
+        </Notice>
+      ) : current?.reason === "not_recorded" ? (
+        <p className="text-xs text-text-muted">
+          This plan was applied before transfer amounts were recorded, so{" "}
+          {editing ? "“was” is today's figure for it" : "these are today's figures for it"}. The next apply records
+          them.
+        </p>
+      ) : editing && current?.source === "applied" ? (
+        <p className="text-xs text-text-muted">“Was” is what was applied on {appliedOn} — what the bank holds.</p>
+      ) : null}
 
       <ul className="flex flex-col divide-y divide-border">
         {rows.map((row) => (
@@ -1277,13 +1395,19 @@ function TransfersPanel({ rows, inputs, editing, totalPerPayCents }) {
  *
  * @param {{
  *   rows: TransferRow[], inputs: AllocationInputs, editing: boolean, result: AllocationResult,
- *   accounts: Account[], totalPerPayCents: Cents,
+ *   accounts: Account[], totalPerPayCents: Cents, current: CurrentTransfers | null,
  * }} props
  */
-function PreviewPanel({ rows, inputs, editing, result, accounts, totalPerPayCents }) {
+function PreviewPanel({ rows, inputs, editing, result, accounts, totalPerPayCents, current }) {
   return (
     <div className="flex flex-col gap-6">
-      <TransfersPanel rows={rows} inputs={inputs} editing={editing} totalPerPayCents={totalPerPayCents} />
+      <TransfersPanel
+        rows={rows}
+        inputs={inputs}
+        editing={editing}
+        totalPerPayCents={totalPerPayCents}
+        current={current}
+      />
       <AllocationProportionBar result={result} accounts={accounts} />
     </div>
   );
@@ -1324,13 +1448,55 @@ function MobilePreviewDrawer({ open, onToggle, summary, children }) {
 }
 
 /**
+ * What one version set the standing transfers to when it was applied — the
+ * record, by the names the accounts had then, not a recomputation.
+ *
+ * @param {{ snapshot: AppliedSnapshot }} props
+ */
+function AppliedAmounts({ snapshot }) {
+  const { locale } = useSettings();
+  const cadence = snapshot.hasPrimaryPaySchedule ? CADENCE_PERIOD_NOUNS[snapshot.payCadence][0] : "month";
+  const orders = snapshot.transfers.filter((t) => !t.isNoOp);
+
+  return (
+    <div className="flex w-full flex-col gap-1.5 rounded-lg bg-surface-muted p-3 text-xs">
+      <p className="text-text-muted">
+        Applied {formatIsoDate(snapshot.appliedOn, locale)}
+        {snapshot.computedOn !== snapshot.appliedOn
+          ? `, with the figures for ${formatIsoDate(snapshot.computedOn, locale)}`
+          : ""}{" "}
+        · per {cadence}
+      </p>
+      {orders.length === 0 ? (
+        <p className="text-text-muted">No standing transfers — everything stayed in the income account.</p>
+      ) : (
+        <ul className="flex flex-col gap-0.5">
+          {orders.map((transfer) => (
+            <li key={transfer.accountId} className="flex items-baseline justify-between gap-3">
+              <span className="min-w-0 truncate text-text">{transfer.accountName}</span>
+              <span className="shrink-0 font-medium text-text tabular-nums">
+                <Money value={transfer.perPayCents} />
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/**
  * @param {{
  *   versions: Version[], accounts: Account[], activeVersionId: string | null,
  *   onRevert: (versionId: string) => void, reverting: boolean,
  * }} props
  */
 function VersionHistory({ versions, accounts, activeVersionId, onRevert, reverting }) {
+  const { locale } = useSettings();
   const [compare, setCompare] = useState(/** @type {[string, string] | null} */ (null));
+  // The version whose applied amounts are open — one at a time, so the list
+  // stays a list.
+  const [amountsFor, setAmountsFor] = useState(/** @type {string | null} */ (null));
 
   const left = compare ? versions.find((v) => v.id === compare[0]) ?? null : null;
   const right = compare ? versions.find((v) => v.id === compare[1]) ?? null : null;
@@ -1357,17 +1523,28 @@ function VersionHistory({ versions, accounts, activeVersionId, onRevert, reverti
                 </Badge>
                 <span className="text-xs font-normal text-text-muted">{version.lines.length} lines</span>
               </p>
+              {/* Local dates. The timestamps are UTC, and the first ten
+                  characters of one are the UTC date — in Sydney, yesterday
+                  for anything done before mid-morning. */}
               <p className="text-xs text-text-muted">
-                {version.createdByName ?? "Seeded"} · {formatIsoDate(version.createdAt.slice(0, 10), "en-AU")}
-                {version.activatedAt
-                  ? ` · applied ${formatIsoDate(version.activatedAt.slice(0, 10), "en-AU")}`
-                  : ""}
+                {version.createdByName ?? "Seeded"} · {formatIsoDate(localIsoDate(version.createdAt), locale)}
+                {version.activatedAt ? ` · applied ${formatIsoDate(localIsoDate(version.activatedAt), locale)}` : ""}
                 {version.note ? ` · ${version.note}` : ""}
               </p>
             </div>
             {/* `ml-auto`: when the row wraps on a phone, the actions keep to
                 the right edge they sit on everywhere else. */}
             <div className="ml-auto flex items-center gap-2">
+              {version.applied ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  aria-expanded={amountsFor === version.id}
+                  onClick={() => setAmountsFor((open) => (open === version.id ? null : version.id))}
+                >
+                  Amounts
+                </Button>
+              ) : null}
               <Button
                 size="sm"
                 variant="ghost"
@@ -1385,6 +1562,9 @@ function VersionHistory({ versions, accounts, activeVersionId, onRevert, reverti
                 </Button>
               ) : null}
             </div>
+            {version.applied && amountsFor === version.id ? (
+              <AppliedAmounts snapshot={version.applied} />
+            ) : null}
           </li>
         ))}
       </ol>
@@ -1487,12 +1667,18 @@ function VersionDiff({ left, right, accounts }) {
 }
 
 /**
+ * `blocked` is how many lines (or section goals) can't be saved yet. Applying
+ * saves the draft first, so with any of them it could only fail — the button
+ * waits and the dialog says why, rather than letting the operator press it to
+ * find out.
+ *
  * @param {{
  *   open: boolean, onOpenChange: (open: boolean) => void, rows: TransferRow[], inputs: AllocationInputs,
- *   unallocatedPerMonthCents: Cents, submitting: boolean, onApply: (note: string | null) => void,
+ *   unallocatedPerMonthCents: Cents, submitting: boolean, blocked: number,
+ *   onApply: (note: string | null) => void,
  * }} props
  */
-function ApplyDialog({ open, onOpenChange, rows, inputs, unallocatedPerMonthCents, submitting, onApply }) {
+function ApplyDialog({ open, onOpenChange, rows, inputs, unallocatedPerMonthCents, submitting, blocked, onApply }) {
   const [note, setNote] = useState("");
   const changed = rows.filter((r) => !r.isNoOp && r.deltaPerPayCents !== null && r.deltaPerPayCents !== 0);
   const cadenceLabel = inputs.hasPrimaryPaySchedule ? CADENCE_LABELS[inputs.payCadence].toLowerCase() : "month";
@@ -1538,6 +1724,13 @@ function ApplyDialog({ open, onOpenChange, rows, inputs, unallocatedPerMonthCent
           </Notice>
         ) : null}
 
+        {blocked > 0 ? (
+          <InlineError>
+            {blocked === 1 ? "One line isn't" : `${blocked} lines aren't`} finished — the marked{" "}
+            {blocked === 1 ? "row says" : "rows say"} what's missing. Fix {blocked === 1 ? "it" : "them"}, then apply.
+          </InlineError>
+        ) : null}
+
         <FieldRow label="Note" htmlFor="allocation-apply-note" hint="Optional — why this changed.">
           <Textarea
             id="allocation-apply-note"
@@ -1551,13 +1744,115 @@ function ApplyDialog({ open, onOpenChange, rows, inputs, unallocatedPerMonthCent
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button disabled={submitting} onClick={() => onApply(note.trim() === "" ? null : note.trim())}>
+          <Button
+            disabled={submitting || blocked > 0}
+            onClick={() => onApply(note.trim() === "" ? null : note.trim())}
+          >
             {submitting ? "Applying…" : "Apply draft"}
           </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
   );
+}
+
+/**
+ * Where the draft stands against the server, in one line that stays in the
+ * same place above the sections. It used to say "saving shortly" whatever was
+ * happening — including after a save had been refused and nothing was going
+ * to try again — so every state it can be in now has its own words, and the
+ * two that need the operator (an unfinished line, a failed save) are amber.
+ *
+ * @param {{
+ *   dirty: boolean, saving: boolean, problemCount: number,
+ *   failure: { count: number, retryable: boolean, signature: string, message: string } | null,
+ *   localSignature: string, onRetry: () => void,
+ * }} props
+ */
+function DraftSaveStatus({ dirty, saving, problemCount, failure, localSignature, onRetry }) {
+  /** @type {import("react").ReactNode} */
+  let content;
+  if (saving) {
+    content = <p className="text-xs text-text-muted">Saving draft…</p>;
+  } else if (!dirty) {
+    content = (
+      <p className="flex items-center gap-1 text-xs text-text-muted">
+        <CheckIcon className="size-3.5" aria-hidden="true" />
+        All changes saved to the draft.
+      </p>
+    );
+  } else if (problemCount > 0) {
+    content = (
+      <InlineError size="xs">
+        Not saved yet — {problemCount === 1 ? "one line below needs" : `${problemCount} lines below need`} finishing
+        first. Nothing is lost while you do.
+      </InlineError>
+    );
+  } else if (failure) {
+    // A refusal waits for an edit; anything else is retried on its own.
+    const waitingForEdit = !failure.retryable && failure.signature === localSignature;
+    content = (
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <InlineError size="xs">
+          Couldn&apos;t save the draft: {failure.message}{" "}
+          {waitingForEdit ? "It will try again after your next change." : "Trying again automatically."}
+        </InlineError>
+        <Button size="sm" variant="outline" className="h-7" onClick={onRetry}>
+          Retry now
+        </Button>
+      </div>
+    );
+  } else {
+    content = <p className="text-xs text-text-muted">Unsaved changes — saving shortly.</p>;
+  }
+
+  return (
+    <div role="status" aria-live="polite">
+      {content}
+    </div>
+  );
+}
+
+/**
+ * GET /income-variants, cached under the key /income uses — so it has to
+ * cache the same thing /income does: the whole body, `{ variants,
+ * hasPrimaryPaySchedule }`. This page used to cache the bare array under the
+ * same key, and whichever page ran second read the other's shape: /income →
+ * /allocation crashed on `.map` of an object.
+ */
+function useIncomeVariantsQuery() {
+  return useQuery({
+    queryKey: ["income-variants"],
+    queryFn: async () => {
+      const res = await api["income-variants"].$get();
+      if (!res.ok) throw new Error(await readApiError(res));
+      return res.json();
+    },
+  });
+}
+
+/**
+ * How long to wait before trying a failed autosave again: 2s, then doubling,
+ * capped at a minute. Long enough not to hammer an API that is restarting,
+ * short enough that a blip clears itself before anyone notices.
+ *
+ * @param {number} failures consecutive failures so far (1 after the first)
+ */
+function autosaveRetryDelay(failures) {
+  return Math.min(60_000, 2_000 * 2 ** Math.max(0, failures - 1));
+}
+
+/**
+ * Whether asking again could help. A network failure or a server error might
+ * clear; a refusal (4xx) says the draft itself is the problem, and only an
+ * edit changes that. A 401 is neither — the session ended, and the app has
+ * already gone to sign-in.
+ *
+ * @param {unknown} err
+ */
+function isRetryableSaveError(err) {
+  if (!(err instanceof ApiError)) return true;
+  return err.status >= 500 || err.status === 408 || err.status === 429;
 }
 
 /**
@@ -1582,7 +1877,6 @@ export function AllocationPage() {
   // spreadsheet is read in.
   const [viewOverride, setViewOverride] = useState(/** @type {Cadence | null} */ (null));
   const draggingIdRef = useRef(/** @type {string | null} */ (null));
-  const savedSignatureRef = useRef(/** @type {string | null} */ (null));
 
   const lines = useAllocationDraft((s) => s.lines);
   const stageGoals = useAllocationDraft((s) => s.stageGoals);
@@ -1611,14 +1905,7 @@ export function AllocationPage() {
     },
   });
 
-  const variantsQuery = useQuery({
-    queryKey: ["income-variants"],
-    queryFn: async () => {
-      const res = await api["income-variants"].$get();
-      if (!res.ok) throw new Error(await readApiError(res));
-      return (await res.json()).variants;
-    },
-  });
+  const variantsQuery = useIncomeVariantsQuery();
 
   const accountsQuery = useQuery({
     queryKey: ["accounts"],
@@ -1632,7 +1919,7 @@ export function AllocationPage() {
   const plans = plansQuery.data ?? [];
   const accounts = accountsQuery.data ?? [];
   const variantNames = useMemo(
-    () => new Map((variantsQuery.data ?? []).map((v) => [v.id, v.name])),
+    () => new Map((variantsQuery.data?.variants ?? []).map((v) => [v.id, v.name])),
     [variantsQuery.data],
   );
   // What the income schedule says is running on `on`. Asked for directly
@@ -1669,7 +1956,9 @@ export function AllocationPage() {
     queryKey: ["allocation-preview", selectedPlanId, on],
     queryFn: async () => {
       const res = await api.allocation.preview.$get({ query: { planId: selectedPlanId ?? "", on } });
-      if (!res.ok) throw new Error(await readApiError(res));
+      // With its code: "no income-landing account yet" is a setup step with a
+      // place to go and fix it, not a failure to retry.
+      if (!res.ok) throw await apiErrorFrom(res);
       return await res.json();
     },
     enabled: Boolean(selectedPlanId),
@@ -1689,23 +1978,30 @@ export function AllocationPage() {
   const preview = previewQuery.data && "inputs" in previewQuery.data ? previewQuery.data : null;
   const inputs = preview ? /** @type {AllocationInputs} */ (preview.inputs) : null;
   const activeResult = preview?.active ? /** @type {AllocationResult} */ (preview.active.result) : null;
+  const current = preview?.current ?? null;
   const serverDraft = preview?.draft ?? null;
   const editing = serverDraft !== null;
 
   // Adopt the server's draft when it isn't the one already loaded — a fresh
   // page load, a different plan, or the other session having saved. Never
   // while there are unsaved local edits: their work wins until they save.
+  //
+  // "Already loaded" is judged against the draft store's own record of what
+  // the server wrote back on the last load or save, which outlives this page
+  // — so coming back to /allocation with the same draft loads nothing, rather
+  // than remounting every row from the cached preview (perf-inp-plan.md,
+  // P2 #1), and our own save coming back rounded is not taken for the other
+  // session's edit.
   useEffect(() => {
     if (!serverDraft) {
       resetDraft();
-      savedSignatureRef.current = null;
       return;
     }
     const signature = serverLinesSignature(serverDraft.version.lines, serverDraft.version.stageGoals);
     const isNewVersion = serverDraft.version.id !== draftVersionId;
-    if (isNewVersion || (!dirty && signature !== savedSignatureRef.current)) {
+    const { serverSignature } = useAllocationDraft.getState();
+    if (isNewVersion || (!dirty && signature !== serverSignature)) {
       loadDraft(serverDraft.version.id, serverDraft.version.lines, serverDraft.version.stageGoals);
-      savedSignatureRef.current = signature;
     }
     // `dirty`/`draftVersionId` are read, not depended on: this must run when
     // server data arrives, not every time a keystroke flips `dirty`.
@@ -1730,25 +2026,56 @@ export function AllocationPage() {
   }, [inputs, lines, stageGoals]);
 
   const shownResult = editing ? draftResult : activeResult;
-  const diff = useMemo(
-    () => (activeResult && draftResult && editing ? diffAllocations(activeResult, draftResult) : null),
-    [activeResult, draftResult, editing],
+
+  // "Current" is what the bank holds: the amounts recorded when the active
+  // version was applied (or, where none were, today's figures for it — the
+  // API says which). `preview.active.result` is today's recomputation, and
+  // diffing a draft against THAT said "no changes" while bank orders had gone
+  // stale under a moved bill. The recorded transfers are put into the
+  // engine's result shape so the comparison is still `diffAllocations`, which
+  // reads `transfers` alone — `lineIds` is empty because the record never
+  // said which lines fed each one.
+  const currentResult = useMemo(
+    () =>
+      activeResult && current
+        ? {
+            ...activeResult,
+            transfers: current.transfers.map((t) => ({
+              accountId: t.accountId,
+              perMonthCents: t.perMonthCents,
+              perPayCents: t.perPayCents,
+              lineIds: [],
+              isNoOp: t.isNoOp,
+            })),
+          }
+        : activeResult,
+    [activeResult, current],
   );
+  // Names as recorded, for a destination archived since.
+  const recordedNames = useMemo(
+    () => new Map((current?.applied?.transfers ?? []).map((t) => [t.accountId, t.accountName])),
+    [current],
+  );
+  // Editing: the draft against what the bank holds. Not editing: the active
+  // plan as it resolves today against what was applied to it — the drift,
+  // which is each standing order that no longer says what the plan says.
+  const comparedTo = editing ? draftResult : current?.source === "applied" ? activeResult : null;
+  const diff = useMemo(() => {
+    if (editing) return currentResult && draftResult ? diffAllocations(currentResult, draftResult) : null;
+    return current?.drift ?? null;
+  }, [currentResult, draftResult, editing, current]);
 
   const transferRows = useMemo(
-    () => buildTransferRows({ active: activeResult, draft: editing ? draftResult : null, diff, accounts }),
-    [activeResult, draftResult, diff, accounts, editing],
+    () => buildTransferRows({ active: currentResult, draft: comparedTo, diff, accounts, recordedNames }),
+    [currentResult, comparedTo, diff, accounts, recordedNames],
   );
 
   const totalPerPayCents = shownResult ? sumCents(shownResult.transfers.map((t) => t.perPayCents)) : 0;
-  // The same test <UnallocatedIndicator> makes, for the same reason it makes
-  // it: zero unallocated with a line resolved negative is arithmetic that
-  // closed, not a plan that is fine. Green here has to mean what green means
-  // there (phases/08-allocation.md "The invariant indicator").
-  const balanced =
-    shownResult !== null &&
-    shownResult.unallocatedPerMonthCents === 0 &&
-    !shownResult.lines.some((l) => l.perMonthCents < 0);
+  // The same test <UnallocatedIndicator> makes: zero unallocated with a line
+  // resolved negative is arithmetic that closed, not a plan that is fine.
+  // Green here has to mean what green means there (phases/08-allocation.md
+  // "The invariant indicator").
+  const balanced = shownResult !== null && isBalanced(shownResult);
   const changedCount = transferRows.filter((r) => !r.isNoOp && r.deltaPerPayCents !== null && r.deltaPerPayCents !== 0).length;
 
   // The lines rendered by the editor: the draft when editing, otherwise the
@@ -1783,28 +2110,104 @@ export function AllocationPage() {
   // schedule says what a pay period is.
   const view = viewOverride ?? (inputs?.hasPrimaryPaySchedule ? inputs.payCadence : "monthly");
 
-  const savePayload = useMemo(() => draftLinesToPayload(lines), [lines]);
-  const saveStageGoals = useMemo(() => draftStageGoalsToPayload(stageGoals), [stageGoals]);
   const localSignature = useMemo(() => draftLinesSignature(lines, stageGoals), [lines, stageGoals]);
+  // Why the draft can't be sent as it stands, per line and per section goal.
+  // Only while editing — the applied version on screen otherwise was saved
+  // by definition.
+  const problems = useMemo(
+    () => (editing ? draftProblems(lines, stageGoals) : null),
+    [editing, lines, stageGoals],
+  );
+  const problemCount = problems?.count ?? 0;
+
+  // The last autosave's failure, if the one before this edit failed: how many
+  // in a row, whether retrying can help, and the signature that failed — a
+  // refused draft is only worth sending again once it has changed.
+  const [saveFailure, setSaveFailure] = useState(
+    /** @type {{ count: number, retryable: boolean, signature: string, message: string } | null} */ (null),
+  );
+  // The save on the wire, if any, so Apply can wait for it rather than send a
+  // second PUT that might land first and be overwritten by the older one.
+  const savePromiseRef = useRef(/** @type {Promise<unknown> | null} */ (null));
+
+  // A failure belongs to the draft it happened to: another plan's draft, or
+  // a fresh one after apply or discard, starts clean.
+  useEffect(() => {
+    setSaveFailure(null);
+  }, [draftVersionId]);
 
   const saveLines = useMutation({
-    mutationFn: async () => {
-      if (!draftVersionId) return null;
+    // What to send is read from the store when the save STARTS, and its
+    // signature travels with it: that is what `markSaved` records, so a
+    // keystroke landing while this is in flight still counts as unsaved.
+    mutationFn: async (
+      /** @type {{ versionId: string, lines: DraftLine[], stageGoals: DraftStageGoals }} */ draft,
+    ) => {
       const res = await api["allocation-versions"][":id"].lines.$put({
-        param: { id: draftVersionId },
-        json: { lines: savePayload, stageGoals: saveStageGoals },
+        param: { id: draft.versionId },
+        json: { lines: draftLinesToPayload(draft.lines), stageGoals: draftStageGoalsToPayload(draft.stageGoals) },
       });
-      if (!res.ok) throw new Error(await readApiError(res));
+      if (!res.ok) throw await apiErrorFrom(res);
       return res.json();
     },
-    onSuccess: (result) => {
-      if (!result) return;
-      markSaved();
-      savedSignatureRef.current = serverLinesSignature(result.version.lines, result.version.stageGoals);
+    onSuccess: (result, draft) => {
+      setSaveFailure(null);
+      // A save for a draft since discarded, applied or swapped for another
+      // plan's says nothing about the one on screen now.
+      if (useAllocationDraft.getState().versionId === draft.versionId) {
+        markSaved(
+          draftLinesSignature(draft.lines, draft.stageGoals),
+          serverLinesSignature(result.version.lines, result.version.stageGoals),
+        );
+      }
+      // Write what was just saved into the cached preview too. Left alone,
+      // the cache keeps the draft as it was when the page opened, and the
+      // next visit — or switching back from another plan — would render
+      // that older draft over the newer lines in the store until the refetch
+      // landed; an edit typed in that gap would be autosaved on top of the
+      // older lines. Only the version is patched: the page reads nothing
+      // else of the draft from here (it recomputes the result locally).
+      queryClient.setQueriesData({ queryKey: ["allocation-preview", selectedPlanId] }, (old) =>
+        old && "draft" in old && old.draft && old.draft.version.id === result.version.id
+          ? {
+              ...old,
+              draft: {
+                ...old.draft,
+                version: { ...old.draft.version, lines: result.version.lines, stageGoals: result.version.stageGoals },
+              },
+            }
+          : old,
+      );
       queryClient.invalidateQueries({ queryKey: ["allocation-versions", selectedPlanId] });
     },
-    onError: (err) => toast.error(err.message),
+    // Said in the status line above the sections, where it stays until the
+    // save goes through; a toast too, but only for the first failure of a
+    // run — a retry every few seconds toasting each time would be noise.
+    onError: (err, draft) => {
+      if (!saveFailure) toast.error(`Couldn't save the draft: ${err.message}`);
+      setSaveFailure((previous) => ({
+        count: (previous?.count ?? 0) + 1,
+        retryable: isRetryableSaveError(err),
+        signature: draftLinesSignature(draft.lines, draft.stageGoals),
+        message: err.message,
+      }));
+    },
   });
+
+  /** Sends the draft as it stands right now. */
+  function runSave() {
+    const { versionId, lines: draftLines, stageGoals: draftGoals } = useAllocationDraft.getState();
+    if (!versionId) return Promise.resolve();
+    const promise = saveLines.mutateAsync({ versionId, lines: draftLines, stageGoals: draftGoals });
+    savePromiseRef.current = promise;
+    // The failure is handled by onError; this only stops tracking it.
+    promise
+      .catch(() => undefined)
+      .finally(() => {
+        if (savePromiseRef.current === promise) savePromiseRef.current = null;
+      });
+    return promise;
+  }
 
   const createDraft = useMutation({
     mutationFn: async () => {
@@ -1828,7 +2231,6 @@ export function AllocationPage() {
     },
     onSuccess: () => {
       resetDraft();
-      savedSignatureRef.current = null;
       queryClient.invalidateQueries({ queryKey: ["allocation-preview"] });
       queryClient.invalidateQueries({ queryKey: ["allocation-plans"] });
       queryClient.invalidateQueries({ queryKey: ["allocation-versions", selectedPlanId] });
@@ -1839,20 +2241,35 @@ export function AllocationPage() {
 
   const applyDraft = useMutation({
     mutationFn: async (/** @type {string | null} */ note) => {
-      // Flush any pending edit first: apply must promote what's on screen,
-      // not the last autosave.
-      if (dirty) await saveLines.mutateAsync();
+      // Apply must promote what's on screen, not the last autosave. Let a
+      // save already on the wire land, then save again whenever the screen
+      // still differs from what the server holds — after an undo past a save
+      // included, which the old `dirty` flag missed.
+      if (savePromiseRef.current) await savePromiseRef.current.catch(() => undefined);
+      const draft = useAllocationDraft.getState();
+      if (draftProblems(draft.lines, draft.stageGoals).count > 0) {
+        throw new Error("Some lines aren't finished — the marked rows say what's missing.");
+      }
+      if (draft.dirty) {
+        // The save's own failure is already said (status line and toast);
+        // this says what it meant for the apply.
+        await runSave().catch(() => {
+          throw new Error("The latest changes couldn't be saved, so nothing was applied.");
+        });
+      }
       const res = await api["allocation-plans"][":id"].draft.apply.$post({
         param: { id: selectedPlanId ?? "" },
-        json: { note },
+        // The date being previewed: the amounts recorded as "what the bank
+        // holds" are the ones this screen showed, for the cycle it showed.
+        json: { note, on },
       });
       if (!res.ok) throw new Error(await readApiError(res));
       return res.json();
     },
     onSuccess: (result) => {
       setApplyOpen(false);
+      setSaveFailure(null);
       resetDraft();
-      savedSignatureRef.current = null;
       queryClient.invalidateQueries({ queryKey: ["allocation-preview"] });
       queryClient.invalidateQueries({ queryKey: ["allocation-plans"] });
       queryClient.invalidateQueries({ queryKey: ["allocation-versions", selectedPlanId] });
@@ -1871,17 +2288,50 @@ export function AllocationPage() {
     // 404 the operator can do nothing about. Apply flushes the pending edit
     // itself before it posts.
     if (discardDraft.isPending || applyDraft.isPending) return undefined;
-    const timer = setTimeout(() => saveLines.mutate(), AUTOSAVE_DELAY_MS);
+    // One save at a time. When this one settles the effect runs again, and
+    // anything typed meanwhile is still dirty, so it goes next.
+    if (saveLines.isPending) return undefined;
+    // An incomplete line would only be refused, and refused with it goes
+    // every other change in the draft. Hold everything until it's finished;
+    // the line says what's missing and the status line says nothing is
+    // being saved.
+    if (problemCount > 0) return undefined;
+    let delay = AUTOSAVE_DELAY_MS;
+    if (saveFailure) {
+      // Refused: sending the same draft again gets the same answer. Wait for
+      // an edit (a new signature), then save as usual.
+      if (!saveFailure.retryable && saveFailure.signature === localSignature) return undefined;
+      // Unreachable or a server error: try again, backing off.
+      if (saveFailure.retryable) delay = autosaveRetryDelay(saveFailure.count);
+    }
+    const timer = setTimeout(runSave, delay);
     return () => clearTimeout(timer);
+    // `runSave` reads the store when it fires; it is not a dependency.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dirty, localSignature, draftVersionId, discardDraft.isPending, applyDraft.isPending]);
+  }, [
+    dirty,
+    localSignature,
+    draftVersionId,
+    problemCount,
+    saveFailure,
+    saveLines.isPending,
+    discardDraft.isPending,
+    applyDraft.isPending,
+  ]);
 
   // The autosave above closes the window to 800ms, it doesn't close it — a
   // navigation inside that window still drops the edit. Only guard while an
   // edit is genuinely pending; an applied or discarded draft is not dirty.
   useUnsavedGuard(dirty && draftVersionId !== null && !applyDraft.isPending && !discardDraft.isPending, {
     title: "Leave with an unsaved edit?",
-    description: "Your last change to this draft hasn't finished saving. Staying for a moment lets it through.",
+    // Said as it is: "stay a moment" is only true while a save can still go
+    // through.
+    description:
+      problemCount > 0
+        ? "Some lines in this draft aren't finished, so your latest changes haven't been saved. Leave now and they're lost."
+        : saveFailure
+          ? "Your latest changes to this draft couldn't be saved yet. Leave now and they're lost."
+          : "Your last change to this draft hasn't finished saving. Staying for a moment lets it through.",
   });
 
   // Discard deletes the draft version outright — every line typed into it,
@@ -1992,10 +2442,24 @@ export function AllocationPage() {
     navigate({ to: "/allocation", search: { plan: selectedPlanId, on: nextOn } });
   }
 
-  const previewError = previewQuery.error ? previewQuery.error.message : null;
   const defaultAccountId = accounts[0]?.id ?? "";
 
-  if (!plansQuery.isLoading && plans.length === 0) {
+  // A failed plans query is not "no plans". Rendering it as the empty state
+  // put "No allocation plan yet" beside a New plan button — an invitation to
+  // create a duplicate of the plan that was there all along.
+  if (plansQuery.isError) {
+    return (
+      <>
+        <PageHeader
+          title="Allocation"
+          description="Divide income into destinations, and see exactly what every standing transfer should be."
+        />
+        <QueryError error={plansQuery.error} onRetry={() => plansQuery.refetch()} what="your allocation plans" />
+      </>
+    );
+  }
+
+  if (plansQuery.isSuccess && plans.length === 0) {
     return (
       <>
         <PageHeader
@@ -2096,12 +2560,22 @@ export function AllocationPage() {
         onViewChange={setViewOverride}
       />
 
-      {previewError ? (
+      {previewQuery.error instanceof ApiError && previewQuery.error.code === "no_income_landing_account" ? (
+        // A setup step, not a fault: the engine needs to know which account
+        // pay lands in before it can tell a transfer from money that stays
+        // put. Say where that's set, rather than leaving a dead end.
         <EmptyState
           icon={AlertTriangleIcon}
           title="Can't compute this allocation yet"
-          description={previewError}
+          description="Mark the account your pay lands in, and every transfer here can be worked out from it."
+          action={
+            <Button asChild>
+              <Link to="/accounts">Go to Accounts</Link>
+            </Button>
+          }
         />
+      ) : previewQuery.isError ? (
+        <QueryError error={previewQuery.error} onRetry={() => previewQuery.refetch()} what="this allocation" />
       ) : null}
 
       {preview?.warnings?.length ? (
@@ -2115,10 +2589,17 @@ export function AllocationPage() {
         </div>
       ) : null}
 
-      {editing && dirty ? (
-        <p className="text-xs text-text-muted">
-          {saveLines.isPending ? "Saving draft…" : "Unsaved changes — saving shortly."}
-        </p>
+      {editing ? (
+        <DraftSaveStatus
+          dirty={dirty}
+          saving={saveLines.isPending}
+          problemCount={problemCount}
+          failure={saveFailure}
+          localSignature={localSignature}
+          onRetry={() => {
+            void runSave();
+          }}
+        />
       ) : null}
 
       {inputs && shownResult ? (
@@ -2169,6 +2650,7 @@ export function AllocationPage() {
                   readOnly={!editing}
                   goalText={shownStageGoals[section.stage] ?? ""}
                   dragTargetId={dragTargetId}
+                  problems={problems}
                   onGoalChange={(text) => setStageGoal(section.stage, text)}
                   onChange={updateLine}
                   onRemove={removeLine}
@@ -2223,13 +2705,21 @@ export function AllocationPage() {
                 result={shownResult}
                 accounts={accounts}
                 totalPerPayCents={totalPerPayCents}
+                current={current}
               />
             ) : null}
           </aside>
         </div>
       ) : null}
 
-      {versionsQuery.data && versionsQuery.data.length > 0 ? (
+      {versionsQuery.isError ? (
+        <QueryError
+          compact
+          error={versionsQuery.error}
+          onRetry={() => versionsQuery.refetch()}
+          what="this plan's version history"
+        />
+      ) : versionsQuery.data && versionsQuery.data.length > 0 ? (
         <VersionHistory
           versions={versionsQuery.data}
           accounts={accounts}
@@ -2268,6 +2758,12 @@ export function AllocationPage() {
                   <span className="text-text-muted">
                     · {changedCount} transfer{changedCount === 1 ? "" : "s"} change
                   </span>
+                ) : changedCount > 0 ? (
+                  // Drift, with no draft open: standing orders that no longer
+                  // say what the plan says. Worth seeing without opening.
+                  <span className="text-warning-strong">
+                    · {changedCount} bank order{changedCount === 1 ? "" : "s"} to update
+                  </span>
                 ) : null}
               </span>
             }
@@ -2279,6 +2775,7 @@ export function AllocationPage() {
               result={shownResult}
               accounts={accounts}
               totalPerPayCents={totalPerPayCents}
+              current={current}
             />
           </MobilePreviewDrawer>
         </>
@@ -2292,6 +2789,7 @@ export function AllocationPage() {
           inputs={inputs}
           unallocatedPerMonthCents={shownResult.unallocatedPerMonthCents}
           submitting={applyDraft.isPending || saveLines.isPending}
+          blocked={problemCount}
           onApply={(note) => applyDraft.mutate(note)}
         />
       ) : null}
@@ -2308,14 +2806,7 @@ function CreatePlanButton({ onCreated }) {
   const [name, setName] = useState("");
   const [variantId, setVariantId] = useState("");
 
-  const variantsQuery = useQuery({
-    queryKey: ["income-variants"],
-    queryFn: async () => {
-      const res = await api["income-variants"].$get();
-      if (!res.ok) throw new Error(await readApiError(res));
-      return (await res.json()).variants;
-    },
-  });
+  const variantsQuery = useIncomeVariantsQuery();
 
   const createPlan = useMutation({
     mutationFn: async () => {
@@ -2333,7 +2824,10 @@ function CreatePlanButton({ onCreated }) {
     onError: (err) => toast.error(err.message),
   });
 
-  const variants = variantsQuery.data ?? [];
+  const variants = variantsQuery.data?.variants ?? [];
+  // Loaded and empty — not still loading, and not failed: a plan divides an
+  // income variant, so with none there is nothing this dialog can make.
+  const noVariants = variantsQuery.isSuccess && variants.length === 0;
 
   return (
     <>
@@ -2358,20 +2852,43 @@ function CreatePlanButton({ onCreated }) {
               onChange={(e) => setName(e.target.value)}
             />
           </FieldRow>
-          <FieldRow label="Income variant" htmlFor="allocation-plan-variant" required>
-            <Select value={variantId} onValueChange={setVariantId}>
-              <SelectTrigger id="allocation-plan-variant" className="w-full">
-                <SelectValue placeholder="Choose a variant" />
-              </SelectTrigger>
-              <SelectContent>
-                {variants.map((v) => (
-                  <SelectItem key={v.id} value={v.id}>
-                    {v.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </FieldRow>
+          {noVariants ? (
+            // An empty dropdown was a dead end: nothing to choose, and no
+            // word on where the choices come from.
+            <div className="flex flex-col items-start gap-2 rounded-lg bg-surface-muted p-3 text-sm">
+              <p className="text-text">Add an income variant first.</p>
+              <p className="text-text-muted">
+                A plan divides one income variant — your household&apos;s pay, line by line — so there has to be one
+                to divide.
+              </p>
+              <Button asChild size="sm" variant="outline">
+                <Link to="/income">Go to Income</Link>
+              </Button>
+            </div>
+          ) : (
+            <FieldRow label="Income variant" htmlFor="allocation-plan-variant" required>
+              <Select value={variantId} onValueChange={setVariantId}>
+                <SelectTrigger id="allocation-plan-variant" className="w-full">
+                  <SelectValue placeholder="Choose a variant" />
+                </SelectTrigger>
+                <SelectContent>
+                  {variants.map((v) => (
+                    <SelectItem key={v.id} value={v.id}>
+                      {v.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </FieldRow>
+          )}
+          {variantsQuery.isError ? (
+            <QueryError
+              compact
+              error={variantsQuery.error}
+              onRetry={() => variantsQuery.refetch()}
+              what="your income variants"
+            />
+          ) : null}
           <DialogFooter>
             <Button variant="ghost" onClick={() => setOpen(false)}>
               Cancel

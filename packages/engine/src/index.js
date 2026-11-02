@@ -36,6 +36,7 @@ export {
   sumWindowFigures,
   simulateBalance,
   requiredOpeningBalanceCents,
+  withdrawableCents,
 } from "./bills.js";
 /** @typedef {import("./bills.js").AmountModel} AmountModel */
 /** @typedef {import("./bills.js").Bill} Bill */
@@ -63,6 +64,28 @@ export { resolveTargetCents, goalEta, goalRequired } from "./goals.js";
 /** @typedef {import("./goals.js").Goal} Goal */
 
 export { futureValueCents, periodRate } from "./projections.js";
+
+export {
+  HOUSE_RULES,
+  firstHomeDutyCents,
+  purchaseCostsCents,
+  monthlyRepaymentCents,
+  netAnnualFromGrossCents,
+  ccsPct,
+  wholeMonthsBetween,
+  projectedCashCents,
+  houseScenario,
+  keptLinesPerMonthCents,
+  monthlyRoomCents,
+  maxPriceCents,
+  cashNeededCents,
+  payRiseNeededCents,
+} from "./house.js";
+/** @typedef {import("./house.js").HouseScheme} HouseScheme */
+/** @typedef {import("./house.js").HouseBase} HouseBase */
+/** @typedef {import("./house.js").HouseScenarioInput} HouseScenarioInput */
+/** @typedef {import("./house.js").HouseScenarioResult} HouseScenarioResult */
+/** @typedef {import("./house.js").HouseWarning} HouseWarning */
 
 // Assertion helpers — used across the workspace wherever TypeScript would
 // have reached for a `!`. See invariant.js for why they throw.

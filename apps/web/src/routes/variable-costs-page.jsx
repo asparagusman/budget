@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { equivalent, resolveVariableBudget, toCents } from "@budget/engine";
 import {
   CalendarClockIcon,
@@ -48,19 +49,23 @@ import { Money } from "@/components/money.jsx";
 import { InlineError, Notice, NoticeList } from "@/components/notice.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
 import { PageSection } from "@/components/page-section.jsx";
+import { QueryError } from "@/components/query-error.jsx";
 import { Stat, StatGroup } from "@/components/stat-tile.jsx";
 import { useConfirm } from "@/components/confirm-dialog.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
+import { cellText, changedCells, forgetSentEdits } from "@/lib/cell-edits.js";
 import { registerCommands } from "@/lib/commands.js";
 import { CADENCES, CADENCE_LABELS } from "@/lib/constants.js";
 import { formatIsoDate, todayIso } from "@/lib/dates.js";
 import { colorFor, entityColors } from "@/lib/entity-colors.js";
 import { formatMoney } from "@/lib/format-money.js";
 import { useSettings } from "@/lib/settings.jsx";
+import { useUnsavedGuard } from "@/lib/use-unsaved-guard.js";
 import { ScrollArea } from "@/components/scroll-area.jsx";
 
 /** @import { Cadence, Cents } from "@budget/engine" */
+/** @import { CellEdits } from "@/lib/cell-edits.js" */
 /** @typedef {{ id: string, name: string, kind: "fixed" | "variable", isEssential: boolean, colour: string | null, sortOrder: number }} CostCategory */
 /** @typedef {{ id: string, categoryId: string, amountCents: Cents, cadence: Cadence, effectiveFrom: string, note: string | null }} VariableBudget */
 /** @typedef {{ categoryId: string, name: string, isEssential: boolean, budgetPerMonthCents: Cents, trailingAveragePerMonthCents: Cents | null, varianceCents: Cents | null, cyclesRecorded: number }} CategorySummary */
@@ -69,6 +74,14 @@ import { ScrollArea } from "@/components/scroll-area.jsx";
 /** @typedef {{ ordinal: number, label: string, cycleStart: string, cycleEnd: string, entries: CycleEntry[] }} Cycle */
 
 const LOOKBACK_OPTIONS = /** @type {const} */ (["6", "12", "24", "custom"]);
+
+// The API's cap on `periods` (MAX_SCAFFOLD_PERIODS in @budget/schema's
+// zod/variable-costs.js — apps/web takes no runtime dependency on that
+// package). More is a 400, so the field clamps instead.
+const MAX_PERIODS = 120;
+
+/** @param {string} cycleStart @param {string} categoryId */
+const cellKey = (cycleStart, categoryId) => `${cycleStart}|${categoryId}`;
 
 /**
  * @param {VariableBudget[]} rows
@@ -865,6 +878,11 @@ function OrphanedCyclesPanel() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["variable-actuals"] });
+      // An orphan still counts towards its category's trailing average (it
+      // is real spending), so deleting one moves the averages and variances
+      // shown above — and the cycle grid, if the orphan's cycle is in view.
+      queryClient.invalidateQueries({ queryKey: ["variable-costs-summary"] });
+      queryClient.invalidateQueries({ queryKey: ["variable-costs-cycles"] });
       toast.success("Orphaned cycle deleted.");
     },
     onError: (err) => toast.error(err.message),
@@ -927,10 +945,13 @@ export function VariableCostsPage() {
   const [budgetSheetCategoryId, setBudgetSheetCategoryId] = useState(/** @type {string | null} */ (null));
   const [lookback, setLookback] = useState(/** @type {(typeof LOOKBACK_OPTIONS)[number]} */ ("6"));
   const [customPeriods, setCustomPeriods] = useState("18");
-  const [values, setValues] = useState(/** @type {Record<string, string>[]} */ ([]));
+  // Only what has been typed into the actuals grid, by cycle and category —
+  // see lib/cell-edits.js for why it is not a copy of the server's figures.
+  const [edits, setEdits] = useState(/** @type {CellEdits} */ ({}));
   const [mobileCycleIndex, setMobileCycleIndex] = useState(0);
 
-  const periods = lookback === "custom" ? Math.max(1, Number(customPeriods) || 1) : Number(lookback);
+  const periods =
+    lookback === "custom" ? Math.min(MAX_PERIODS, Math.max(1, Math.floor(Number(customPeriods)) || 1)) : Number(lookback);
 
   const categoriesQuery = useQuery({
     queryKey: ["cost-categories", "variable"],
@@ -950,10 +971,13 @@ export function VariableCostsPage() {
     },
   });
 
+  // `on` is the browser's own calendar day. The server's "today" is UTC
+  // unless TZ is set, and from midnight until mid-morning in Australia that
+  // is still yesterday — near a payday, a different cycle.
   const summaryQuery = useQuery({
-    queryKey: ["variable-costs-summary"],
+    queryKey: ["variable-costs-summary", today],
     queryFn: async () => {
-      const res = await api["variable-costs"].summary.$get();
+      const res = await api["variable-costs"].summary.$get({ query: { on: today } });
       if (!res.ok) throw new Error(await readApiError(res));
       return /** @type {VariableCostsSummary} */ (await res.json());
     },
@@ -971,22 +995,30 @@ export function VariableCostsPage() {
   const primary = (payScheduleQuery.data ?? []).find((s) => s.isPrimary) ?? null;
 
   const cyclesQuery = useQuery({
-    queryKey: ["variable-costs-cycles", periods],
+    queryKey: ["variable-costs-cycles", periods, today],
     queryFn: async () => {
-      const res = await api["variable-costs"].cycles.$get({ query: { periods: String(periods) } });
+      const res = await api["variable-costs"].cycles.$get({ query: { periods: String(periods), on: today } });
       if (!res.ok) throw new Error(await readApiError(res));
       return /** @type {{ cycles: Cycle[] }} */ (await res.json());
     },
     enabled: primary !== null,
+    // A lookback change keeps the grid on screen until the new cycles land,
+    // instead of blanking it under the operator's hands.
+    placeholderData: (previous) => previous,
   });
 
   const categories = categoriesQuery.data ?? [];
   const budgets = budgetsQuery.data ?? [];
   const summary = summaryQuery.data ?? null;
-  const cycles = cyclesQuery.data?.cycles ?? [];
+  const cycles = useMemo(() => cyclesQuery.data?.cycles ?? [], [cyclesQuery.data]);
   const summaryByCategory = useMemo(() => new Map((summary?.byCategory ?? []).map((c) => [c.categoryId, c])), [summary]);
-  const essentialCategories = categories.filter((c) => c.isEssential);
-  const nonEssentialCategories = categories.filter((c) => !c.isEssential);
+  // All three memoised on `categories` itself. `gridCategories` used to be
+  // memoised on the two filtered arrays — rebuilt every render, so the memo
+  // never held, and everything keyed on it (the trend chart's rows, the
+  // registered commands) was rebuilt on every keystroke in the grid,
+  // restarting the chart's animation each time (perf-inp-plan.md, P1.5).
+  const essentialCategories = useMemo(() => categories.filter((c) => c.isEssential), [categories]);
+  const nonEssentialCategories = useMemo(() => categories.filter((c) => !c.isEssential), [categories]);
   const gridCategories = useMemo(() => [...essentialCategories, ...nonEssentialCategories], [essentialCategories, nonEssentialCategories]);
   const categoryColors = useMemo(() => entityColors(categories.map((c) => c.id)), [categories]);
 
@@ -1047,14 +1079,48 @@ export function VariableCostsPage() {
     [oldestFirst, locale],
   );
 
-  // Re-syncs only when the cycle set itself changes (a different lookback or
-  // fresh data from the server) — never while the operator is mid-edit,
-  // same rule as bill-history-page.jsx.
-  useEffect(() => {
-    setValues(cycles.map((cycle) => Object.fromEntries(cycle.entries.map((e) => [e.categoryId, e.amountCents !== null ? String(e.amountCents / 100) : ""]))));
-    setMobileCycleIndex(0);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cyclesQuery.data]);
+  // The grid's cells: the server's figures with the typing laid over them.
+  // Rebuilt from the cycles on every refetch, which is safe now that the
+  // typing lives apart from them — toggling Essential, adding or archiving
+  // a category mid-entry used to refetch the cycles and wipe every cell.
+  const actualCells = useMemo(
+    () =>
+      cycles.flatMap((cycle) =>
+        cycle.entries.map((entry) => ({
+          key: cellKey(cycle.cycleStart, entry.categoryId),
+          storedCents: entry.amountCents,
+          cycleStart: cycle.cycleStart,
+          categoryId: entry.categoryId,
+        })),
+      ),
+    [cycles],
+  );
+  const values = useMemo(
+    () =>
+      cycles.map((cycle) =>
+        Object.fromEntries(
+          cycle.entries.map((entry) => [
+            entry.categoryId,
+            cellText(edits, cellKey(cycle.cycleStart, entry.categoryId), entry.amountCents),
+          ]),
+        ),
+      ),
+    [cycles, edits],
+  );
+  // One diff for both what Save sends and whether leaving should ask.
+  const actualChanges = useMemo(() => changedCells(edits, actualCells), [edits, actualCells]);
+  const actualsDirty = actualChanges.length > 0;
+
+  /** @param {number} cycleIndex @param {string} categoryId @param {string} text */
+  function typeActual(cycleIndex, categoryId, text) {
+    const cycle = cycles[cycleIndex];
+    if (!cycle) return;
+    setEdits((prev) => ({ ...prev, [cellKey(cycle.cycleStart, categoryId)]: text }));
+  }
+
+  // Back to the current cycle only when the lookback changes — not on every
+  // refetch, which used to jump a phone back to "this cycle" mid-entry.
+  useEffect(() => setMobileCycleIndex(0), [periods]);
 
   function invalidateCosts() {
     queryClient.invalidateQueries({ queryKey: ["variable-costs-summary"] });
@@ -1159,32 +1225,36 @@ export function VariableCostsPage() {
   });
 
   const saveActuals = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (/** @type {CellEdits} */ sent) => {
       // Only cells that actually changed from what loaded — an untouched
       // blank cell has nothing to remember (phases/07-variable-costs.md
       // "Schema"), and submitting one anyway would try to insert a row this
       // table's NOT NULL amount column can't hold.
-      /** @type {{ categoryId: string, cycleStart: string, amountCents: Cents | null }[]} */
-      const entries = [];
-      cycles.forEach((cycle, cycleIndex) => {
-        for (const entry of cycle.entries) {
-          const raw = values[cycleIndex]?.[entry.categoryId]?.trim() ?? "";
-          const nextCents = raw === "" ? null : toCents(Number(raw));
-          if (nextCents !== entry.amountCents) {
-            entries.push({ categoryId: entry.categoryId, cycleStart: cycle.cycleStart, amountCents: nextCents });
-          }
-        }
-      });
+      const entries = changedCells(sent, actualCells).map((change) => ({
+        categoryId: change.categoryId,
+        cycleStart: change.cycleStart,
+        amountCents: change.nextCents,
+      }));
       if (entries.length === 0) return { variableActuals: [] };
       const res = await api["variable-actuals"].$put({ json: { entries } });
       if (!res.ok) throw new Error(await readApiError(res));
       return res.json();
     },
-    onSuccess: (result) => {
-      invalidateCosts();
+    onSuccess: async (result, sent) => {
+      queryClient.invalidateQueries({ queryKey: ["variable-costs-summary"] });
+      queryClient.invalidateQueries({ queryKey: ["variable-actuals"] });
+      // Waited for, so the saved figures are in the grid before the typing
+      // over them is let go — otherwise the old figures flash back first.
+      await queryClient.invalidateQueries({ queryKey: ["variable-costs-cycles"] });
+      setEdits((current) => forgetSentEdits(current, sent));
       toast.success(result.variableActuals.length > 0 ? "Cycle spending saved." : "Nothing changed.");
     },
     onError: (err) => toast.error(err.message),
+  });
+
+  useUnsavedGuard(actualsDirty && !saveActuals.isPending, {
+    title: "Leave with unsaved spending?",
+    description: "The amounts typed into the actual spending grid haven't been saved yet, and leaving discards them.",
   });
 
   const actualsSectionRef = useRef(/** @type {HTMLDivElement | null} */ (null));
@@ -1248,7 +1318,15 @@ export function VariableCostsPage() {
         }
       />
 
-      {!isLoading && categories.length === 0 ? (
+      {/* A failed load is said as one, never as "No categories yet" — that
+          reads as an invitation to re-create categories that exist. */}
+      {categoriesQuery.error || budgetsQuery.error || summaryQuery.error ? (
+        <QueryError
+          error={categoriesQuery.error ?? budgetsQuery.error ?? summaryQuery.error}
+          what="your variable costs"
+          onRetry={() => Promise.all([categoriesQuery.refetch(), budgetsQuery.refetch(), summaryQuery.refetch()])}
+        />
+      ) : !isLoading && categories.length === 0 ? (
         <EmptyState
           icon={ShoppingBagIcon}
           title="No categories yet"
@@ -1350,11 +1428,26 @@ export function VariableCostsPage() {
         </div>
       ) : null}
 
-      {!primary ? (
+      {payScheduleQuery.isLoading ? (
+        <PanelSkeleton height={360} label="Loading cycles" />
+      ) : payScheduleQuery.error ? (
+        <QueryError
+          error={payScheduleQuery.error}
+          what="your pay schedules"
+          onRetry={() => payScheduleQuery.refetch()}
+        />
+      ) : !primary ? (
         <EmptyState
           icon={CalendarClockIcon}
           title="Set a primary pay schedule"
-          description="Cycle spending is entered per pay cycle — set a primary pay schedule in Accounts before entering history."
+          description="Cycle spending is entered per pay cycle, and the cycles come from the primary pay schedule. Pay schedules live on the Income page."
+          action={
+            <Button asChild>
+              <Link to="/income" hash="pay-schedules">
+                Set up pay schedules
+              </Link>
+            </Button>
+          }
         />
       ) : (
         <div ref={actualsSectionRef}>
@@ -1380,31 +1473,39 @@ export function VariableCostsPage() {
                   {lookback === "custom" ? (
                     <Input
                       id="variable-custom"
-                      aria-label="Cycles"
+                      aria-label={`Cycles, up to ${MAX_PERIODS}`}
+                      title={`Up to ${MAX_PERIODS} cycles`}
                       className="w-20"
                       type="number"
                       min="1"
+                      max={MAX_PERIODS}
                       inputMode="numeric"
                       value={customPeriods}
                       onChange={(e) => setCustomPeriods(e.target.value)}
                     />
                   ) : null}
                 </div>
-                <Button onClick={() => saveActuals.mutate()} disabled={saveActuals.isPending}>
+                <Button onClick={() => saveActuals.mutate(edits)} disabled={saveActuals.isPending}>
                   <SaveIcon />
-                  {saveActuals.isPending ? "Saving…" : "Save"}
+                  {saveActuals.isPending
+                    ? "Saving…"
+                    : actualsDirty
+                      ? `Save ${actualChanges.length} change${actualChanges.length === 1 ? "" : "s"}`
+                      : "Save"}
                 </Button>
               </>
             }
           >
             {cyclesQuery.isLoading ? (
               <PanelSkeleton height={360} label="Loading cycles" />
+            ) : cyclesQuery.error ? (
+              <QueryError error={cyclesQuery.error} what="the spending grid" onRetry={() => cyclesQuery.refetch()} />
             ) : cycles.length === 0 || gridCategories.length === 0 ? (
               <EmptyState title="Nothing to enter yet" description="Add a variable cost category first." />
             ) : (
               <>
                 <div className="hidden md:block">
-                  <ActualsGridDesktop cycles={cycles} gridCategories={gridCategories} values={values} inputRefs={inputRefs} onChange={(i, categoryId, value) => setValues((prev) => prev.map((row, idx) => (idx === i ? { ...row, [categoryId]: value } : row)))} />
+                  <ActualsGridDesktop cycles={cycles} gridCategories={gridCategories} values={values} inputRefs={inputRefs} onChange={typeActual} />
                 </div>
                 <div className="md:hidden">
                   <ActualsGridMobile
@@ -1413,7 +1514,7 @@ export function VariableCostsPage() {
                     values={values}
                     cycleIndex={Math.min(mobileCycleIndex, cycles.length - 1)}
                     onCycleIndexChange={setMobileCycleIndex}
-                    onChange={(i, categoryId, value) => setValues((prev) => prev.map((row, idx) => (idx === i ? { ...row, [categoryId]: value } : row)))}
+                    onChange={typeActual}
                   />
                 </div>
               </>
@@ -1434,7 +1535,7 @@ export function VariableCostsPage() {
             <Chart
               height={280}
               ariaLabel={`Actual spend per cycle for ${gridCategories.length} categories across ${cycles.length} cycles, each with its budget as a faint reference line.`}
-              dataTable={{
+              dataTable={() => ({
                 caption: "Actual spend per category, per cycle",
                 columns: ["Cycle", ...gridCategories.map((cat) => cat.name)],
                 rows: [...cycles].reverse().map((cycle) => [
@@ -1444,7 +1545,7 @@ export function VariableCostsPage() {
                     return amountCents === null ? "—" : formatMoney(amountCents, { currency, locale });
                   }),
                 ]),
-              }}
+              })}
               config={categoryChart.config}
             >
               <LineChart data={categoryChart.rows} margin={{ top: 8, right: 32, bottom: 0, left: 0 }}>
@@ -1488,7 +1589,7 @@ export function VariableCostsPage() {
             <Chart
               height={240}
               ariaLabel={`Total variable spend per cycle across ${cycles.length} cycles, split into essential and non-essential.`}
-              dataTable={{
+              dataTable={() => ({
                 caption: "Total variable spend per cycle, essential and non-essential",
                 columns: ["Cycle", "Essential", "Non-essential"],
                 rows: [...cycles].reverse().map((cycle) => {
@@ -1502,7 +1603,7 @@ export function VariableCostsPage() {
                     formatMoney(sumOf(false), { currency, locale }),
                   ];
                 }),
-              }}
+              })}
               config={{
                 essential: { label: "Essential", color: TOTAL },
                 nonEssential: { label: "Non-essential", color: SERIES[1] },

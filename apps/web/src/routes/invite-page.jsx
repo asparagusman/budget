@@ -27,7 +27,9 @@ const STATUS_MESSAGES = {
 };
 
 export function InvitePage() {
-  const { code } = useParams({ strict: false });
+  // Always present on /invite/$code; `strict: false` just can't promise it.
+  // An empty code reads as an unknown invite, which is what it would be.
+  const code = useParams({ strict: false }).code ?? "";
   const navigate = useNavigate();
   const { refresh } = useAuth();
   const [status, setStatus] = useState(
@@ -40,7 +42,7 @@ export function InvitePage() {
 
   useEffect(() => {
     let cancelled = false;
-    api.auth.invite[":code"].$get({ param: { code: /** @type {string} */ (code) } }).then(
+    api.auth.invite[":code"].$get({ param: { code } }).then(
       async (res) => {
         const body = await res.json();
         if (cancelled) return;

@@ -22,3 +22,4 @@ export * from "./variable-budgets.js";
 export * from "./variable-actuals.js";
 export * from "./allocation.js";
 export * from "./goals.js";
+export * from "./house-scenarios.js";

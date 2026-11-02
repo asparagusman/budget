@@ -5,6 +5,13 @@ const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD.");
 export const listBillInstancesQuerySchema = z.object({
   from: isoDate,
   to: isoDate,
+  // Both optional; leaving them off is the original every-active-bill list.
+  // The bill detail sheet needs ONE bill's orphaned rows across all time, and
+  // without these it had the server project every active bill over
+  // 2000–2100 (~40k objects) only to throw all but a handful away in the
+  // browser (.claude/plans/perf-inp-plan.md, P2 #6).
+  billId: z.string().uuid().optional(),
+  orphansOnly: z.enum(["true", "false"]).optional(),
 });
 
 /** @typedef {z.infer<typeof listBillInstancesQuerySchema>} ListBillInstancesQuery */

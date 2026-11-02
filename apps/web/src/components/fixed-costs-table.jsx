@@ -10,7 +10,7 @@ import { Money } from "@/components/money.jsx";
 import { InlineError } from "@/components/notice.jsx";
 import { AMOUNT_MODEL_LABELS, AMOUNT_MODELS, CADENCES, CADENCE_LABELS } from "@/lib/constants.js";
 import { formatIsoDate } from "@/lib/dates.js";
-import { billToDraft, draftSignature, isBlankGhost } from "@/lib/fixed-costs-draft.js";
+import { billToDraft, draftSignature, isBlankGhost, restatedFigures } from "@/lib/fixed-costs-draft.js";
 import { cn } from "@/lib/utils.js";
 import { ScrollArea } from "@/components/scroll-area.jsx";
 
@@ -64,19 +64,20 @@ function personName(people, personId) {
 }
 
 /**
- * Weekly and quarterly are restatements of the annual figure, not of one
- * occurrence — that is the whole point. Deriving them from `perYearCents`
- * keeps them consistent with the subtotal for a bill whose occurrences are
- * not all the same size, where `oneInstance * occurrencesPerYear` is simply
- * a different number.
+ * The amber "this date is a guess" mark. An imported bill's due date is one
+ * placeholder day the importer chose (the workbook holds none), and the
+ * calendar, the bills buffer and the balance curve are all computed from it —
+ * so it says so on every row until the date is changed or confirmed.
  *
- * @param {Cents} perYearCents
+ * @param {{ bill: Bill | null }} props
  */
-function restated(perYearCents) {
-  return {
-    weeklyCents: Math.round(perYearCents / 52),
-    quarterlyCents: Math.round(perYearCents / 4),
-  };
+export function PlaceholderDateBadge({ bill }) {
+  if (!bill || bill.dueDateConfirmed) return null;
+  return (
+    <Badge variant="attention" title="Imported with a placeholder due date. Set the real one, or confirm it from the bill.">
+      Placeholder date
+    </Badge>
+  );
 }
 
 /**
@@ -131,8 +132,9 @@ function AmountBasis({ draft, bill, figures, spread }) {
  */
 function ViewRow({ row, people, locale, onOpenBill }) {
   const { draft, bill, figures, spread } = row;
-  const perYear = figures?.perYearCents ?? 0;
-  const { weeklyCents, quarterlyCents } = restated(perYear);
+  const { weeklyCents, monthlyCents, quarterlyCents, yearlyCents } = restatedFigures(
+    figures ?? { perMonthCents: 0, perYearCents: 0 },
+  );
 
   return (
     <tr>
@@ -148,6 +150,7 @@ function ViewRow({ row, people, locale, onOpenBill }) {
           {draft.amountModel !== "flat" ? (
             <Badge variant="secondary">{AMOUNT_MODEL_LABELS[draft.amountModel]}</Badge>
           ) : null}
+          <PlaceholderDateBadge bill={bill} />
         </span>
       </td>
       <td className="px-4 py-3 text-text-muted">{personName(people, draft.ownerPersonId)}</td>
@@ -167,13 +170,13 @@ function ViewRow({ row, people, locale, onOpenBill }) {
         <Money value={weeklyCents} />
       </td>
       <td className="px-4 py-3 text-right text-text-muted">
-        <Money value={figures?.perMonthCents ?? 0} />
+        <Money value={monthlyCents} />
       </td>
       <td className="px-4 py-3 text-right text-text-muted">
         <Money value={quarterlyCents} />
       </td>
       <td className="px-4 py-3 text-right text-text-muted">
-        <Money value={perYear} />
+        <Money value={yearlyCents} />
       </td>
     </tr>
   );
@@ -188,9 +191,12 @@ function ViewRow({ row, people, locale, onOpenBill }) {
  * }} props
  */
 function EditRow({ row, people, accounts, onChange, onRemove, onOpenBill }) {
-  const { draft, figures, error } = row;
+  const { draft, bill, figures, error } = row;
   const ghost = draft.billId === null;
   const blank = isBlankGhost(draft);
+  // Typing a different date is what confirms it (the server does that on
+  // save), so the mark stays only while the placeholder is still the value.
+  const placeholderBill = bill && draft.anchorDate === bill.anchorDate ? bill : null;
 
   return (
     <tr className={cn(draft.removed && "opacity-45", blank && "text-text-subtle", isEdited(row) && "bg-warning-soft")}>
@@ -269,6 +275,11 @@ function EditRow({ row, people, accounts, onChange, onRemove, onOpenBill }) {
           disabled={draft.removed}
           onChange={(v) => onChange(draft.key, { anchorDate: v })}
         />
+        {placeholderBill && !placeholderBill.dueDateConfirmed ? (
+          <div className="mt-1">
+            <PlaceholderDateBadge bill={placeholderBill} />
+          </div>
+        ) : null}
       </td>
       <td className="px-2 py-2 align-top">
         <div className="flex items-start gap-1">
@@ -614,12 +625,16 @@ function CategoryGroupMobile({ category, rows, totals, editing, people, locale, 
                   ) : null}
                 </div>
                 <div className="grid grid-cols-2 items-end gap-2">
-                  <DatePicker
-                    ariaLabel="A known due date"
-                    value={draft.anchorDate}
-                    disabled={draft.removed}
-                    onChange={(v) => onChange(draft.key, { anchorDate: v })}
-                  />
+                  <div className="flex flex-col items-start gap-1">
+                    {bill && draft.anchorDate === bill.anchorDate ? <PlaceholderDateBadge bill={bill} /> : null}
+                    <DatePicker
+                      className="w-full"
+                      ariaLabel="A known due date"
+                      value={draft.anchorDate}
+                      disabled={draft.removed}
+                      onChange={(v) => onChange(draft.key, { anchorDate: v })}
+                    />
+                  </div>
                   <p className="text-right text-sm text-text-muted">
                     {figures ? (
                       <>
@@ -651,6 +666,7 @@ function CategoryGroupMobile({ category, rows, totals, editing, people, locale, 
                     {draft.amountModel !== "flat" ? (
                       <Badge variant="secondary">{AMOUNT_MODEL_LABELS[draft.amountModel]}</Badge>
                     ) : null}
+                    <PlaceholderDateBadge bill={bill} />
                   </span>
                   <span className="text-xs text-text-muted">
                     {personName(people, draft.ownerPersonId)} · {CADENCE_LABELS[draft.frequency]}

@@ -1,7 +1,7 @@
 import { equivalent } from "@budget/engine";
 import { AlertTriangleIcon, CheckIcon } from "lucide-react";
 import { Money } from "@/components/money.jsx";
-import { CADENCE_LABELS } from "@/lib/constants.js";
+import { CADENCE_PERIOD_NOUNS } from "@/lib/constants.js";
 import { cn } from "@/lib/utils.js";
 
 /** @import { AllocationResult, Cadence } from "@budget/engine" */
@@ -12,10 +12,18 @@ import { cn } from "@/lib/utils.js";
  * is fine", not just "the arithmetic closed". Exported so a summary elsewhere
  * can't disagree with the indicator about what "balanced" means.
  *
+ * The engine's own `overAllocation` flag says it: any line or stage that went
+ * below zero. The per-line check stays beside it for a result rebuilt without
+ * the flag (it is optional on the type until every caller passes it).
+ *
  * @param {AllocationResult} result
  */
 export function isBalanced(result) {
-  return result.unallocatedPerMonthCents === 0 && result.lines.every((l) => l.perMonthCents >= 0);
+  return (
+    result.unallocatedPerMonthCents === 0 &&
+    !result.overAllocation &&
+    result.lines.every((l) => l.perMonthCents >= 0)
+  );
 }
 
 /**
@@ -42,9 +50,12 @@ export function isBalanced(result) {
  */
 export function UnallocatedIndicator({ result, payCadence, hasPrimaryPaySchedule, footer }) {
   const cents = result.unallocatedPerMonthCents;
-  const negativeLines = result.lines.filter((l) => l.perMonthCents < 0);
+  const over = result.overAllocation ?? null;
+  const negativeLineCount = over ? over.negativeLineIds.length : result.lines.filter((l) => l.perMonthCents < 0).length;
   const balanced = isBalanced(result);
   const zeroUnallocated = cents === 0;
+  // "per fortnight", not "per fortnightly".
+  const perLabel = hasPrimaryPaySchedule ? CADENCE_PERIOD_NOUNS[payCadence][0] : "month";
 
   return (
     <div
@@ -72,23 +83,31 @@ export function UnallocatedIndicator({ result, payCadence, hasPrimaryPaySchedule
         <Money value={cents} signed={!zeroUnallocated} />
         <span className="ml-1.5 text-sm font-medium text-text-muted">/month</span>
       </p>
-      {!zeroUnallocated ? (
+      {cents > 0 ? (
         <p className="text-sm text-text-muted">
-          {cents > 0 ? (
-            <>
-              <Money value={hasPrimaryPaySchedule ? equivalent(cents, "monthly", payCadence) : cents} /> per{" "}
-              {hasPrimaryPaySchedule ? CADENCE_LABELS[payCadence].toLowerCase() : "month"} isn&apos;t allocated
-              anywhere — it stays in the income account.
-            </>
-          ) : (
-            <>This plan allocates more than the income it has. Nothing is rebalanced for you.</>
-          )}
+          <Money value={hasPrimaryPaySchedule ? equivalent(cents, "monthly", payCadence) : cents} /> per {perLabel}{" "}
+          isn&apos;t allocated anywhere — it stays in the income account.
+        </p>
+      ) : over && over.shortfallPerMonthCents > 0 ? (
+        // How much more it commits than it has, from the engine — the figure
+        // a sweep line hides by going negative to absorb it.
+        <p className="text-sm text-text-muted">
+          This plan commits{" "}
+          <Money
+            value={hasPrimaryPaySchedule ? over.shortfallPerPayCents : over.shortfallPerMonthCents}
+            className="font-medium text-text"
+          />{" "}
+          per {perLabel} more than the income it divides. Nothing is rebalanced for you.
+        </p>
+      ) : !zeroUnallocated ? (
+        <p className="text-sm text-text-muted">
+          This plan allocates more than the income it has. Nothing is rebalanced for you.
         </p>
       ) : null}
-      {negativeLines.length > 0 ? (
+      {negativeLineCount > 0 ? (
         <p className="text-sm text-text">
-          {negativeLines.length} line{negativeLines.length === 1 ? "" : "s"} resolve{negativeLines.length === 1 ? "s" : ""}{" "}
-          to a negative amount — an earlier stage is taking more than the one before it leaves.
+          {negativeLineCount} line{negativeLineCount === 1 ? "" : "s"} resolve{negativeLineCount === 1 ? "s" : ""} to a
+          negative amount — an earlier stage is taking more than the one before it leaves.
         </p>
       ) : null}
       {footer}

@@ -48,3 +48,20 @@ describe("the entry scaffolds' `periods`", () => {
     expect(body.error.fields.periods).toEqual(["At most 120 periods at a time."]);
   });
 });
+
+// The browser sends its own calendar date so the page and the server agree on
+// which cycle is current; a malformed one is refused before any query rather
+// than silently replaced by the server's clock.
+describe("variable costs' `on`", () => {
+  it.each([["/variable-costs/summary?on=07-10-2026"], ["/variable-costs/cycles?on=today"]])(
+    "answers %s with a 400 that names the field",
+    async (path) => {
+      const res = await app.request(path);
+      /** @type {any} */
+      const body = await res.json();
+
+      expect(res.status).toBe(400);
+      expect(body.error.fields.on).toEqual(["Use YYYY-MM-DD."]);
+    },
+  );
+});

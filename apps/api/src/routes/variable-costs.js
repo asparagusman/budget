@@ -1,5 +1,5 @@
 import { mustAt } from "@budget/engine";
-import { variableCostsCyclesQuerySchema } from "@budget/schema";
+import { variableCostsCyclesQuerySchema, variableCostsSummaryQuerySchema } from "@budget/schema";
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { getPrimaryPaySchedule } from "../lib/income.js";
@@ -19,15 +19,16 @@ export function createVariableCostsRoutes({ db }) {
     // a non-essential category here would double-count money already
     // accounted for by the prize-pool lines that fund it (same doc, "The
     // trap").
-    .get("/summary", async (c) => {
-      return c.json(await summarizeVariableCosts(db, todayIso()));
+    .get("/summary", zValidator("query", variableCostsSummaryQuerySchema, handleValidation), async (c) => {
+      const { on } = c.req.valid("query");
+      return c.json(await summarizeVariableCosts(db, on ?? todayIso()));
     })
 
     // The reverse-sequential entry scaffold, mirroring GET /bills/:id/history
     // so the two entry screens feel like the same tool (phases/
     // 07-variable-costs.md "API").
     .get("/cycles", zValidator("query", variableCostsCyclesQuerySchema, handleValidation), async (c) => {
-      const { periods } = c.req.valid("query");
+      const { periods, on } = c.req.valid("query");
 
       const primary = await getPrimaryPaySchedule(db);
       if (!primary) {
@@ -38,8 +39,7 @@ export function createVariableCostsRoutes({ db }) {
       }
 
       const categories = await loadActiveVariableCategories(db);
-      const today = todayIso();
-      const bounds = buildCycleScaffold(primary, today, periods);
+      const bounds = buildCycleScaffold(primary, on ?? todayIso(), periods);
 
       const newest = mustAt(bounds, 0, "current cycle bound");
       const earliest = mustAt(bounds, bounds.length - 1, "earliest cycle bound");

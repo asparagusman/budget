@@ -1,5 +1,29 @@
 /** @import { Cents } from "@budget/engine" */
 
+// One `Intl.NumberFormat` per distinct set of options, built on first use and
+// reused from then on. Constructing one is the expensive part — ICU resolves
+// the locale's data every time, ~100µs — while `.format` on an existing one
+// is ~2µs. `<Money>` formats twice per render and a page renders hundreds of
+// them, so a fresh formatter per call was the largest single cost of mounting
+// a page (.claude/plans/perf-inp-plan.md, P1.1). The set of keys is tiny: one
+// locale and currency, times the handful of flag combinations below.
+/** @type {Map<string, Intl.NumberFormat>} */
+const formatters = new Map();
+
+/**
+ * @param {string} key
+ * @param {string} locale
+ * @param {Intl.NumberFormatOptions} options
+ */
+function cachedFormat(key, locale, options) {
+  let formatter = formatters.get(key);
+  if (!formatter) {
+    formatter = new Intl.NumberFormat(locale, options);
+    formatters.set(key, formatter);
+  }
+  return formatter;
+}
+
 /**
  * Turns integer cents into a display string. This is the ONLY function in
  * the app that does that conversion — `<Money>` calls it, and so should
@@ -11,16 +35,20 @@
  *   locale: string,
  *   signed?: boolean,
  *   compact?: boolean,
- * }} options
+ *   whole?: boolean,
+ * }} options `whole` rounds to the dollar — for an estimate, where cents
+ * would claim a precision the figure doesn't have (a house price, a
+ * repayment at a rate nobody has been offered yet).
  */
-export function formatMoney(cents, { currency, locale, signed = false, compact = false }) {
+export function formatMoney(cents, { currency, locale, signed = false, compact = false, whole = false }) {
   const dollars = cents / 100;
-  return new Intl.NumberFormat(locale, {
+  return cachedFormat(`money|${locale}|${currency}|${signed}|${compact}|${whole}`, locale, {
     style: "currency",
     currency,
     signDisplay: signed ? "exceptZero" : "auto",
     notation: compact ? "compact" : "standard",
-    maximumFractionDigits: compact ? 1 : 2,
+    ...(whole ? { minimumFractionDigits: 0 } : {}),
+    maximumFractionDigits: whole ? 0 : compact ? 1 : 2,
   }).format(dollars);
 }
 
@@ -40,7 +68,7 @@ export function formatMoney(cents, { currency, locale, signed = false, compact =
  * @param {{ currency: string, locale: string, signed?: boolean }} options
  */
 export function formatMoneySpoken(cents, { currency, locale, signed = false }) {
-  return new Intl.NumberFormat(locale, {
+  return cachedFormat(`spoken|${locale}|${currency}|${signed}`, locale, {
     style: "currency",
     currency,
     currencyDisplay: "name",

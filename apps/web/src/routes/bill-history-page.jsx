@@ -22,7 +22,8 @@ export function BillHistoryPage() {
   const billQuery = useQuery({
     queryKey: ["bill-detail", billId],
     queryFn: async () => {
-      const res = await api.bills[":id"].$get({ param: { id: /** @type {string} */ (billId) } });
+      if (billId === undefined) throw new Error("No bill in the address.");
+      const res = await api.bills[":id"].$get({ param: { id: billId } });
       if (!res.ok) throw new Error(await readApiError(res));
       return (await res.json()).bill;
     },

@@ -26,17 +26,18 @@ import { useTweenedNumber } from "@/lib/motion.js";
  *   compact?: boolean,
  *   cadence?: string,
  *   tween?: boolean,
+ *   whole?: boolean,
  *   className?: string,
  * }} props
  */
-export function Money({ value, signed = false, compact = false, cadence, tween = false, className }) {
+export function Money({ value, signed = false, compact = false, cadence, tween = false, whole = false, className }) {
   const { currency, locale } = useSettings();
   const shown = useTweenedNumber(value, { enabled: tween });
-  const formatted = formatMoney(shown, { currency, locale, signed, compact });
+  const formatted = formatMoney(shown, { currency, locale, signed, compact, whole });
   // Spoken from the settled value, never the tweening one: a live region
   // does not exist here, but an assistive tech that re-reads mid-tween
   // should still hear the real number rather than a frame of the animation.
-  const spoken = formatMoneySpoken(value, { currency, locale, signed });
+  const spoken = formatMoneySpoken(whole ? Math.round(value / 100) * 100 : value, { currency, locale, signed });
 
   return (
     <span className={cn("tabular-nums", className)}>

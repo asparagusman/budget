@@ -1,11 +1,12 @@
 import { Suspense, useEffect, useRef } from "react";
-import { Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
-import { FileSpreadsheetIcon } from "lucide-react";
+import { Outlet, useNavigate } from "@tanstack/react-router";
+import { FileSpreadsheetIcon, HouseIcon } from "lucide-react";
 import { Sidebar } from "@/components/shell/sidebar.jsx";
 import { TopBar } from "@/components/shell/topbar.jsx";
 import { Skeleton } from "@/components/ui/skeleton.jsx";
 import { ScrollArea } from "@/components/scroll-area.jsx";
 import { registerCommands } from "@/lib/commands.js";
+import { useRouteKey } from "@/lib/route-key.js";
 
 /**
  * What shows while a route's chunk is in flight. Deliberately the shape of a
@@ -38,19 +39,22 @@ function RouteFallback() {
  * note in styles/app.css for why those are the same fact.
  */
 export function AppShell() {
-  // Keyed on the pathname so the entrance animation replays per navigation
-  // and *only* per navigation — a re-render from a settled query must not
-  // re-fade the page the operator is reading.
-  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  // Keyed per page so the entrance animation replays per navigation and
+  // *only* per navigation — a re-render from a settled query must not re-fade
+  // the page the operator is reading. The key is the route match, not the
+  // pathname: see useRouteKey for why the pathname remounted the page being
+  // LEFT on every click.
+  const routeKey = useRouteKey();
   const navigate = useNavigate();
   const scrollerRef = useRef(/** @type {HTMLDivElement | null} */ (null));
 
   // <main>'s viewport is the scroller, so a navigation has to reset it, not
   // the window — otherwise the next page opens halfway down at the previous
-  // page's offset.
+  // page's offset. On the same key as the wrapper, so the reset lands with
+  // the new page rather than scrolling the old one to the top first.
   useEffect(() => {
     scrollerRef.current?.scrollTo({ top: 0 });
-  }, [pathname]);
+  }, [routeKey]);
 
   // /import is not in NAV_ITEMS (a one-time migration tool does not earn a
   // permanent nav slot), so the palette entry is registered from the shell
@@ -66,6 +70,17 @@ export function AppShell() {
           keywords: "xlsx excel migrate workbook",
           icon: FileSpreadsheetIcon,
           run: () => navigate({ to: "/import" }),
+        },
+        // Goals' second tab isn't in NAV_ITEMS either — Goals is the entry —
+        // but it's the screen someone comes back to ask "can we afford it
+        // yet?", so it's one palette search away from anywhere.
+        {
+          id: "goals:house",
+          group: "Navigation",
+          label: "Buying a house",
+          keywords: "house home mortgage deposit stamp duty scenarios help to buy",
+          icon: HouseIcon,
+          run: () => navigate({ to: "/goals/house" }),
         },
       ]),
     [navigate],
@@ -90,7 +105,7 @@ export function AppShell() {
           <div className="px-4 pt-4 pb-[calc(1rem+env(safe-area-inset-bottom))] md:px-8 md:pt-8 md:pb-8">
             <div className="mx-auto w-full max-w-6xl">
               <div
-                key={pathname}
+                key={routeKey}
                 data-motion="route-enter"
                 // The gap between a page's top-level blocks. A heading and the
                 // content it names sit much closer than this (see

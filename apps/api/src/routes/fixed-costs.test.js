@@ -100,6 +100,20 @@ describe("/fixed-costs/balance-curve", () => {
 
     expect(ownWindow.contribution.perPayCents).toBeGreaterThan(curve.contributionPerPayCents);
   });
+
+  it("reports how much can come out without the curve crossing the buffer", async () => {
+    const to = addDaysIso(ON, 365);
+    // Generous opening so there is something to take.
+    const rich = await get(app, `/fixed-costs/balance-curve?from=${ON}&to=${to}&opening=${100_000_00}`);
+    const lowest = Math.min(...rich.points.map((/** @type {any} */ p) => p.balanceCents));
+    expect(rich.withdrawableCents).toBeGreaterThan(0);
+    expect(rich.withdrawableCents).toBe(lowest - rich.bufferCents);
+
+    // Take exactly that and the low point lands on the buffer.
+    const after = await get(app, `/fixed-costs/balance-curve?from=${ON}&to=${to}&opening=${100_000_00 - rich.withdrawableCents}`);
+    expect(Math.min(...after.points.map((/** @type {any} */ p) => p.balanceCents))).toBe(after.bufferCents);
+    expect(after.withdrawableCents).toBe(0);
+  });
 });
 
 describe("the fixed-cost total, for a fortnightly bill", () => {

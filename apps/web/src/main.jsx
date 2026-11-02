@@ -2,10 +2,12 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider } from "@tanstack/react-router";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { toast } from "sonner";
 import { router } from "./router.jsx";
 import { ThemeProvider } from "./lib/theme.jsx";
 import { SettingsProvider } from "./lib/settings.jsx";
-import { AuthProvider } from "./lib/auth.jsx";
+import { AuthProvider, invalidateAuthState, wasSignedIn } from "./lib/auth.jsx";
+import { createExpiryRedirect, onSessionExpired } from "./lib/session-expiry.js";
 import { TooltipProvider } from "./components/ui/tooltip.jsx";
 import { Toaster } from "./components/ui/sonner.jsx";
 import { ConfirmProvider } from "./components/confirm-dialog.jsx";
@@ -13,6 +15,24 @@ import { AppErrorBoundary } from "./components/app-error-boundary.jsx";
 import "./styles/app.css";
 
 const queryClient = new QueryClient();
+
+// A session that ended while this tab was open — 30 days up, or revoked from
+// another device — answers every request with a 401. Send the operator to
+// sign in, once, with a sentence saying why; otherwise each screen renders
+// its own error and nothing explains them. The cached auth state goes first,
+// or /login's guard would read the stale "signed in" and bounce straight
+// back. The failing queries themselves are left to unmount with their page.
+onSessionExpired(
+  createExpiryRedirect({
+    currentPath: () => window.location.pathname,
+    isSignedIn: wasSignedIn,
+    redirect: () => {
+      invalidateAuthState();
+      toast.info("You've been signed out. Sign in again to carry on.");
+      return router.navigate({ to: "/login", replace: true });
+    },
+  }),
+);
 
 const rootEl = document.getElementById("root");
 if (!rootEl) throw new Error("Root element #root not found.");

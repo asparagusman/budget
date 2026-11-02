@@ -305,7 +305,7 @@ export function serializeGoal(args) {
  * @param {string} accountId
  * @param {IsoDate} on
  */
-async function balanceAsOf(db, accountId, on) {
+export async function balanceAsOf(db, accountId, on) {
   const latest = await db.query.balanceSnapshots.findFirst({
     where: (b, { and: andCol, eq: eqCol, lte }) => andCol(eqCol(b.accountId, accountId), lte(b.asAt, on)),
     orderBy: (b, { desc: descCol }) => descCol(b.asAt),

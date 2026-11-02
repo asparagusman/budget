@@ -29,6 +29,7 @@ import {
   useTimeAxis,
 } from "@/components/chart.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
+import { getDateFormat } from "@/lib/dates.js";
 
 // Every figure on this page is fabricated. It exists so a feature phase can
 // copy a working example rather than reconstruct one from the Recharts docs
@@ -72,7 +73,7 @@ const CURVE_ROWS = Array.from({ length: 26 }, (_, i) => {
   const balance = 2400 + Math.round(Math.sin(i / 2) * 900) + i * 40;
   return {
     t,
-    label: new Intl.DateTimeFormat("en-AU", { dateStyle: "medium" }).format(date),
+    label: getDateFormat("en-AU", { dateStyle: "medium" }).format(date),
     iso,
     balance,
     bill: i % 3 === 0 ? balance : null,

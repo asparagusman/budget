@@ -36,6 +36,9 @@ describe("activeNavItem", () => {
     // Admin's entry points at its first tab, so its other tabs only match
     // through `section`.
     expect(activeNavItem("/admin/devices")?.label).toBe("Admin");
+    // Goals' second tab sits under its path, so it needs no `section`.
+    expect(activeNavItem("/goals/house")?.label).toBe("Goals");
+    expect(activeNavItem("/admin")?.label).toBe("Admin");
   });
 
   it("never lets the dashboard claim everything", () => {
@@ -63,8 +66,20 @@ describe("pageTitle", () => {
     expect(pageTitle("/costs/fixed/some-bill-id")).toBe("Bill history");
   });
 
-  it("names an admin tab after the section it belongs to", () => {
-    expect(pageTitle("/admin/sessions")).toBe("Admin");
+  it("names every admin tab after the section it belongs to", () => {
+    // The nav entry points at /admin/users, so the other four tabs only get a
+    // name through the section — without it the bar read "Budget" on them.
+    for (const tab of ["users", "devices", "sessions", "invites", "people"]) {
+      expect(pageTitle(`/admin/${tab}`)).toBe("Admin");
+    }
+    expect(pageTitle("/admin")).toBe("Admin");
+  });
+
+  it("names the dev gallery only where it exists", () => {
+    // Vitest runs as a dev build; a production build has no /dev routes, so
+    // no title for one either.
+    expect(import.meta.env.DEV).toBe(true);
+    expect(pageTitle("/dev/charts")).toBe("Charts");
   });
 
   it("prefers the exact nav match over the prefix rule", () => {

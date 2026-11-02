@@ -191,21 +191,113 @@ export function serverLinesSignature(rows, stageGoalRows = []) {
 }
 
 /**
+ * The same signature for the draft being edited — what `serverLinesSignature`
+ * will read once this draft is saved. Built from the save payload itself, so
+ * whatever a save normalises (a blank label sent as "Untitled", stray spaces,
+ * the position within a section becoming `sortOrder`) normalises here too,
+ * and a draft compares equal to the server copy it was loaded from or saved
+ * as. That equality is what `dirty` is.
+ *
  * @param {DraftLine[]} lines
  * @param {DraftStageGoals} [stageGoals]
  */
 export function draftLinesSignature(lines, stageGoals = {}) {
-  return JSON.stringify([
-    lines.map((l) => [
-      l.stage,
-      l.label,
-      l.basis,
-      textToLineValue(l.basis, l.valueText),
-      textToGoalPct(l.goalPctText),
-      l.accountId,
-    ]),
-    draftStageGoalsToPayload(stageGoals).map((g) => [g.stage, g.goalPct]),
-  ]);
+  return serverLinesSignature(draftLinesToPayload(lines), draftStageGoalsToPayload(stageGoals));
+}
+
+// The API's own limits on a line (packages/schema/src/zod/allocation.js), so a
+// draft that breaks one is caught here and marked on its row rather than sent
+// and refused — which used to 400 the WHOLE autosave, with nothing on screen
+// saying which line was the problem.
+const LABEL_MAX = 160;
+const VALUE_MAX = 99_999_999;
+
+/** @param {Basis} basis */
+function basisNeedsValue(basis) {
+  return basis === "pct_of_gross" || basis === "pct_of_remaining" || basis === "fixed_amount" || basis === "sweep";
+}
+
+/**
+ * Why this line can't be saved yet, or null when it can. Mirrors the API's
+ * checks (`basisValueError` and the line schema), worded for the row it is
+ * shown under. A line part-way through being typed is the usual case — a new
+ * row with no value yet, or "150" on its way to "15" — so these read as
+ * "finish this", not as a fault. `field` says which control it is about, so
+ * the row can mark that one and not its neighbours.
+ *
+ * @typedef {{ field: "label" | "basis" | "value" | "goal" | "destination", message: string }} LineProblem
+ *
+ * @param {DraftLine} line
+ * @returns {LineProblem | null}
+ */
+export function draftLineProblem(line) {
+  if (line.label.trim().length > LABEL_MAX) {
+    return { field: "label", message: `The name can be at most ${LABEL_MAX} characters.` };
+  }
+  if (line.accountId === "") return { field: "destination", message: "Choose where this goes." };
+
+  if (basisNeedsValue(line.basis)) {
+    const value = textToLineValue(line.basis, line.valueText);
+    if (value === null) {
+      return {
+        field: "value",
+        message: line.valueText.trim() === "" ? "Needs a value." : "The value isn't a number.",
+      };
+    }
+    if (value < 0) return { field: "value", message: "The value can't be negative." };
+    if ((line.basis === "pct_of_gross" || line.basis === "pct_of_remaining") && value > 100) {
+      return { field: "value", message: "A percentage — 100 is the most it can be." };
+    }
+    if (value > VALUE_MAX) return { field: "value", message: "The value is too large." };
+  }
+
+  if (line.goalPctText.trim() !== "") {
+    const goal = textToGoalPct(line.goalPctText);
+    if (goal === null) return { field: "goal", message: "The goal isn't a number." };
+    if (goal < 0 || goal > 100) return { field: "goal", message: "The goal is a percentage — between 0 and 100." };
+  }
+  return null;
+}
+
+/**
+ * Every reason the draft can't be saved as it stands: per line, per section
+ * goal, and the one rule that spans lines (a second line drawing the same
+ * injected total — the API refuses it, because it would deduct that total
+ * twice). Empty maps mean the draft can be sent.
+ *
+ * @param {DraftLine[]} lines
+ * @param {DraftStageGoals} stageGoals
+ */
+export function draftProblems(lines, stageGoals) {
+  /** @type {Map<string, LineProblem>} */
+  const byLine = new Map();
+  for (const line of lines) {
+    const problem = draftLineProblem(line);
+    if (problem) byLine.set(line.id, problem);
+  }
+  for (const basis of /** @type {const} */ (["from_fixed_costs", "from_variable_essentials"])) {
+    const drawing = lines.filter((l) => l.basis === basis);
+    // The first keeps the total; every later one is the duplicate.
+    for (const line of drawing.slice(1)) {
+      if (!byLine.has(line.id)) {
+        byLine.set(line.id, {
+          field: "basis",
+          message: `Only one line can take the ${basis === "from_fixed_costs" ? "fixed-cost" : "essentials"} total — it's the whole total, not a share.`,
+        });
+      }
+    }
+  }
+
+  /** @type {Map<number, string>} */
+  const byStage = new Map();
+  for (const [stage, text] of Object.entries(stageGoals)) {
+    if (text.trim() === "") continue;
+    const goal = textToGoalPct(text);
+    if (goal === null) byStage.set(Number(stage), "The goal isn't a number.");
+    else if (goal < 0 || goal > 100) byStage.set(Number(stage), "The goal is a percentage — between 0 and 100.");
+  }
+
+  return { byLine, byStage, count: byLine.size + byStage.size };
 }
 
 /**
@@ -244,6 +336,21 @@ const HISTORY_LIMIT = 100;
  * nowhere else: undo never round-trips to the server (phases/08-allocation.md
  * "Undo / redo"), it just replays a previous `lines` array. Autosave is a
  * separate concern — the page debounces a PUT off `dirty`.
+ *
+ * `dirty` is derived, never set: it is "this draft's signature differs from
+ * `savedSignature`" (see the subscription below the store). It used to be a
+ * flag every edit set and every save cleared, and both halves lost work:
+ *
+ * - A save clearing it unconditionally dropped whatever was typed while that
+ *   save was in flight — the edit was on screen, `dirty` said it wasn't, and
+ *   nothing ever sent it.
+ * - An undo after a save restored older lines without setting it, so the
+ *   draft looked saved, autosave never ran, and Apply promoted the lines the
+ *   operator had just undone.
+ *
+ * Comparing signatures makes both impossible: a save marks saved exactly the
+ * signature it SENT, and any state that differs from that — however it came
+ * about — is dirty.
  */
 export const useAllocationDraft = create(
   temporal(
@@ -252,9 +359,11 @@ export const useAllocationDraft = create(
      *   lines: DraftLine[],
      *   stageGoals: DraftStageGoals,
      *   dirty: boolean,
-     *   load: (versionId: string, rows: Parameters<typeof serverLineToDraft>[0][], stageGoalRows?: { stage: number, goalPct: number }[]) => void,
+     *   savedSignature: string | null,
+     *   serverSignature: string | null,
+     *   load: (versionId: string, rows: (Parameters<typeof serverLineToDraft>[0] & { sortOrder: number })[], stageGoalRows?: { stage: number, goalPct: number }[]) => void,
      *   reset: () => void,
-     *   markSaved: () => void,
+     *   markSaved: (sentSignature: string, serverSignature?: string) => void,
      *   updateLine: (id: string, patch: Partial<DraftLine>) => void,
      *   setStageGoal: (stage: number, text: string) => void,
      *   addLine: (stage: number, accountId: string) => void,
@@ -263,39 +372,75 @@ export const useAllocationDraft = create(
      *   moveLineBefore: (id: string, targetId: string) => void,
      *   setLineStage: (id: string, stage: number) => void,
      * }} */
-    (set) => ({
+    (set, get) => ({
       versionId: null,
       /** @type {DraftLine[]} */
       lines: [],
       /** @type {DraftStageGoals} */
       stageGoals: {},
       dirty: false,
+      // What the server holds for this draft as far as this browser knows:
+      // the signature loaded, or the one each save SENT. `dirty` is the draft
+      // differing from it. Kept HERE, with `serverSignature` below, not in
+      // the page, so both outlive the page: a component ref
+      // started over at null on every visit, which made the page re-adopt
+      // the cached preview each time — new line ids, so every row remounted
+      // — and that cache could be older than this browser's own last
+      // autosave (.claude/plans/perf-inp-plan.md, P2 #1).
+      /** @type {string | null} */
+      savedSignature: null,
+      // The same record as the server itself wrote it back, which is what a
+      // refetched preview will show. Usually identical to `savedSignature`;
+      // it differs only when the database rounds what was sent (a goal of
+      // 12.345% is stored as 12.35). The page compares refetches against
+      // THIS, so our own rounded save isn't mistaken for the other session's
+      // edit and reloaded over the operator's undo history.
+      /** @type {string | null} */
+      serverSignature: null,
 
       load: (versionId, rows, stageGoalRows = []) => {
+        const signature = serverLinesSignature(rows, stageGoalRows);
         set({
           versionId,
-          lines: rows.map(serverLineToDraft),
+          // In the order the server means them — section, then position — so
+          // the editor shows that order and the draft's own signature (which
+          // reads position from the array) agrees with the server's.
+          lines: [...rows].sort((a, b) => a.stage - b.stage || a.sortOrder - b.sortOrder).map(serverLineToDraft),
           stageGoals: serverStageGoalsToDraft(stageGoalRows),
           dirty: false,
+          savedSignature: signature,
+          serverSignature: signature,
         });
         useAllocationDraft.temporal.getState().clear();
       },
 
       reset: () => {
-        set({ versionId: null, lines: [], stageGoals: {}, dirty: false });
+        // Already empty: leave it be. The read-only page calls this on every
+        // visit, and a fresh `lines: []` re-rendered everything subscribed
+        // to the lines for nothing.
+        const state = get();
+        if (state.versionId === null && state.lines.length === 0 && !state.dirty && state.savedSignature === null) return;
+        set({ versionId: null, lines: [], stageGoals: {}, dirty: false, savedSignature: null, serverSignature: null });
         useAllocationDraft.temporal.getState().clear();
       },
 
-      markSaved: () => set({ dirty: false }),
+      // `sentSignature` is the draft's signature at the moment the save was
+      // SENT, not now: anything typed while it was in flight still differs
+      // from it, so the draft stays dirty and the next autosave sends it.
+      // Comparing against what was sent — not what came back — is also what
+      // stops a rounded value from looking unsaved forever and autosaving in
+      // a loop.
+      markSaved: (sentSignature, serverSignature = sentSignature) =>
+        set({ savedSignature: sentSignature, serverSignature }),
 
+      // Every edit below only changes the lines or the goals; `dirty` follows
+      // from them (see the subscription after the store).
       updateLine: (id, patch) =>
         set((state) => ({
           lines: state.lines.map((line) => (line.id === id ? { ...line, ...patch } : line)),
-          dirty: true,
         })),
 
-      setStageGoal: (stage, text) =>
-        set((state) => ({ stageGoals: { ...state.stageGoals, [stage]: text }, dirty: true })),
+      setStageGoal: (stage, text) => set((state) => ({ stageGoals: { ...state.stageGoals, [stage]: text } })),
 
       addLine: (stage, accountId) =>
         set((state) => {
@@ -317,11 +462,10 @@ export const useAllocationDraft = create(
           };
           const next = [...state.lines];
           next.splice(lastIndexInStage + 1, 0, line);
-          return { lines: next, dirty: true };
+          return { lines: next };
         }),
 
-      removeLine: (id) =>
-        set((state) => ({ lines: state.lines.filter((line) => line.id !== id), dirty: true })),
+      removeLine: (id) => set((state) => ({ lines: state.lines.filter((line) => line.id !== id) })),
 
       moveLine: (id, direction) =>
         set((state) => {
@@ -339,7 +483,7 @@ export const useAllocationDraft = create(
           const next = [...state.lines];
           next[index] = target;
           next[targetIndex] = line;
-          return { lines: next, dirty: true };
+          return { lines: next };
         }),
 
       moveLineBefore: (id, targetId) =>
@@ -355,7 +499,7 @@ export const useAllocationDraft = create(
           // one gesture, and the row lands exactly where it was dropped.
           const moved = { ...line, stage: target.stage };
           const next = [...without.slice(0, to), moved, ...without.slice(to)];
-          return { lines: next, dirty: true };
+          return { lines: next };
         }),
 
       setLineStage: (id, stage) =>
@@ -366,20 +510,53 @@ export const useAllocationDraft = create(
           const lastIndexInStage = without.reduce((last, l, i) => (l.stage === stage ? i : last), -1);
           const next = [...without];
           next.splice(lastIndexInStage + 1, 0, { ...line, stage });
-          return { lines: next, dirty: true };
+          return { lines: next };
         }),
 
     }),
     {
-      // The lines and the section goals are undoable; `dirty` and `versionId`
-      // are bookkeeping, and an undo that also un-dirtied the draft would skip
-      // the autosave that has to follow it.
+      // The lines and the section goals are undoable; `dirty`, `versionId`
+      // and `savedSignature` are bookkeeping.
       partialize: (state) => ({ lines: state.lines, stageGoals: state.stageGoals }),
+      // ...and a set that touches only bookkeeping records nothing. Without
+      // this every autosave's `markSaved` pushed a copy of the current lines
+      // onto the undo stack and cleared redo: one press of Undo after a save
+      // did nothing visible, and the undo counter crept up on its own.
+      equality: (past, current) => past.lines === current.lines && past.stageGoals === current.stageGoals,
       limit: HISTORY_LIMIT,
       handleSet: (handleSet) => throttleLeading(handleSet, HISTORY_THROTTLE_MS),
     },
   ),
 );
+
+/**
+ * Whether the draft differs from what the server was last known to hold.
+ *
+ * @param {{ versionId: string | null, lines: DraftLine[], stageGoals: DraftStageGoals, savedSignature: string | null }} state
+ */
+function isDirty(state) {
+  if (state.versionId === null || state.savedSignature === null) return false;
+  return draftLinesSignature(state.lines, state.stageGoals) !== state.savedSignature;
+}
+
+// `dirty`, kept in step with the lines, the goals and the saved signature —
+// whatever changed them. A subscription rather than a line in each action,
+// because undo and redo don't go through the actions: zundo writes the past
+// lines straight into the store, and an undo back past a save is exactly the
+// change that has to make the draft dirty again. The `setState` here touches
+// only `dirty`, so it records no history and does not re-trigger itself.
+useAllocationDraft.subscribe((state, previous) => {
+  if (
+    state.lines === previous.lines &&
+    state.stageGoals === previous.stageGoals &&
+    state.savedSignature === previous.savedSignature &&
+    state.versionId === previous.versionId
+  ) {
+    return;
+  }
+  const dirty = isDirty(state);
+  if (dirty !== state.dirty) useAllocationDraft.setState({ dirty });
+});
 
 /** The temporal (undo/redo) store behind `useAllocationDraft`. */
 export const allocationDraftHistory = useAllocationDraft.temporal;

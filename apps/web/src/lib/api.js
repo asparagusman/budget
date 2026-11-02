@@ -1,4 +1,5 @@
 import { hc } from "hono/client";
+import { notifySessionExpired, withSessionExpiry } from "@/lib/session-expiry.js";
 
 /** @import { ApiRoutes } from "@budget/api" */
 
@@ -24,6 +25,16 @@ if (!apiUrl) {
 // web and api are on different ports in dev (different origins, same site;
 // see apps/api/src/index.js's CORS setup) and share one origin in
 // production, where this is a no-op.
+//
+// `fetch` is wrapped so a 401 from any non-/auth request — a session that
+// expired or was revoked while this tab sat open — sends the operator to
+// /login once, rather than every screen rendering its errors (see
+// session-expiry.js; main.jsx registers what happens).
 export const api = /** @type {ReturnType<typeof hc<ApiRoutes>>} */ (
-  /** @type {unknown} */ (hc(apiUrl, { init: { credentials: "include" } }))
+  /** @type {unknown} */ (
+    hc(apiUrl, {
+      init: { credentials: "include" },
+      fetch: withSessionExpiry({ apiBase: apiUrl, onUnauthorized: notifySessionExpired }),
+    })
+  )
 );

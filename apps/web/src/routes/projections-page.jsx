@@ -31,14 +31,16 @@ import { Money } from "@/components/money.jsx";
 import { NoticeList } from "@/components/notice.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
 import { PageSection } from "@/components/page-section.jsx";
+import { QueryError } from "@/components/query-error.jsx";
 import { QuickBalanceSheet } from "@/components/quick-balance-sheet.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
 import { registerCommands } from "@/lib/commands.js";
-import { formatIsoDate, todayIso } from "@/lib/dates.js";
+import { formatIsoDate } from "@/lib/dates.js";
 import { colorFor, entityColors } from "@/lib/entity-colors.js";
 import { formatMoney } from "@/lib/format-money.js";
 import { useSettings } from "@/lib/settings.jsx";
+import { useTodayIso } from "@/lib/use-today.js";
 import { ScrollArea } from "@/components/scroll-area.jsx";
 
 /** @import { Cents } from "@budget/engine" */
@@ -67,7 +69,7 @@ import { ScrollArea } from "@/components/scroll-area.jsx";
  * @typedef {{
  *   window: { from: string, to: string },
  *   knownFrom: string | null,
- *   accounts: { id: string, name: string, type: string, points: { date: string, balanceCents: Cents, asAt: string | null }[] }[],
+ *   accounts: { id: string, name: string, type: string, archivedOn: string | null, points: { date: string, balanceCents: Cents, asAt: string | null }[] }[],
  *   totalPoints: { date: string, totalCents: Cents }[],
  * }} NetWorth
  */
@@ -296,12 +298,23 @@ function NetWorthPanel({ netWorth, loading, onUpdateBalance }) {
 
   // Before the first recorded balance every total is a zero that means
   // "unknown"; drawing it would put a cliff in the chart that never happened.
-  const points = netWorth.knownFrom
-    ? netWorth.totalPoints.filter((p) => p.date >= /** @type {string} */ (netWorth.knownFrom))
-    : [];
+  // Memoised: filtered fresh every render, it was a new array each time,
+  // which defeated the `rows` memo below and restarted the chart's entrance
+  // animation on every render of the page (perf-inp-plan.md, P1.5).
+  const points = useMemo(() => {
+    const knownFrom = netWorth.knownFrom;
+    return knownFrom ? netWorth.totalPoints.filter((p) => p.date >= knownFrom) : [];
+  }, [netWorth.totalPoints, netWorth.knownFrom]);
   const latest = points[points.length - 1] ?? null;
+  // The stalest balance among the accounts still held. An account archived
+  // inside the window reads `asAt: null` from its archive date on (the API
+  // ends it there), so its last recorded balance can't make today's figure
+  // look out of date.
   const oldestAsAt = netWorth.accounts
-    .flatMap((a) => (a.points[a.points.length - 1]?.asAt ? [/** @type {string} */ (a.points[a.points.length - 1]?.asAt)] : []))
+    .flatMap((a) => {
+      const asAt = a.archivedOn === null ? a.points[a.points.length - 1]?.asAt : null;
+      return asAt ? [asAt] : [];
+    })
     .sort()[0];
 
   // A real time axis rather than one tick per recorded date: these dates are
@@ -355,14 +368,14 @@ function NetWorthPanel({ netWorth, loading, onUpdateBalance }) {
           empty={points.length < 2}
           height={220}
           ariaLabel={`Net worth over ${points.length} recorded dates${latest ? `, currently ${formatMoney(latest.totalCents, { currency, locale })}` : ""}.`}
-          dataTable={{
+          dataTable={() => ({
             caption: "Net worth at each recorded date",
             columns: ["Date", "Net worth"],
             rows: points.map((point) => [
               formatIsoDate(point.date, locale),
               formatMoney(point.totalCents, { currency, locale }),
             ]),
-          }}
+          })}
           emptyTitle="Not enough history yet"
           emptyDescription="Record a balance on two different dates to see net worth move."
           config={{ netWorth: { label: "Net worth", color: TOTAL } }}
@@ -403,16 +416,18 @@ export function ProjectionsPage() {
   const { currency, locale } = useSettings();
   const moneyTick = useMoneyTick();
   const motion = useChartMotion();
-  const today = useMemo(todayIso, []);
+  const today = useTodayIso();
   const [months, setMonths] = useState(/** @type {(typeof HORIZON_OPTIONS)[number]} */ ("60"));
   const [mobileHorizon, setMobileHorizon] = useState(12);
   const [savingId, setSavingId] = useState(/** @type {string | null} */ (null));
   const [balanceOpen, setBalanceOpen] = useState(false);
 
   const projectionsQuery = useQuery({
-    queryKey: ["projections", months],
+    queryKey: ["projections", months, today],
     queryFn: async () => {
-      const res = await api.projections.$get({ query: { months } });
+      // The browser's today: "now" on every series is counted from it, and
+      // the server's own clock can sit in another zone.
+      const res = await api.projections.$get({ query: { months, on: today } });
       if (!res.ok) throw new Error(await readApiError(res));
       return /** @type {Projections} */ (await res.json());
     },
@@ -487,6 +502,17 @@ export function ProjectionsPage() {
   const projections = projectionsQuery.data ?? null;
   const netWorth = netWorthQuery.data ?? null;
   const accounts = accountsQuery.data ?? [];
+
+  // The phone's "Show value at", kept to a horizon this projection actually
+  // has. Shortening Horizon to 12 months after choosing 24 left the cards
+  // reading a 24-month figure that no longer existed — $0.00 on every
+  // account. The choice itself is kept, so lengthening Horizon again brings
+  // it back.
+  const horizons = projections?.horizons ?? [];
+  const fittingHorizons = horizons.filter((h) => h <= mobileHorizon);
+  const shownHorizon = horizons.includes(mobileHorizon)
+    ? mobileHorizon
+    : (fittingHorizons[fittingHorizons.length - 1] ?? horizons[0] ?? mobileHorizon);
   // Every account, not just the projected ones, so each keeps the colour it
   // wears on every other chart.
   const accountColors = useMemo(
@@ -538,6 +564,12 @@ export function ProjectionsPage() {
           loading={netWorthQuery.isLoading}
           onUpdateBalance={() => setBalanceOpen(true)}
         />
+      ) : netWorthQuery.isError ? (
+        // The panel used to just not appear, which reads as "this page has
+        // no net worth section" rather than "it didn't load".
+        <PageSection title="Net worth">
+          <QueryError error={netWorthQuery.error} onRetry={() => netWorthQuery.refetch()} what="net worth history" />
+        </PageSection>
       ) : null}
 
       {projections?.warnings.length ? (
@@ -590,6 +622,10 @@ export function ProjectionsPage() {
       >
         {projectionsQuery.isLoading ? (
           <PanelSkeleton height={320} label="Loading projections" />
+        ) : projectionsQuery.isError ? (
+          // Not "Nothing to project yet", which sends the operator off to add
+          // accounts that already exist.
+          <QueryError error={projectionsQuery.error} onRetry={() => projectionsQuery.refetch()} what="projections" />
         ) : !projections || projections.accounts.length === 0 ? (
           <EmptyState
             icon={TrendingUpIcon}
@@ -608,7 +644,7 @@ export function ProjectionsPage() {
             <div className="md:hidden">
               <ProjectionCards
                 projections={projections}
-                horizon={mobileHorizon}
+                horizon={shownHorizon}
                 onHorizonChange={setMobileHorizon}
                 savingId={savingId}
                 onSaveRate={(accountId, annualGrowthRate) => saveRate.mutate({ accountId, annualGrowthRate })}
@@ -623,14 +659,14 @@ export function ProjectionsPage() {
               <Chart
                 height={320}
                 ariaLabel={`Projected balance per account and in total, over ${projections?.totalSeries.length ?? 0} monthly steps.`}
-                dataTable={{
+                dataTable={() => ({
                   caption: "Projected total across all accounts, by month",
                   columns: ["Months from now", "Projected total"],
                   rows: (projections?.totalSeries ?? []).map((point) => [
                     point.month === 0 ? "now" : `${point.month}`,
                     formatMoney(point.projectedCents, { currency, locale }),
                   ]),
-                }}
+                })}
                 config={chartConfig}
               >
                 <LineChart data={chartRows} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>

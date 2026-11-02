@@ -16,6 +16,44 @@ export async function readApiError(res) {
 }
 
 /**
+ * An error response, keeping what `readApiError` throws away: the status and
+ * the API's machine-readable `code`. For the few callers that act on WHICH
+ * error it was — an autosave deciding whether retrying can help, a page
+ * telling "no income-landing account yet" from a failed request — rather than
+ * only showing the message.
+ */
+export class ApiError extends Error {
+  /**
+   * @param {string} message
+   * @param {{ status: number, code: string | null }} details
+   */
+  constructor(message, { status, code }) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+/**
+ * `readApiError`, as an `ApiError` carrying the status and code.
+ *
+ * @param {Response} res
+ */
+export async function apiErrorFrom(res) {
+  try {
+    const body = await res.json();
+    const code = body?.error?.code;
+    return new ApiError(body?.error?.message || "Something went wrong.", {
+      status: res.status,
+      code: typeof code === "string" ? code : null,
+    });
+  } catch {
+    return new ApiError("Something went wrong.", { status: res.status, code: null });
+  }
+}
+
+/**
  * The API could not be reached at all — `fetch` rejected instead of
  * resolving, so there is no status and no body. In dev that is nearly always
  * the api dev server being down; in production it is the network.

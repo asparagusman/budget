@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { formatMoney, formatMoneySpoken } from "./format-money.js";
 
 // The only place in the app that turns cents into text. Everything visible on
@@ -32,9 +32,31 @@ describe("formatMoney", () => {
     expect(formatMoney(125_000_00, AUD)).toBe("$125,000.00");
   });
 
+  it("rounds to the dollar only when asked", () => {
+    expect(formatMoney(600_000_00, { ...AUD, whole: true })).toBe("$600,000");
+    expect(formatMoney(322_088, { ...AUD, whole: true })).toBe("$3,221");
+    expect(formatMoney(-30_548, { ...AUD, whole: true, signed: true })).toBe("-$305");
+  });
+
   it("follows the currency and locale the operator set, not a hardcoded dollar", () => {
     expect(formatMoney(387_733, { currency: "EUR", locale: "de-DE" })).toContain("€");
     expect(formatMoney(387_733, { currency: "USD", locale: "en-US" })).toBe("$3,877.33");
+  });
+
+  it("builds one formatter per set of options and reuses it", () => {
+    // A page renders hundreds of <Money>; constructing a formatter per call
+    // was ~50x the cost of formatting with one (perf-inp-plan.md, P1.1).
+    // NZD/en-NZ appears nowhere else in this file, so the first call misses.
+    const construct = vi.spyOn(Intl, "NumberFormat");
+    const NZD = { currency: "NZD", locale: "en-NZ" };
+
+    for (let cents = 0; cents < 50; cents++) formatMoney(cents, NZD);
+    expect(construct).toHaveBeenCalledTimes(1);
+
+    // A different flag is a different formatter, built once in turn.
+    formatMoney(100, { ...NZD, signed: true });
+    formatMoney(200, { ...NZD, signed: true });
+    expect(construct).toHaveBeenCalledTimes(2);
   });
 });
 

@@ -3,11 +3,10 @@ import { AppShell } from "@/components/shell/app-shell.jsx";
 import { CommandPalette } from "@/components/command-palette.jsx";
 import { AuthLayout } from "@/components/shell/auth-layout.jsx";
 import { ErrorScreen } from "@/components/error-screen.jsx";
-import { PlaceholderPage } from "@/routes/placeholder-page.jsx";
 import { LoginPage } from "@/routes/login-page.jsx";
 import { InvitePage } from "@/routes/invite-page.jsx";
 import { RecoveryPage } from "@/routes/recovery-page.jsx";
-import { NAV_ITEMS } from "@/lib/nav.js";
+import { NotFoundPage } from "@/routes/not-found-page.jsx";
 import { ensureAuthState, invalidateAuthState } from "@/lib/auth.jsx";
 
 // Every authenticated page is code-split. Route-level splitting is the whole
@@ -96,18 +95,9 @@ const appLayoutRoute = createRoute({
   },
 });
 
-// One route per NAV_ITEMS entry — a code-based route tree, not file-based
-// codegen, since that would emit a generated .ts route tree and this repo
-// has no .ts files. Every route renders the same placeholder until its own
-// phase fills it in; see the phase order table in the phase README.
-const BUILT_PATHS = ["/", "/admin/users", "/accounts", "/income", "/costs/fixed", "/costs/variable", "/calendar", "/allocation", "/goals", "/projections"];
-const navRoutes = NAV_ITEMS.filter((item) => !BUILT_PATHS.includes(item.to)).map((item) =>
-  createRoute({
-    getParentRoute: () => appLayoutRoute,
-    path: item.to,
-    component: () => <PlaceholderPage item={item} />,
-  }),
-);
+// A code-based route tree, not file-based codegen, since that would emit a
+// generated .ts route tree and this repo has no .ts files. Every NAV_ITEMS
+// entry has its own route below.
 
 // The landing screen. `on` is a lens over which pay cycle is being reported,
 // not a stored fact — a URL search param so a view is shareable and survives a
@@ -140,6 +130,17 @@ const adminRoutes = ADMIN_TAB_PATHS.map((tab) =>
     component: page(() => import("@/routes/admin-page.jsx"), "AdminPage"),
   }),
 );
+
+// "/admin" itself has no screen — the nav entry points at its first tab — but
+// it is the obvious URL to type, so it lands there rather than on not-found.
+const adminIndexRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/admin",
+  beforeLoad: () => {
+    throw redirect({ to: "/admin/users", replace: true });
+  },
+  component: () => null,
+});
 
 // The page was /settings/* for phases 03–04 and every one of its tabs was a
 // linkable URL, so a bookmark or a pasted link to one is a real thing that
@@ -207,6 +208,14 @@ const goalsRoute = createRoute({
   component: page(() => import("@/routes/goals-page.jsx"), "GoalsPage"),
 });
 
+// The second Goals tab (see components/goals-tabs.jsx). Its own chunk, so
+// reading a goal doesn't download the house calculator.
+const goalsHouseRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/goals/house",
+  component: page(() => import("@/routes/house-page.jsx"), "HousePage"),
+});
+
 const projectionsRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/projections",
@@ -229,12 +238,30 @@ const calendarRoute = createRoute({
   component: page(() => import("@/routes/calendar-page.jsx"), "CalendarPage"),
 });
 
-// Hidden dev route — deliberately not in NAV_ITEMS, so it never appears in
-// the sidebar, the mobile menu or the command palette.
-const devChartsRoute = createRoute({
+// Hidden dev routes — deliberately not in NAV_ITEMS, so they never appear in
+// the sidebar, the mobile menu or the command palette — and not in a
+// production build at all. `import.meta.env.DEV` is a literal `false` there,
+// so the whole branch, and the lazy import of its page with it, is dropped
+// rather than shipped as an unlisted URL full of fabricated figures.
+const devRoutes = import.meta.env.DEV
+  ? [
+      createRoute({
+        getParentRoute: () => appLayoutRoute,
+        path: "/dev/charts",
+        component: page(() => import("@/routes/dev-charts-page.jsx"), "DevChartsPage"),
+      }),
+    ]
+  : [];
+
+// Any address nothing above matches. A splat route inside the shell rather
+// than the router's `notFoundComponent`, so it renders with the sidebar and
+// the menu (a way out) and behind the same sign-in guard as everything else.
+// Specificity ranks every real path — /login and /invite/$code included —
+// above it.
+const notFoundRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
-  path: "/dev/charts",
-  component: page(() => import("@/routes/dev-charts-page.jsx"), "DevChartsPage"),
+  path: "$",
+  component: NotFoundPage,
 });
 
 // The unauthenticated section — no sidebar, no nav, just a centred card
@@ -282,8 +309,8 @@ const inviteRoute = createRoute({
 
 const routeTree = rootRoute.addChildren([
   appLayoutRoute.addChildren([
-    ...navRoutes,
     ...adminRoutes,
+    adminIndexRoute,
     ...settingsRedirectRoutes,
     dashboardRoute,
     accountsRoute,
@@ -292,11 +319,13 @@ const routeTree = rootRoute.addChildren([
     variableCostsRoute,
     allocationRoute,
     goalsRoute,
+    goalsHouseRoute,
     projectionsRoute,
     billHistoryRoute,
     calendarRoute,
     importRoute,
-    devChartsRoute,
+    ...devRoutes,
+    notFoundRoute,
   ]),
   authLayoutRoute.addChildren([loginRoute, inviteRoute, recoveryRoute]),
 ]);

@@ -216,7 +216,7 @@ const LEFTOVER_STAGE = mustFind(ALLOCATION_SECTIONS, (s) => s.key === "leftover"
  *   transfers: Transfer[],
  *   unallocatedPerMonthCents: Cents,
  *   goodLifeFidelityCents: Cents,
- *   overAllocation?: OverAllocation | null
+ *   overAllocation: OverAllocation | null
  * }} AllocationResult
  *
  * - `stages` is the ONE grouping of the resolved lines. A parallel `categories`
@@ -226,10 +226,9 @@ const LEFTOVER_STAGE = mustFind(ALLOCATION_SECTIONS, (s) => s.key === "leftover"
  * - `goodLifeFidelityCents` — nonEssential − the Leftover pool (what is left
  *   entering section C, or after the last stage when there is no section C);
  *   positive = short of aspiration
- * - `overAllocation` — null when the plan fits inside gross. `computeAllocation`
- *   always sets it. Optional in this type only because the web dashboard
- *   rebuilds an `AllocationResult` field by field and does not pass it yet;
- *   make it required once it does.
+ * - `overAllocation` — null when the plan fits inside gross. Required, so any
+ *   code that rebuilds an `AllocationResult` by hand (the web dashboard does)
+ *   can't silently drop it and lose the over-allocation warning.
  */
 
 /**

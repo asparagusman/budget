@@ -20,11 +20,16 @@ export function createBillInstancesRoutes({ db }) {
     // longer lines up with the bill's current schedule (phases/
     // 06-fixed-costs.md "Instance storage" — the read path every screen in
     // this phase shares).
+    //
+    // `billId` narrows it to one bill and `orphansOnly` to the orphaned rows
+    // — still found by projecting the bill, since an orphan is defined by
+    // what the schedule no longer produces.
     .get("/", zValidator("query", listBillInstancesQuerySchema, handleValidation), async (c) => {
-      const window = c.req.valid("query");
+      const { billId, orphansOnly, ...window } = c.req.valid("query");
 
       const activeBills = await db.query.bills.findMany({
-        where: (b, { isNull: isNullCol }) => isNullCol(b.archivedAt),
+        where: (b, { and, eq: eqCol, isNull: isNullCol }) =>
+          billId ? and(isNullCol(b.archivedAt), eqCol(b.id, billId)) : isNullCol(b.archivedAt),
       });
       const { factorsByBill, stepChangesByBill, historyByBill } = await loadBillModifiers(
         db,
@@ -35,7 +40,7 @@ export function createBillInstancesRoutes({ db }) {
         const engineBill = toEngineBill(bill, factorsByBill.get(bill.id) ?? [], stepChangesByBill.get(bill.id) ?? []);
         const history = historyByBill.get(bill.id) ?? [];
         const { instances, orphans } = projectBillInWindow(engineBill, history, window);
-        return [...instances, ...orphans];
+        return orphansOnly === "true" ? orphans : [...instances, ...orphans];
       });
       merged.sort((a, b) => (a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : 0));
 

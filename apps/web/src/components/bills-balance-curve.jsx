@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toCents } from "@budget/engine";
 import { ChevronDownIcon, ChevronRightIcon } from "lucide-react";
 import { toast } from "sonner";
-import { Area, CartesianGrid, ComposedChart, Scatter, XAxis, YAxis } from "recharts";
+import { Area, CartesianGrid, ComposedChart, ReferenceLine, XAxis, YAxis } from "recharts";
 import { Button } from "@/components/ui/button.jsx";
 import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/components/ui/input-group.jsx";
 import {
@@ -43,9 +43,9 @@ import { useSettings } from "@/lib/settings.jsx";
  * `YYYY-MM-DD`, which parses as UTC — that shifts every point by the
  * timezone offset and can move a bill onto the wrong day.
  *
- * `bill` is the balance again, present only on the days a bill actually
- * falls, so the marker series carries its own x rather than being padded
- * with nulls to share the line's index.
+ * `event` rides along so the tooltip can say what moved the balance — a
+ * separate marker series for bills put the timestamp itself into the tooltip
+ * as a "t $1,803,733,200,000.00" row and repeated the balance beside it.
  *
  * @param {{ date: string, balanceCents: Cents, event: "payday" | "bill" }[]} points
  * @param {string} locale
@@ -55,7 +55,7 @@ function balanceCurveRows(points, locale) {
     t: isoToMs(point.date),
     label: formatIsoDate(point.date, locale),
     balance: point.balanceCents / 100,
-    bill: point.event === "bill" ? point.balanceCents / 100 : null,
+    event: point.event === "bill" ? "Bill due" : "Payday",
   }));
 }
 
@@ -94,7 +94,7 @@ export function BillsBalanceCurve({ window }) {
         },
       });
       if (!res.ok) throw new Error(await readApiError(res));
-      return /** @type {{ points: { date: string, balanceCents: Cents, event: "payday" | "bill" }[], requiredOpeningBalanceCents: Cents, openingBalanceCents: Cents, savedOpeningBalance: SavedOpeningBalance }} */ (
+      return /** @type {{ points: { date: string, balanceCents: Cents, event: "payday" | "bill" }[], requiredOpeningBalanceCents: Cents, bufferCents: Cents, withdrawableCents: Cents, openingBalanceCents: Cents, savedOpeningBalance: SavedOpeningBalance }} */ (
         await res.json()
       );
     },
@@ -126,13 +126,24 @@ export function BillsBalanceCurve({ window }) {
   const openingCents = toCents(Number(openingDollars) || 0);
   const isDirty = whatIfDollars !== null && saved !== null && openingCents !== saved.openingBalanceCents;
 
-  const points = curveQuery.data?.points ?? [];
+  // Memoised so the chart's rows keep their identity across unrelated
+  // renders: Recharts restarts its entrance animation whenever its data is a
+  // new array, and this panel re-renders with every keystroke in the
+  // fixed-costs editor above it (perf-inp-plan.md, P1.5).
+  const points = useMemo(() => curveQuery.data?.points ?? [], [curveQuery.data]);
   const lowest = points.reduce(
     /** @param {typeof points[number] | null} min */ (min, p) => (min === null || p.balanceCents < min.balanceCents ? p : min),
     null,
   );
 
-  const curveRows = balanceCurveRows(points, locale);
+  // How much the operator could take out today. The curve is already drawn
+  // from the figure in the box, so this is "from here", and previewing it
+  // just types the reduced balance in as a what-if — nothing is saved.
+  const withdrawable = curveQuery.data?.withdrawableCents ?? 0;
+  const shortfall = curveQuery.data ? Math.max(0, curveQuery.data.requiredOpeningBalanceCents - curveQuery.data.openingBalanceCents) : 0;
+  const bufferCents = curveQuery.data?.bufferCents ?? 0;
+
+  const curveRows = useMemo(() => balanceCurveRows(points, locale), [points, locale]);
   const timeAxis = useTimeAxis(curveRows[0]?.t ?? 0, curveRows[curveRows.length - 1]?.t ?? 0);
 
   return (
@@ -189,6 +200,34 @@ export function BillsBalanceCurve({ window }) {
                   ? `From ${saved.accountName}${saved.asAt ? `, recorded ${formatIsoDate(saved.asAt, locale)}` : ""}. Type a figure to override it.`
                   : "No income-landing account balance recorded yet, so this starts from zero. Record one, or type a figure and save it."}
           </p>
+          {curveQuery.data ? (
+            <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-(--radius-control) bg-surface-muted px-4 py-3">
+              {withdrawable > 0 ? (
+                <>
+                  <p className="text-sm text-text-muted">
+                    You could take out <Money value={withdrawable} className="text-base font-semibold text-text" /> now and the account would still
+                    stay above its <Money value={bufferCents} className="font-medium text-text" /> buffer for the next twelve months.
+                  </p>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setWhatIfDollars(((curveQuery.data.openingBalanceCents - withdrawable) / 100).toFixed(2))}
+                  >
+                    Preview taking it out
+                  </Button>
+                </>
+              ) : shortfall > 0 ? (
+                <p className="text-sm text-text-muted">
+                  Nothing to take out — this account is <Money value={shortfall} className="font-medium text-text" /> short of staying above its{" "}
+                  <Money value={bufferCents} className="font-medium text-text" /> buffer.
+                </p>
+              ) : (
+                <p className="text-sm text-text-muted">
+                  No more to take out — the lowest point sits right on the <Money value={bufferCents} className="font-medium text-text" /> buffer.
+                </p>
+              )}
+            </div>
+          ) : null}
           <Chart
             loading={curveQuery.isLoading}
             empty={points.length === 0}
@@ -199,7 +238,7 @@ export function BillsBalanceCurve({ window }) {
                 ? `Projected bills-account balance across ${points.length} events, dipping lowest on ${formatIsoDate(lowest.date, locale)} at ${formatMoney(lowest.balanceCents, { currency, locale })}.`
                 : "Projected bills-account balance over time."
             }
-            dataTable={{
+            dataTable={() => ({
               caption: "Projected balance after each payday and bill",
               columns: ["Date", "Event", "Balance"],
               rows: points.map((point) => [
@@ -207,10 +246,9 @@ export function BillsBalanceCurve({ window }) {
                 point.event === "bill" ? "Bill due" : "Payday",
                 formatMoney(point.balanceCents, { currency, locale }),
               ]),
-            }}
+            })}
             config={{
               balance: { label: "Balance", color: TOTAL },
-              bill: { label: "Bill due", color: "var(--negative)" },
             }}
           >
             <ComposedChart data={curveRows} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
@@ -220,11 +258,30 @@ export function BillsBalanceCurve({ window }) {
                   long one labels years, so the gridlines mean something
                   different at every horizon. */}
               <XAxis dataKey="t" {...AXIS} {...TIME_AXIS} {...timeAxis} minTickGap={32} />
-              <YAxis {...AXIS} width={56} tickFormatter={moneyTick} />
-              <ChartTooltip content={<MoneyTooltip />} />
+              {/* Floor at zero but let a negative balance show: the default domain
+                  starts at 0 and would clip exactly the dips this chart
+                  exists to find. */}
+              <YAxis {...AXIS} width={56} tickFormatter={moneyTick} domain={[(/** @type {number} */ min) => Math.min(0, min), "auto"]} />
+              <ChartTooltip
+                content={
+                  <MoneyTooltip
+                    labelFormatter={(_value, payload) => {
+                      const row = payload?.[0]?.payload;
+                      return row ? `${row.label} · ${row.event}` : "";
+                    }}
+                  />
+                }
+              />
+              <ReferenceLine
+                y={bufferCents / 100}
+                stroke="var(--negative)"
+                strokeDasharray="2 4"
+                ifOverflow="extendDomain"
+                label={{ value: "Buffer", position: "insideTopLeft", fill: "var(--negative)", fontSize: 11 }}
+              />
               <Area
                 dataKey="balance"
-                type="monotone"
+                type="stepAfter"
                 stroke="var(--color-balance)"
                 fill="var(--color-balance)"
                 {...PROJECTED}
@@ -232,7 +289,6 @@ export function BillsBalanceCurve({ window }) {
                 dot={false}
                 {...motion}
               />
-              <Scatter dataKey="bill" fill="var(--color-bill)" shape="circle" {...motion} />
             </ComposedChart>
           </Chart>
           {curveQuery.data && lowest ? (

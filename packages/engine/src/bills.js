@@ -471,3 +471,24 @@ export function requiredOpeningBalanceCents(
   const deficit = Math.max(0, -minBalance);
   return deficit + bufferCents;
 }
+
+/**
+ * How much could be taken out of the account today without it ever dropping
+ * below `bufferCents` on the simulated path. A withdrawal now lowers every
+ * later balance by the same amount, so the room is the gap between the
+ * lowest balance the curve reaches (the opening balance counts — it is the
+ * balance until the first event) and the buffer. Never negative: when the
+ * account already dips under its buffer there is nothing to take, and
+ * `requiredOpeningBalanceCents` says how much is missing instead.
+ *
+ * @param {BalancePoint[]} points
+ * @param {Cents} openingBalanceCents
+ * @param {Cents} bufferCents
+ */
+export function withdrawableCents(points, openingBalanceCents, bufferCents) {
+  const lowest = points.reduce(
+    (min, p) => Math.min(min, p.balanceCents),
+    openingBalanceCents,
+  );
+  return Math.max(0, lowest - bufferCents);
+}

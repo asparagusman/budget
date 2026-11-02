@@ -21,8 +21,9 @@ import { CategoryGroup } from "@/components/fixed-costs-table.jsx";
 import { DataList, DataListRow } from "@/components/data-list.jsx";
 import { EmptyState } from "@/components/empty-state.jsx";
 import { Money } from "@/components/money.jsx";
-import { NoticeList } from "@/components/notice.jsx";
+import { Notice, NoticeList } from "@/components/notice.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
+import { QueryError } from "@/components/query-error.jsx";
 import { Stat, StatGroup } from "@/components/stat-tile.jsx";
 import { useConfirm } from "@/components/confirm-dialog.jsx";
 import { api } from "@/lib/api.js";
@@ -31,14 +32,16 @@ import { registerCommands } from "@/lib/commands.js";
 import { CADENCE_LABELS } from "@/lib/constants.js";
 import { todayIso } from "@/lib/dates.js";
 import {
+  applySavedBill,
   billToDraft,
   blankDraft,
   draftError,
   draftFigures,
   draftSignature,
-  draftToPayload,
+  dropDraft,
   historySpread,
   isBlankGhost,
+  saveBillDrafts,
 } from "@/lib/fixed-costs-draft.js";
 import { useSettings } from "@/lib/settings.jsx";
 import { useUnsavedGuard } from "@/lib/use-unsaved-guard.js";
@@ -261,16 +264,29 @@ export function FixedCostsPage() {
   const billsById = useMemo(() => new Map(bills.map((b) => [b.id, b])), [bills]);
 
   function invalidateBills() {
-    queryClient.invalidateQueries({ queryKey: ["bills"] });
-    queryClient.invalidateQueries({ queryKey: ["fixed-costs-summary"] });
-    queryClient.invalidateQueries({ queryKey: ["bill-instances"] });
-    queryClient.invalidateQueries({ queryKey: ["fixed-costs-balance-curve"] });
+    return Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["bills"] }),
+      queryClient.invalidateQueries({ queryKey: ["fixed-costs-summary"] }),
+      queryClient.invalidateQueries({ queryKey: ["bill-instances"] }),
+      queryClient.invalidateQueries({ queryKey: ["fixed-costs-balance-curve"] }),
+    ]);
   }
 
   // ---------------------------------------------------------------- edit mode
 
-  /** @param {string | null} focusCategoryId a category to open with a fresh ghost row */
+  /**
+   * Seeds the drafts from the saved bills — but only when not already
+   * editing. The palette's "Add bill" and "Edit bills" reach this mid-edit
+   * too, and re-seeding there threw away every unsaved change on the table.
+   * Already editing, "add" just appends a fresh row.
+   *
+   * @param {string | null} focusCategoryId a category to open with a fresh ghost row
+   */
   function beginEdit(focusCategoryId = null) {
+    if (editing) {
+      if (focusCategoryId) setDrafts((prev) => [...prev, blankDraft(focusCategoryId, incomeLandingId)]);
+      return;
+    }
     const seeded = bills.map(billToDraft);
     if (focusCategoryId) seeded.push(blankDraft(focusCategoryId, incomeLandingId));
     setDrafts(seeded);
@@ -479,59 +495,41 @@ export function FixedCostsPage() {
   });
 
   /**
-   * One Save for the whole table: create the ghosts that were filled in,
-   * patch the rows that changed, archive the rows that were struck out.
-   *
-   * Sequential rather than parallel, and it stops at the first failure — at
-   * household scale the round trips are cheap, and "row 4 was rejected" is
-   * information the operator can act on, where a handful of simultaneous
-   * rejections is not.
+   * One Save for the whole table — the sequence itself, and why a partial
+   * failure must record what already landed, is `saveBillDrafts`. Here each
+   * reported success is folded straight into the drafts on screen: a created
+   * row takes its new id, an archived row leaves the table. So a retry after
+   * "Internet was rejected" sends Internet and what came after it, never the
+   * rows that already made it.
    */
   const saveAll = useMutation({
-    mutationFn: async () => {
-      /** @type {DraftBill[]} */
-      const creates = [];
-      /** @type {DraftBill[]} */
-      const updates = [];
-      /** @type {DraftBill[]} */
-      const archives = [];
-
-      for (const draft of drafts) {
-        if (draft.billId === null) {
-          if (!isBlankGhost(draft)) creates.push(draft);
-          continue;
-        }
-        if (draft.removed) {
-          archives.push(draft);
-          continue;
-        }
-        const bill = billsById.get(draft.billId);
-        if (bill && draftSignature(draft) !== draftSignature(billToDraft(bill))) updates.push(draft);
-      }
-
-      /** @param {DraftBill} draft @param {Response} res */
-      const failing = async (draft, res) => new Error(`${draft.name || "New bill"}: ${await readApiError(res)}`);
-
-      for (const draft of creates) {
-        const res = await api.bills.$post({ json: draftToPayload(draft) });
-        if (!res.ok) throw await failing(draft, res);
-      }
-      for (const draft of updates) {
-        const res = await api.bills[":id"].$patch({
-          param: { id: /** @type {string} */ (draft.billId) },
-          json: draftToPayload(draft),
-        });
-        if (!res.ok) throw await failing(draft, res);
-      }
-      for (const draft of archives) {
-        const res = await api.bills[":id"].$delete({ param: { id: /** @type {string} */ (draft.billId) } });
-        if (!res.ok) throw await failing(draft, res);
-      }
-
-      return { created: creates.length, updated: updates.length, archived: archives.length };
-    },
+    mutationFn: () =>
+      saveBillDrafts(
+        drafts,
+        billsById,
+        {
+          create: async (payload) => {
+            const res = await api.bills.$post({ json: payload });
+            if (!res.ok) throw new Error(await readApiError(res));
+            return /** @type {Bill} */ ((await res.json()).bill);
+          },
+          update: async (id, payload) => {
+            const res = await api.bills[":id"].$patch({ param: { id }, json: payload });
+            if (!res.ok) throw new Error(await readApiError(res));
+            return /** @type {Bill} */ ((await res.json()).bill);
+          },
+          archive: async (id) => {
+            const res = await api.bills[":id"].$delete({ param: { id } });
+            if (!res.ok) throw new Error(await readApiError(res));
+          },
+        },
+        {
+          created: (sent, bill) => setDrafts((prev) => applySavedBill(prev, sent, bill)),
+          updated: (sent, bill) => setDrafts((prev) => applySavedBill(prev, sent, bill)),
+          archived: (sent) => setDrafts((prev) => dropDraft(prev, sent.key)),
+        },
+      ),
     onSuccess: ({ created, updated, archived }) => {
-      invalidateBills();
       leaveEdit();
       const parts = [
         created > 0 ? `${created} added` : null,
@@ -541,8 +539,11 @@ export function FixedCostsPage() {
       toast.success(parts.length > 0 ? `Bills saved — ${parts.join(", ")}.` : "Nothing changed.");
     },
     // Deliberately stays in edit mode with the drafts intact: whatever the
-    // server rejected is still on screen to fix.
+    // server rejected is still on screen to fix, and the error names it.
     onError: (/** @type {Error} */ err) => toast.error(err.message),
+    // Settled, not success: after a partial failure the rows that did land
+    // are real bills now, and the table has to show them as such.
+    onSettled: () => invalidateBills(),
   });
 
   async function handleSave() {
@@ -619,11 +620,16 @@ export function FixedCostsPage() {
           run: () => navigate({ to: "/calendar" }),
         },
       ]),
+    // `editing` is here so the commands' `beginEdit` sees the current mode —
+    // registered against a stale `false`, "Add bill" re-seeded mid-edit.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [bills, categories, navigate, incomeLandingId],
+    [bills, categories, navigate, incomeLandingId, editing],
   );
 
   const isLoading = categoriesQuery.isLoading || billsQuery.isLoading;
+  // Either failing would otherwise read as "No categories yet" / "No bills
+  // yet" — an invitation to re-enter bills that exist.
+  const loadError = categoriesQuery.error ?? billsQuery.error ?? null;
   const populatedCategories = editing
     ? categories
     : categories.filter((cat) => (rowsByCategory.get(cat.id) ?? []).length > 0);
@@ -675,7 +681,7 @@ export function FixedCostsPage() {
                 <TagIcon />
                 Categories
               </Button>
-              <Button onClick={() => beginEdit()} disabled={categories.length === 0}>
+              <Button onClick={() => beginEdit()} disabled={categories.length === 0 || loadError !== null}>
                 <PencilIcon />
                 Edit
               </Button>
@@ -684,7 +690,20 @@ export function FixedCostsPage() {
         }
       />
 
-      {!isLoading && categories.length === 0 ? (
+      {/* Kept on the page as well as toasted: a failed save leaves the table
+          in edit mode with one row to fix, and the toast that named it is
+          gone in a few seconds. */}
+      {editing && saveAll.error && !saveAll.isPending ? (
+        <Notice kind="error">{saveAll.error.message}</Notice>
+      ) : null}
+
+      {loadError ? (
+        <QueryError
+          error={loadError}
+          what="your bills"
+          onRetry={() => Promise.all([categoriesQuery.refetch(), billsQuery.refetch()])}
+        />
+      ) : !isLoading && categories.length === 0 ? (
         <EmptyState
           icon={TagIcon}
           title="No categories yet"
@@ -722,11 +741,22 @@ export function FixedCostsPage() {
         </StatGroup>
       ) : null}
 
+      {/* The rows print the summary's per-bill figures at rest, so without
+          it every amount on the table would read as $0. */}
+      {summaryQuery.error && !loadError ? (
+        <QueryError
+          compact
+          error={summaryQuery.error}
+          what="the bills' yearly and per-pay figures"
+          onRetry={() => summaryQuery.refetch()}
+        />
+      ) : null}
+
       {warnings.length > 0 ? (
         <NoticeList items={warnings.map((w, i) => ({ key: String(i), content: <p>{w.message}</p> }))} />
       ) : null}
 
-      {!isLoading && !editing && categories.length > 0 && bills.length === 0 ? (
+      {loadError ? null : !isLoading && !editing && categories.length > 0 && bills.length === 0 ? (
         <EmptyState
           icon={ReceiptIcon}
           title="No bills yet"
@@ -778,11 +808,29 @@ export function FixedCostsPage() {
         onRename={async (id, name) => {
           await renameCategory.mutateAsync({ id, name });
         }}
-        onArchive={(id) => archiveCategory.mutate(id)}
+        onArchive={async (id) => {
+          const name = categories.find((c) => c.id === id)?.name ?? "this category";
+          // The server refuses to archive a category that still holds bills;
+          // saying so here beats a confirmation whose "yes" then fails.
+          const holding = bills.filter((b) => b.categoryId === id).length;
+          if (holding > 0) {
+            toast.error(
+              `${name} still holds ${holding} bill${holding === 1 ? "" : "s"} — move or archive ${holding === 1 ? "it" : "them"} first.`,
+            );
+            return;
+          }
+          const ok = await confirm({
+            title: `Archive ${name}?`,
+            description: "It leaves the Fixed Costs table and can no longer be chosen for a bill.",
+            confirmLabel: "Archive",
+          });
+          if (ok) archiveCategory.mutate(id);
+        }}
       />
 
       <BillDetailSheet
         billId={detailBillId}
+        figures={detailBillId ? (serverFigures.get(detailBillId) ?? null) : null}
         onOpenChange={(open) => !open && setDetailBillId(null)}
         categories={categories}
         people={people}
@@ -795,6 +843,9 @@ export function FixedCostsPage() {
           });
           if (ok) {
             setDetailBillId(null);
+            // Mid-edit, its row would otherwise stay on the table pointing at
+            // a bill that no longer exists, and Save would trip over it.
+            setDrafts((prev) => prev.filter((d) => d.billId !== id));
             archiveBill.mutate(id);
           }
         }}

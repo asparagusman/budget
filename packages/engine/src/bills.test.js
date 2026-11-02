@@ -5,6 +5,7 @@ import {
   projectInstances,
   requiredOpeningBalanceCents,
   simulateBalance,
+  withdrawableCents,
   sumWindowFigures,
 } from "./bills.js";
 import { addDaysIso, countPaydays } from "./calendar.js";
@@ -553,5 +554,35 @@ describe("requiredOpeningBalanceCents", () => {
     ];
     const required = requiredOpeningBalanceCents(instances, toCents(100), ["2026-01-01"], toCents(50));
     expect(required).toBe(toCents(50));
+  });
+});
+
+describe("withdrawableCents", () => {
+  /** @type {BillInstance[]} */
+  const instances = [
+    { billId: "b", dueDate: "2026-01-05", expectedCents: toCents(200), actualCents: null, isOverride: false },
+  ];
+
+  it("is the gap between the lowest balance and the buffer", () => {
+    const points = simulateBalance(instances, toCents(100), ["2026-01-20"], toCents(500));
+    // Low point is 500 - 200 = 300; keeping a 50 buffer leaves 250 to take.
+    expect(withdrawableCents(points, toCents(500), toCents(50))).toBe(toCents(250));
+  });
+
+  it("taking exactly that amount leaves the low point on the buffer", () => {
+    const take = withdrawableCents(simulateBalance(instances, toCents(100), ["2026-01-20"], toCents(500)), toCents(500), toCents(50));
+    const after = simulateBalance(instances, toCents(100), ["2026-01-20"], toCents(500) - take);
+    expect(Math.min(...after.map((p) => p.balanceCents))).toBe(toCents(50));
+  });
+
+  it("counts the opening balance, which holds until the first event", () => {
+    const points = simulateBalance([], toCents(100), ["2026-01-20"], toCents(40));
+    // Every later balance is higher, but the account starts at 40.
+    expect(withdrawableCents(points, toCents(40), toCents(10))).toBe(toCents(30));
+  });
+
+  it("is zero, not negative, when the account already dips under its buffer", () => {
+    const points = simulateBalance(instances, toCents(100), ["2026-01-20"], toCents(210));
+    expect(withdrawableCents(points, toCents(210), toCents(50))).toBe(0);
   });
 });

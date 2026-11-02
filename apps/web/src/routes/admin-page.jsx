@@ -6,6 +6,7 @@ import {
   CopyIcon,
   FileSpreadsheetIcon,
   LogOutIcon,
+  MoreVerticalIcon,
   ShieldCheckIcon,
   SmartphoneIcon,
   TicketIcon,
@@ -22,25 +23,33 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog.jsx";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu.jsx";
 import { Input } from "@/components/ui/input.jsx";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs.jsx";
 import { DataList, DataListRow } from "@/components/data-list.jsx";
 import { EmptyState } from "@/components/empty-state.jsx";
+import { QueryError } from "@/components/query-error.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
 import { ReorderControls } from "@/components/reorder-controls.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
 import { useConfirm } from "@/components/confirm-dialog.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
-import { useAuth } from "@/lib/auth.jsx";
+import { passkeyRemovedMessage, useAuth, useSignOut } from "@/lib/auth.jsx";
 import { registerCommands } from "@/lib/commands.js";
 import { moveInList } from "@/lib/reorder.js";
 import { useSettings } from "@/lib/settings.jsx";
+import { getDateFormat } from "@/lib/dates.js";
 import { ScrollArea } from "@/components/scroll-area.jsx";
 
 /** @param {string} locale @param {string} iso */
 function formatDateTime(locale, iso) {
-  return new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" }).format(
+  return getDateFormat(locale, { dateStyle: "medium", timeStyle: "short" }).format(
     new Date(iso),
   );
 }
@@ -82,10 +91,36 @@ function ShareLinkDialog({ open, onOpenChange, title, description, link }) {
   );
 }
 
+/** @typedef {{ id: string, displayName: string, email: string | null, isActive: boolean, credentialCount: number }} AdminUser */
+
+/**
+ * What can be done to one member, as menu items for the phone and as the
+ * same actions as buttons on the desktop table — one list, so the two layouts
+ * can't offer different things. Deactivate never appears on your own row (the
+ * API refuses it: a lockout one click wide) and never on an inactive one.
+ *
+ * @param {{ user: AdminUser, isSelf: boolean }} args
+ */
+function userActions({ user, isSelf }) {
+  /** @type {{ key: "device" | "deactivate" | "reactivate", label: string }[]} */
+  const actions = [];
+  if (!user.isActive) {
+    actions.push({ key: "reactivate", label: "Reactivate" });
+    return actions;
+  }
+  actions.push({ key: "device", label: "Add a device" });
+  if (!isSelf) actions.push({ key: "deactivate", label: "Deactivate" });
+  return actions;
+}
+
 function UsersPanel() {
   const confirm = useConfirm();
+  const { state } = useAuth();
+  const myId = state?.user?.id ?? null;
   const queryClient = useQueryClient();
-  const [shareLink, setShareLink] = useState(/** @type {string | null} */ (null));
+  const [share, setShare] = useState(
+    /** @type {{ title: string, description: string, link: string } | null} */ (null),
+  );
 
   const usersQuery = useQuery({
     queryKey: ["users"],
@@ -96,15 +131,23 @@ function UsersPanel() {
     },
   });
 
-  const deactivateMutation = useMutation({
-    mutationFn: async (/** @type {string} */ id) => {
-      const res = await api.users[":id"].$patch({ param: { id }, json: { isActive: false } });
+  const setActiveMutation = useMutation({
+    mutationFn: async (/** @type {{ user: AdminUser, isActive: boolean }} */ { user, isActive }) => {
+      const res = await api.users[":id"].$patch({ param: { id: user.id }, json: { isActive } });
       if (!res.ok) throw new Error(await readApiError(res));
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: (_result, { user, isActive }) => {
       queryClient.invalidateQueries({ queryKey: ["users"] });
-      toast.success("User deactivated.");
+      // Deactivation ends their sessions and withdraws their unused invites
+      // server-side, so both lists are stale the moment this lands.
+      queryClient.invalidateQueries({ queryKey: ["invites"] });
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      toast.success(
+        isActive
+          ? `${user.displayName} can sign in again.`
+          : `${user.displayName} is deactivated and signed out everywhere.`,
+      );
     },
     onError: (err) => toast.error(err.message),
   });
@@ -116,12 +159,61 @@ function UsersPanel() {
       return (await res.json()).invite;
     },
     onSuccess: (invite) => {
-      setShareLink(`${window.location.origin}/invite/${invite.code}`);
+      setShare({
+        title: "Invite a user",
+        description: "Send this link to the person you're inviting. It works once, and expires in 24 hours.",
+        link: `${window.location.origin}/invite/${invite.code}`,
+      });
       queryClient.invalidateQueries({ queryKey: ["invites"] });
     },
     onError: (err) => toast.error(err.message),
   });
 
+  // A passkey for ANY active member, not just whoever is signed in: the
+  // person who lost their phone is usually not the one holding a working
+  // device. The API refuses a deactivated member (`inactive_user`), and its
+  // message is what the toast says.
+  const deviceInviteMutation = useMutation({
+    mutationFn: async (/** @type {AdminUser} */ user) => {
+      const res = await api.invites.$post({ json: { purpose: "new_device", targetUserId: user.id } });
+      if (!res.ok) throw new Error(await readApiError(res));
+      return (await res.json()).invite;
+    },
+    onSuccess: (invite, user) => {
+      const isSelf = user.id === myId;
+      setShare({
+        title: isSelf ? "Add a device" : `Add a device for ${user.displayName}`,
+        description: `Open this link on ${isSelf ? "the new device" : `${user.displayName}'s new device`} to register a passkey there. It works once, and expires in 24 hours.`,
+        link: `${window.location.origin}/invite/${invite.code}`,
+      });
+      queryClient.invalidateQueries({ queryKey: ["invites"] });
+    },
+    onError: (err) => toast.error(err.message),
+  });
+
+  /**
+   * @param {AdminUser} user
+   * @param {"device" | "deactivate" | "reactivate"} action
+   */
+  async function runAction(user, action) {
+    if (action === "device") {
+      deviceInviteMutation.mutate(user);
+      return;
+    }
+    if (action === "reactivate") {
+      setActiveMutation.mutate({ user, isActive: true });
+      return;
+    }
+    const ok = await confirm({
+      title: `Deactivate ${user.displayName}?`,
+      description:
+        "They're signed out on every device straight away, and any invite they made — or one waiting for them — is withdrawn. Their passkeys are kept, so reactivating them later restores access.",
+      confirmLabel: "Deactivate",
+    });
+    if (ok) setActiveMutation.mutate({ user, isActive: false });
+  }
+
+  const busy = setActiveMutation.isPending || deviceInviteMutation.isPending;
   const users = usersQuery.data ?? [];
 
   return (
@@ -132,7 +224,9 @@ function UsersPanel() {
         </Button>
       </div>
 
-      {users.length === 0 ? (
+      {usersQuery.isError ? (
+        <QueryError error={usersQuery.error} onRetry={() => usersQuery.refetch()} what="the household's users" />
+      ) : usersQuery.isLoading ? null : users.length === 0 ? (
         <EmptyState icon={UsersIcon} title="No users yet" description="Invite the first user." />
       ) : (
         <>
@@ -144,13 +238,18 @@ function UsersPanel() {
                   <th className="px-4 py-3 font-medium">Email</th>
                   <th className="px-4 py-3 font-medium">Status</th>
                   <th className="px-4 py-3 font-medium">Passkeys</th>
-                  <th className="px-4 py-3 font-medium" />
+                  <th className="px-4 py-3 font-medium">
+                    <span className="sr-only">Actions</span>
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
                 {users.map((user) => (
                   <tr key={user.id}>
-                    <td className="px-4 py-3 text-text">{user.displayName}</td>
+                    <td className="px-4 py-3 text-text">
+                      {user.displayName}
+                      {user.id === myId ? <span className="ml-2 text-xs text-text-subtle">you</span> : null}
+                    </td>
                     <td className="px-4 py-3 text-text-muted">{user.email ?? "—"}</td>
                     <td className="px-4 py-3">
                       <Badge variant={user.isActive ? "secondary" : "outline"}>
@@ -158,24 +257,23 @@ function UsersPanel() {
                       </Badge>
                     </td>
                     <td className="px-4 py-3 text-text-muted">{user.credentialCount}</td>
-                    <td className="px-4 py-3 text-right">
-                      {user.isActive ? (
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={async () => {
-                            const ok = await confirm({
-                              title: `Deactivate ${user.displayName}?`,
-                              description: "They lose access immediately and every session of theirs is ended.",
-                              confirmLabel: "Deactivate",
-                            });
-                            if (ok) deactivateMutation.mutate(user.id);
-                          }}
-                          disabled={deactivateMutation.isPending}
-                        >
-                          Deactivate
-                        </Button>
-                      ) : null}
+                    <td className="px-4 py-3">
+                      <div className="flex justify-end gap-1">
+                        {userActions({ user, isSelf: user.id === myId }).map((action) => (
+                          <Button
+                            key={action.key}
+                            size="sm"
+                            // Deactivate is grey like every other removal;
+                            // the other two are the row's ordinary actions.
+                            variant={action.key === "deactivate" ? "ghost" : "outline"}
+                            className={action.key === "deactivate" ? "text-text-muted hover:text-text" : undefined}
+                            disabled={busy}
+                            onClick={() => runAction(user, action.key)}
+                          >
+                            {action.label}
+                          </Button>
+                        ))}
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -183,16 +281,35 @@ function UsersPanel() {
             </table>
           </ScrollArea>
 
+          {/* On a phone the actions sit behind a menu on each row: three
+              buttons beside a name and a badge don't fit 375px, and a row
+              that dropped them would leave Deactivate unreachable there. */}
           <DataList className="md:hidden">
             {users.map((user) => (
               <DataListRow
                 key={user.id}
-                primary={user.displayName}
-                secondary={`${user.email ?? "No email"} · ${user.credentialCount} passkey${user.credentialCount === 1 ? "" : "s"}`}
+                primary={user.id === myId ? `${user.displayName} (you)` : user.displayName}
+                secondary={`${user.isActive ? "Active" : "Inactive"} · ${user.credentialCount} passkey${user.credentialCount === 1 ? "" : "s"}${user.email ? ` · ${user.email}` : ""}`}
                 trailing={
-                  <Badge variant={user.isActive ? "default" : "outline"}>
-                    {user.isActive ? "Active" : "Inactive"}
-                  </Badge>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        disabled={busy}
+                        aria-label={`Actions for ${user.displayName}`}
+                      >
+                        <MoreVerticalIcon />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      {userActions({ user, isSelf: user.id === myId }).map((action) => (
+                        <DropdownMenuItem key={action.key} onSelect={() => runAction(user, action.key)}>
+                          {action.label}
+                        </DropdownMenuItem>
+                      ))}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                 }
               />
             ))}
@@ -201,11 +318,11 @@ function UsersPanel() {
       )}
 
       <ShareLinkDialog
-        open={shareLink !== null}
-        onOpenChange={(open) => !open && setShareLink(null)}
-        title="Invite a user"
-        description="Send this link to the person you're inviting. It works once, and expires in 24 hours."
-        link={shareLink ?? ""}
+        open={share !== null}
+        onOpenChange={(open) => !open && setShare(null)}
+        title={share?.title ?? ""}
+        description={share?.description ?? ""}
+        link={share?.link ?? ""}
       />
     </div>
   );
@@ -395,22 +512,27 @@ function DevicesPanel() {
       if (!res.ok) throw new Error(await readApiError(res));
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["credentials"] });
-      toast.success("Device removed.");
+      // The API signs out every other session of yours with it — it can't
+      // tell which one the lost device holds — so the Sessions tab changed too.
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      toast.success(passkeyRemovedMessage(result.revokedSessions));
     },
     onError: (err) => toast.error(err.message),
   });
 
+  const myId = state?.user?.id ?? null;
   const addDeviceMutation = useMutation({
-    mutationFn: async () => {
-      const res = await api.invites.$post({
-        json: { purpose: "new_device", targetUserId: /** @type {string} */ (state?.user?.id) },
-      });
+    mutationFn: async (/** @type {string} */ userId) => {
+      const res = await api.invites.$post({ json: { purpose: "new_device", targetUserId: userId } });
       if (!res.ok) throw new Error(await readApiError(res));
       return (await res.json()).invite;
     },
-    onSuccess: (invite) => setShareLink(`${window.location.origin}/invite/${invite.code}`),
+    onSuccess: (invite) => {
+      setShareLink(`${window.location.origin}/invite/${invite.code}`);
+      queryClient.invalidateQueries({ queryKey: ["invites"] });
+    },
     onError: (err) => toast.error(err.message),
   });
 
@@ -419,12 +541,21 @@ function DevicesPanel() {
   return (
     <div className="flex flex-col gap-4">
       <div className="flex justify-end">
-        <Button onClick={() => addDeviceMutation.mutate()} disabled={addDeviceMutation.isPending}>
+        <Button
+          onClick={() => myId && addDeviceMutation.mutate(myId)}
+          disabled={addDeviceMutation.isPending || myId === null}
+        >
           Add another device
         </Button>
       </div>
 
-      {credentials.length === 0 ? (
+      {credentialsQuery.isError ? (
+        <QueryError
+          error={credentialsQuery.error}
+          onRetry={() => credentialsQuery.refetch()}
+          what="your passkeys"
+        />
+      ) : credentialsQuery.isLoading ? null : credentials.length === 0 ? (
         <EmptyState icon={SmartphoneIcon} title="No devices" description="This shouldn't happen — you're signed in with one." />
       ) : (
         <DataList>
@@ -480,7 +611,7 @@ function DevicesPanel() {
                         const ok = await confirm({
                           title: `Remove ${cred.deviceName ?? "this passkey"}?`,
                           description:
-                            "That device can no longer sign in. This cannot be undone — the device has to be re-registered from an invite.",
+                            "That device can no longer sign in, and your other sessions are signed out with it — there's no telling which one a lost device holds. This one stays. Undoing it means registering the device again from an invite.",
                           confirmLabel: "Remove",
                         });
                         if (ok) removeMutation.mutate(cred.id);
@@ -561,7 +692,9 @@ function SessionsPanel() {
         </div>
       ) : null}
 
-      {sessions.length === 0 ? (
+      {sessionsQuery.isError ? (
+        <QueryError error={sessionsQuery.error} onRetry={() => sessionsQuery.refetch()} what="your sessions" />
+      ) : sessionsQuery.isLoading ? null : sessions.length === 0 ? (
         <EmptyState icon={ShieldCheckIcon} title="No sessions" description="This shouldn't happen — you're signed in with one." />
       ) : (
         <DataList>
@@ -628,6 +761,11 @@ function InvitesPanel() {
   });
 
   const invites = invitesQuery.data ?? [];
+
+  if (invitesQuery.isError) {
+    return <QueryError error={invitesQuery.error} onRetry={() => invitesQuery.refetch()} what="pending invites" />;
+  }
+  if (invitesQuery.isLoading) return null;
 
   return invites.length === 0 ? (
     <EmptyState
@@ -776,7 +914,9 @@ function PeoplePanel() {
         </Button>
       </form>
 
-      {people.length === 0 ? (
+      {peopleQuery.isError ? (
+        <QueryError error={peopleQuery.error} onRetry={() => peopleQuery.refetch()} what="the people in your household" />
+      ) : peopleQuery.isLoading ? null : people.length === 0 ? (
         <EmptyState
           icon={UsersIcon}
           title="No people yet"
@@ -879,14 +1019,9 @@ const ADMIN_TABS = /** @type {const} */ ([
 export function AdminPage() {
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
-  const { refresh } = useAuth();
+  // The sidebar's and the phone menu's sign-out, so all three behave alike.
+  const signOut = useSignOut();
   const activeTab = ADMIN_TABS.find((t) => t.path === pathname)?.value ?? "users";
-
-  async function signOut() {
-    await api.auth.logout.$post();
-    await refresh();
-    navigate({ to: "/login", replace: true });
-  }
 
   return (
     <>

@@ -12,7 +12,7 @@ import {
 import { FieldRow } from "@/components/field-row.jsx";
 import { InlineError } from "@/components/notice.jsx";
 import { Input } from "@/components/ui/input.jsx";
-import { readApiError } from "@/lib/api-error.js";
+import { apiErrorFrom, readApiError } from "@/lib/api-error.js";
 import { api } from "@/lib/api.js";
 import { useAuth } from "@/lib/auth.jsx";
 import {
@@ -22,6 +22,10 @@ import {
   toErrorMessage,
   toJsonBody,
 } from "@/lib/passkey.js";
+
+// The API's own wording for a bootstrap that lost the race (auth.js,
+// `bootstrap_closed`), reused when the race is lost one step earlier.
+const BOOTSTRAP_CLOSED_MESSAGE = "This household is already set up. Ask a member for an invite.";
 
 /**
  * Centred card on the page ground (see AuthLayout). Bootstrap — an empty
@@ -101,13 +105,29 @@ export function LoginPage() {
     }
     withPasskeyGuard(async () => {
       const optionsRes = await api.auth.register.options.$post({ json: { displayName } });
-      if (!optionsRes.ok) throw new Error(await readApiError(optionsRes));
+      if (!optionsRes.ok) {
+        const err = await apiErrorFrom(optionsRes);
+        // The household was set up from another browser after this screen
+        // loaded, so the server now wants an invite this form can't send.
+        // Re-read the state — the screen becomes sign-in — and say why,
+        // rather than "An invite code is required." on a form with no
+        // field for one.
+        const next = await refresh().catch(() => null);
+        throw next && !next.needsBootstrap ? new Error(BOOTSTRAP_CLOSED_MESSAGE) : err;
+      }
       const { flowId, options } = await optionsRes.json();
       const response = await startRegistration({ optionsJSON: options });
       const verifyRes = await api.auth.register.verify.$post({
         json: { flowId, response: toJsonBody(response) },
       });
-      if (!verifyRes.ok) throw new Error(await readApiError(verifyRes));
+      if (!verifyRes.ok) {
+        const err = await apiErrorFrom(verifyRes);
+        // Someone else's bootstrap reached /verify first. Their message says
+        // what happened; the refresh swaps this form for sign-in so the
+        // screen stops offering a setup that is closed.
+        if (err.code === "bootstrap_closed") await refresh().catch(() => null);
+        throw err;
+      }
       await refresh();
       navigate({ to: "/", replace: true });
     });

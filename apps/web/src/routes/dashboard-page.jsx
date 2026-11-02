@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { addDaysIso, daysBetween } from "@budget/engine";
 import {
@@ -33,20 +33,21 @@ import { Delta } from "@/components/delta.jsx";
 import { FidelityBadge } from "@/components/fidelity-badge.jsx";
 import { GoodLifeFidelity } from "@/components/good-life-fidelity.jsx";
 import { Money } from "@/components/money.jsx";
-import { Notice } from "@/components/notice.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
+import { QueryError } from "@/components/query-error.jsx";
 import { QuickBalanceSheet } from "@/components/quick-balance-sheet.jsx";
 import { UnallocatedIndicator, isBalanced } from "@/components/unallocated-indicator.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
 import { registerCommands } from "@/lib/commands.js";
 import { CADENCE_LABELS, CADENCE_PERIOD_NOUNS } from "@/lib/constants.js";
-import { formatIsoDate, formatIsoDateRange, relativeDayLabel, todayIso } from "@/lib/dates.js";
+import { formatIsoDate, formatIsoDateRange, relativeDayLabel } from "@/lib/dates.js";
 import { formatMoney } from "@/lib/format-money.js";
 import { useSettings } from "@/lib/settings.jsx";
+import { useTodayIso } from "@/lib/use-today.js";
 import { cn } from "@/lib/utils.js";
 
-/** @import { Cadence, Cents, Transfer } from "@budget/engine" */
+/** @import { Cadence, Cents, OverAllocation, Transfer } from "@budget/engine" */
 
 /** @typedef {{ id: string, name: string, type: "transaction" | "savings" | "investment" | "external", isIncomeLanding: boolean, latestBalance: { amountCents: Cents, asAt: string } | null }} DashAccount */
 /** @typedef {{ stage: number, goalPerMonthCents: Cents | null, goalPerPayCents: Cents | null, subtotalPerMonthCents: Cents, subtotalPerPayCents: Cents, subtotalPerWeekCents: Cents, remainingPerMonthCents: Cents, remainingPerPayCents: Cents, remainingPerWeekCents: Cents, goalPct: number | null, goalSource: "stage" | "lines" | null, actualPct: number | null, fidelity: number | null }} DashStage */
@@ -60,9 +61,9 @@ import { cn } from "@/lib/utils.js";
  *   bills: {
  *     contributionPerPayCents: Cents | null, contributionPerMonthCents: Cents,
  *     dueNext14DaysCents: Cents, dueSoonDays: number,
- *     nextDue: { billId: string, billName: string, dueDate: string, amountCents: Cents } | null,
- *     upcoming: { billId: string, billName: string, dueDate: string, amountCents: Cents }[],
- *     billCount: number,
+ *     nextDue: UpcomingBill | null,
+ *     upcoming: UpcomingBill[],
+ *     billCount: number, unconfirmedDueDateCount: number,
  *   },
  *   variable: {
  *     essentialPerMonthCents: Cents, essentialPerPayCents: Cents | null,
@@ -73,10 +74,12 @@ import { cn } from "@/lib/utils.js";
  *   allocation: {
  *     versionId: string, version: number, planId: string, planName: string, incomeVariantId: string,
  *     grossPerMonthCents: Cents, grossPerPayCents: Cents | null,
- *     transfers: Transfer[], stages: DashStage[],
+ *     transfers: DashTransfer[], stages: DashStage[],
+ *     applied: DashApplied,
  *     lines: { id: string, stage: number, label: string, accountId: string }[],
  *     resolvedLines: DashResolvedLine[], breakdown: DashBreakdown[],
- *     unallocatedPerMonthCents: Cents, goodLifeFidelityCents: Cents, hasDraft: boolean,
+ *     unallocatedPerMonthCents: Cents, goodLifeFidelityCents: Cents,
+ *     overAllocation: OverAllocation | null, hasDraft: boolean,
  *   } | null,
  *   accounts: DashAccount[],
  *   netWorth: { totalCents: Cents, series: { date: string, totalCents: Cents }[], stalestAsAt: string | null, staleDays: number | null, staleAfterDays: number, accountsWithoutBalance: number },
@@ -85,11 +88,51 @@ import { cn } from "@/lib/utils.js";
  *     monthsCovered: number | null, burnPerMonthCents: Cents,
  *     nextThresholdMonths: number | null, periodsToNextThreshold: number | null,
  *     approxMonthsToNextThreshold: number | null, nextThresholdEta: string | null, payCadence: Cadence,
+ *     targetComputable: boolean,
  *   } | null,
- *   goals: { id: string, name: string, accountName: string, progressPct: number, etaDate: string | null, aheadBehindDays: number | null, isFunded: boolean, reached: boolean, currentBalanceCents: Cents, targetCents: Cents }[],
- *   setup: { people: boolean, paySchedule: boolean, accounts: boolean, bills: boolean, allocation: boolean, complete: boolean },
+ *   goals: { id: string, name: string, accountName: string, progressPct: number, etaDate: string | null, aheadBehindDays: number | null, isFunded: boolean, reached: boolean, currentBalanceCents: Cents, targetCents: Cents, targetComputable: boolean }[],
+ *   setup: DashSetup,
  *   warnings: { code: string, message: string, href: string }[],
  * }} DashboardData
+ *
+ * - `goals[].targetComputable` / `mojo.targetComputable` — false for a
+ *   months-of-expenses goal before any essential cost is recorded; its
+ *   `targetCents` and `progressPct` are then a placeholder 0, not a target.
+ */
+/**
+ * @typedef {{ billId: string, billName: string, dueDate: string, dueDateConfirmed: boolean, amountCents: Cents }} UpcomingBill
+ *
+ * `dueDateConfirmed` is false for an imported bill whose date is still the
+ * import's placeholder — every "due on" for it is a guess until it's set.
+ */
+/**
+ * @typedef {Transfer & { appliedPerPayCents: Cents | null, driftPerPayCents: Cents | null }} DashTransfer
+ *
+ * - `appliedPerPayCents` — what this standing order was set to when the plan
+ *   was applied (0 for a destination the record didn't have). Null when there
+ *   is nothing comparable: amounts weren't recorded then, or the pay cadence
+ *   has changed since.
+ * - `driftPerPayCents` — live − applied; 0 when unchanged, null as above.
+ */
+/**
+ * @typedef {{
+ *   status: "recorded" | "not_recorded" | "cadence_changed",
+ *   appliedOn: string | null, computedOn: string | null, payCadence: Cadence | null,
+ *   transfers: { accountId: string, accountName: string, perPayCents: Cents, perMonthCents: Cents, isNoOp: boolean }[] | null,
+ * }} DashApplied
+ */
+/**
+ * @typedef {{ key: string, label: string, done: boolean, href: string, hint: string | null, optional: boolean }} SetupStep
+ *
+ * The API's one "still to do" list (apps/api/src/lib/dashboard.js
+ * `loadSetup`). Several steps share a page (two link to /income), so `key`,
+ * not `href`, is what identifies one.
+ */
+/**
+ * @typedef {{ steps: SetupStep[], complete: boolean, importHref: string | null }} DashSetup
+ *
+ * `complete` ignores optional steps; `importHref` is set while the household
+ * is still empty, when one import fills in most of the list at once.
  */
 
 // A wall of warnings gets ignored, which defeats the purpose
@@ -295,8 +338,14 @@ function CycleBanner({ data, result, onMove, isToday, onToday }) {
               {bills.nextDue ? (
                 <>
                   <span className="truncate">{bills.nextDue.billName}</span>
-                  <span className="shrink-0 text-xs font-normal text-text-muted">
+                  <span
+                    className={cn(
+                      "shrink-0 text-xs font-normal",
+                      bills.nextDue.dueDateConfirmed ? "text-text-muted" : "text-warning-strong",
+                    )}
+                  >
                     {relativeDayLabel(daysBetween(data.on, bills.nextDue.dueDate))}
+                    {bills.nextDue.dueDateConfirmed ? null : " (date to confirm)"}
                   </span>
                 </>
               ) : (
@@ -330,7 +379,7 @@ function WarningsStrip({ warnings }) {
           <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-warning-strong" aria-hidden="true" />
           <span className="min-w-0">
             {warning.message}{" "}
-            <Link to={warning.href} className="font-medium whitespace-nowrap underline underline-offset-2">
+            <Link {...linkTo(warning.href)} className="font-medium whitespace-nowrap underline underline-offset-2">
               Fix it <span aria-hidden="true">→</span>
             </Link>
           </span>
@@ -532,7 +581,17 @@ function TransfersCard({ data, accounts }) {
                 >
                   {nameOf(transfer.accountId)}
                 </span>
-                {transfer.isNoOp ? <span className="block text-xs text-text-subtle">no move required</span> : null}
+                {transfer.isNoOp ? (
+                  <span className="block text-xs text-text-subtle">no move required</span>
+                ) : transfer.driftPerPayCents !== null && transfer.driftPerPayCents !== 0 ? (
+                  // The figure above is what the plan says today; the bank
+                  // still holds what was applied. Said quietly, on the row it
+                  // is about — nothing here changes either figure.
+                  <span className="block text-xs text-warning-strong">
+                    differs from applied by <Money value={transfer.driftPerPayCents} signed /> — update the bank
+                    order or re-apply
+                  </span>
+                ) : null}
               </span>
               <span
                 className={cn(
@@ -585,6 +644,12 @@ function UpcomingCard({ data }) {
                 <p className="text-xs text-text-muted">
                   {relativeDayLabel(daysBetween(data.on, instance.dueDate))}
                   <span className="text-text-subtle"> · {formatIsoDate(instance.dueDate, locale)}</span>
+                  {/* The import dates every bill it creates to one placeholder
+                      day, so this "due" is a guess until someone sets it —
+                      amber, a defect to look at, not a date to plan around. */}
+                  {instance.dueDateConfirmed ? null : (
+                    <span className="text-warning-strong"> · placeholder date</span>
+                  )}
                 </p>
               </div>
               <span className="shrink-0 text-sm font-semibold text-text tabular-nums">
@@ -690,14 +755,14 @@ function NetWorthCard({ data, onUpdateBalance }) {
       <Chart
         height={200}
         ariaLabel={`Net worth over time, ${netWorth.series.length} recorded points, currently ${formatMoney(netWorth.totalCents, { currency, locale })}.`}
-        dataTable={{
+        dataTable={() => ({
           caption: "Net worth at each recorded date",
           columns: ["Date", "Net worth"],
           rows: netWorth.series.map((point) => [
             formatIsoDate(point.date, locale),
             formatMoney(point.totalCents, { currency, locale }),
           ]),
-        }}
+        })}
         empty={netWorth.series.length < 2}
         emptyTitle="Not enough history yet"
         emptyDescription="Record a balance on two different dates and the line starts to draw itself."
@@ -738,6 +803,30 @@ function MojoCard({ mojo }) {
   const { locale } = useSettings();
   const [singular, plural] = CADENCE_PERIOD_NOUNS[mojo.payCadence];
   const periods = mojo.periodsToNextThreshold;
+
+  // Months of cover are months of essential costs, and with none recorded
+  // there is nothing to count in: no figure, no markers. Said as what it
+  // needs, never as "every marker is covered" (which is what an empty list of
+  // markers used to read as).
+  if (!mojo.targetComputable) {
+    return (
+      <Card title={mojo.name} to="/goals">
+        <div>
+          <p className="text-lg font-semibold text-text">Needs costs recorded</p>
+          <p className="mt-0.5 text-xs text-text-muted">
+            <Money value={mojo.balanceCents} className="font-medium text-text" /> in {mojo.accountName}. Months of
+            cover are measured against your essential costs, and none are recorded yet.
+          </p>
+        </div>
+        <Link
+          to="/costs/fixed"
+          className="self-start text-xs font-medium text-text-muted underline underline-offset-2 hover:text-text"
+        >
+          Record your bills <span aria-hidden="true">→</span>
+        </Link>
+      </Card>
+    );
+  }
 
   return (
     <Card title={mojo.name} to="/goals">
@@ -817,23 +906,36 @@ function GoalsCard({ goals }) {
                   <span className="truncate">{goal.name}</span>
                   {goal.isFunded ? null : <Badge variant="attention">unfunded</Badge>}
                 </span>
-                <span
-                  className={cn("text-xs font-medium tabular-nums", goal.reached ? "text-text" : "text-text-muted")}
-                >
-                  {goal.progressPct.toFixed(0)}%
-                </span>
+                {goal.targetComputable ? (
+                  <span
+                    className={cn("text-xs font-medium tabular-nums", goal.reached ? "text-text" : "text-text-muted")}
+                  >
+                    {goal.progressPct.toFixed(0)}%
+                  </span>
+                ) : null}
               </div>
               <div className="h-2 w-full overflow-hidden rounded-full bg-surface-muted">
-                <div
-                  className="h-full rounded-full bg-(--chart-total)"
-                  style={{ width: `${Math.max(0, Math.min(100, goal.progressPct))}%` }}
-                />
+                {goal.targetComputable ? (
+                  <div
+                    className="h-full rounded-full bg-(--chart-total)"
+                    style={{ width: `${Math.max(0, Math.min(100, goal.progressPct))}%` }}
+                  />
+                ) : null}
               </div>
               <p className="flex flex-wrap items-center gap-x-2 text-xs text-text-subtle">
-                <span>
-                  <Money value={goal.currentBalanceCents} /> of <Money value={goal.targetCents} />
-                </span>
-                {goal.reached ? (
+                {/* A months-of-expenses goal with no costs recorded has no
+                    target yet — "$0 of $0" and an empty bar would read as
+                    either nothing saved or already there. */}
+                {goal.targetComputable ? (
+                  <span>
+                    <Money value={goal.currentBalanceCents} /> of <Money value={goal.targetCents} />
+                  </span>
+                ) : (
+                  <span>
+                    <Money value={goal.currentBalanceCents} /> saved · needs costs recorded for a target
+                  </span>
+                )}
+                {!goal.targetComputable ? null : goal.reached ? (
                   <span className="inline-flex items-center gap-1 text-text">
                     <CheckCircle2Icon className="size-3.5 shrink-0 text-text-muted" aria-hidden="true" />
                     reached
@@ -929,23 +1031,38 @@ function GoodLifeCard({ data }) {
  * @param {{ setup: DashboardData["setup"] }} props
  */
 function SetupPath({ setup }) {
-  const steps = [
-    { done: setup.people, to: "/admin/people", label: "Add the people in your household" },
-    { done: setup.paySchedule, to: "/income", label: "Set a primary pay schedule" },
-    { done: setup.accounts, to: "/accounts", label: "Add your accounts, and mark where income lands" },
-    { done: setup.bills, to: "/costs/fixed", label: "Add your bills" },
-    { done: setup.allocation, to: "/allocation", label: "Build an allocation and apply it" },
-  ];
-  const doneCount = steps.filter((s) => s.done).length;
+  // The list is the API's, so a step it adds (variable budgets, the imported
+  // due dates) appears here without a release. Optional steps — inviting the
+  // rest of the household — are listed but not counted: a household of one
+  // is a real household, and "4 of 5" forever would read as unfinished.
+  const required = setup.steps.filter((step) => !step.optional);
+  const doneCount = required.filter((step) => step.done).length;
 
   return (
-    <Card title="Getting set up" aside={<span className="text-xs text-text-subtle">{doneCount} of {steps.length}</span>}>
+    <Card
+      title="Getting set up"
+      aside={
+        <span className="text-xs text-text-subtle">
+          {doneCount} of {required.length}
+        </span>
+      }
+    >
+      {setup.importHref ? (
+        <p className="-mt-1 text-sm text-text-muted">
+          Starting from a spreadsheet?{" "}
+          <Link {...linkTo(setup.importHref)} className="font-medium text-text underline underline-offset-2">
+            Import it
+          </Link>{" "}
+          and most of this list fills itself in.
+        </p>
+      ) : null}
       <ol className="flex flex-col gap-1">
-        {steps.map((step, index) => (
-          <li key={step.to}>
+        {setup.steps.map((step, index) => (
+          // `key`, not `href`: two steps both point at /income.
+          <li key={step.key}>
             <Link
-              to={step.to}
-              className="group flex items-center gap-3 rounded-(--radius-control) px-2 py-2 transition-colors hover:bg-surface-muted focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-(--accent)"
+              {...linkTo(step.href)}
+              className="group flex items-start gap-3 rounded-(--radius-control) px-2 py-2 transition-colors hover:bg-surface-muted focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-(--accent)"
             >
               {step.done ? (
                 <CheckCircle2Icon className="size-5 shrink-0 text-text-muted" aria-hidden="true" />
@@ -957,11 +1074,23 @@ function SetupPath({ setup }) {
                   {index + 1}
                 </span>
               )}
-              <span className={cn("min-w-0 flex-1 text-sm", step.done ? "text-text-subtle line-through" : "text-text")}>
-                {step.label}
+              <span className="min-w-0 flex-1">
+                <span className={cn("block text-sm", step.done ? "text-text-subtle line-through" : "text-text")}>
+                  {step.label}
+                  {step.optional ? <span className="ml-1.5 text-xs text-text-subtle">optional</span> : null}
+                </span>
+                {/* What is half-done, when the state says more than the label
+                    does — accounts exist but none is marked as where pay
+                    lands. Only on a step that still needs doing. */}
+                {step.hint && !step.done ? (
+                  <span className="mt-0.5 block text-xs text-text-muted">{step.hint}</span>
+                ) : null}
               </span>
               {step.done ? null : (
-                <ArrowRightIcon className="size-4 shrink-0 text-text-subtle transition-colors group-hover:text-accent-brand" aria-hidden="true" />
+                <ArrowRightIcon
+                  className="mt-0.5 size-4 shrink-0 text-text-subtle transition-colors group-hover:text-accent-brand"
+                  aria-hidden="true"
+                />
               )}
             </Link>
           </li>
@@ -969,6 +1098,17 @@ function SetupPath({ setup }) {
       </ol>
     </Card>
   );
+}
+
+/**
+ * An href from the API ("/income#pay-schedules") as Link props. The router's
+ * `to` is a path, and a fragment left inside it is not a route it knows.
+ *
+ * @param {string} href
+ */
+function linkTo(href) {
+  const at = href.indexOf("#");
+  return at === -1 ? { to: href } : { to: href.slice(0, at), hash: href.slice(at + 1) };
 }
 
 /**
@@ -1008,7 +1148,9 @@ export function DashboardPage() {
   // id is not a resolvable type and "/" is not a match id at runtime. The same
   // call shape /income and /allocation use for their own search params.
   const search = useSearch({ strict: false });
-  const today = useMemo(todayIso, []);
+  // Re-read when the tab is looked at again: read once per mount, a tab left
+  // open overnight went on showing yesterday's cycle.
+  const today = useTodayIso();
   const on = search.on ?? today;
 
   const [balanceFor, setBalanceFor] = useState(/** @type {{ accountId: string | null } | null} */ (null));
@@ -1020,6 +1162,12 @@ export function DashboardPage() {
       if (!res.ok) throw new Error(await readApiError(res));
       return /** @type {DashboardData} */ (await res.json());
     },
+    // Stepping to another pay cycle keeps this cycle on screen (dimmed, see
+    // below) until the next one arrives. Without it every step dropped to
+    // the skeleton and rebuilt the whole grid — both charts remounted, the
+    // card stagger replayed, and the tweened figures had nothing to tween
+    // FROM (perf-inp-plan.md, P1.6).
+    placeholderData: keepPreviousData,
   });
 
   const updateBalance = useMutation({
@@ -1099,6 +1247,9 @@ export function DashboardPage() {
             transfers: data.allocation.transfers,
             unallocatedPerMonthCents: data.allocation.unallocatedPerMonthCents,
             goodLifeFidelityCents: data.allocation.goodLifeFidelityCents,
+            // The engine's over-allocation flag, so the shared indicator
+            // reads the same flag here as it does on /allocation.
+            overAllocation: data.allocation.overAllocation,
           }
         : null,
     [data],
@@ -1112,12 +1263,26 @@ export function DashboardPage() {
         <div className="flex flex-col gap-4 md:gap-6">
           <DashboardSkeleton />
         </div>
-      ) : dashboardQuery.isError ? (
-        <Notice kind="error" className="p-5">
-          {dashboardQuery.error.message}
-        </Notice>
+      ) : dashboardQuery.isError && !data ? (
+        <QueryError error={dashboardQuery.error} onRetry={() => dashboardQuery.refetch()} what="the overview" />
       ) : data ? (
-        <div className="flex flex-col gap-4 md:gap-6">
+        <div
+          aria-busy={dashboardQuery.isPlaceholderData}
+          className={cn(
+            "flex flex-col gap-4 transition-opacity md:gap-6",
+            dashboardQuery.isPlaceholderData && "opacity-60",
+          )}
+        >
+          {/* A refresh that failed while figures were already on screen:
+              keep them, but say they may be out of date. */}
+          {dashboardQuery.isError ? (
+            <QueryError
+              compact
+              error={dashboardQuery.error}
+              onRetry={() => dashboardQuery.refetch()}
+              what="the latest figures — these may be out of date"
+            />
+          ) : null}
           <CycleBanner
             data={data}
             result={result}

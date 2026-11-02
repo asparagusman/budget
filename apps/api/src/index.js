@@ -25,6 +25,7 @@ import { createCredentialsRoutes } from "./routes/credentials.js";
 import { createDashboardRoutes } from "./routes/dashboard.js";
 import { createFixedCostsRoutes } from "./routes/fixed-costs.js";
 import { createGoalsRoutes } from "./routes/goals.js";
+import { createHouseRoutes } from "./routes/house.js";
 import { createIncomeRoutes } from "./routes/income.js";
 import { createIncomeLinesRoutes } from "./routes/income-lines.js";
 import { createIncomeVariantsRoutes } from "./routes/income-variants.js";
@@ -152,6 +153,7 @@ const routes = app
   .route("/allocation-versions", createAllocationVersionsRoutes({ db }))
   .route("/allocation", createAllocationRoutes({ db }))
   .route("/goals", createGoalsRoutes({ db }))
+  .route("/house", createHouseRoutes({ db }))
   .route("/net-worth", createNetWorthRoutes({ db }))
   .route("/projections", createProjectionsRoutes({ db }))
   .route("/dashboard", createDashboardRoutes({ db }))

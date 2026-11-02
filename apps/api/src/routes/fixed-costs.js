@@ -1,4 +1,4 @@
-import { equivalent, projectPaydays, requiredOpeningBalanceCents, simulateBalance } from "@budget/engine";
+import { equivalent, projectPaydays, requiredOpeningBalanceCents, simulateBalance, withdrawableCents } from "@budget/engine";
 import { balanceCurveQuerySchema, fixedCostsSummaryQuerySchema } from "@budget/schema";
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
@@ -118,10 +118,13 @@ export function createFixedCostsRoutes({ db }) {
       const perPayCents = equivalent(context.fixedTotalPerMonthCents, "monthly", paySchedule.cadence);
       const paydays = projectPaydays(paySchedule, window);
       const bufferCents = await getBillsBufferCents(db);
+      const points = simulateBalance(allInstances, perPayCents, paydays, openingBalanceCents);
 
       return c.json({
         window,
-        points: simulateBalance(allInstances, perPayCents, paydays, openingBalanceCents),
+        points,
+        bufferCents,
+        withdrawableCents: withdrawableCents(points, openingBalanceCents, bufferCents),
         contributionPerPayCents: perPayCents,
         requiredOpeningBalanceCents: requiredOpeningBalanceCents(allInstances, perPayCents, paydays, bufferCents),
         openingBalanceCents,

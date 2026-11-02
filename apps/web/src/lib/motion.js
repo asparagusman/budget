@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useMediaQuery } from "@/lib/use-media-query.js";
 
 // Animation in this app exists to make a state change legible, never to
@@ -54,16 +54,28 @@ export function useTweenedNumber(value, { enabled = true } = {}) {
   // Mount is not a change — see above.
   const seededRef = useRef(false);
 
-  useEffect(() => {
+  // A layout effect, not a passive one: whenever `display` has to catch up
+  // with `value` (tweening resuming after a pause, or starting from wherever
+  // the last tween stopped), setting it here re-renders BEFORE the browser
+  // paints, so a stale figure is never on screen even for one frame.
+  useLayoutEffect(() => {
     if (!seededRef.current) {
       seededRef.current = true;
       fromRef.current = value;
-      setDisplay(value);
       return undefined;
     }
 
-    if (!active || fromRef.current === value) {
+    if (!active) {
+      // Not tweening, so the hook returns `value` itself (below) and there is
+      // no state to keep in step. Setting it anyway used to cost every
+      // changing figure a second render — and paint the OLD figure for a
+      // frame in between (.claude/plans/perf-inp-plan.md, P1.4). Just
+      // remember where the number is, for a tween that starts later.
       fromRef.current = value;
+      return undefined;
+    }
+
+    if (fromRef.current === value) {
       setDisplay(value);
       return undefined;
     }
@@ -71,6 +83,9 @@ export function useTweenedNumber(value, { enabled = true } = {}) {
     const from = fromRef.current;
     const delta = value - from;
     const start = performance.now();
+    // The first frame is `from`. A no-op unless `display` fell behind while
+    // tweening was off, in which case it re-renders before paint.
+    setDisplay(from);
 
     const step = () => {
       const elapsed = performance.now() - start;
@@ -87,7 +102,7 @@ export function useTweenedNumber(value, { enabled = true } = {}) {
     };
   }, [value, active]);
 
-  return display;
+  return active ? display : value;
 }
 
 /**

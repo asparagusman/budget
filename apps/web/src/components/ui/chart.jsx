@@ -51,7 +51,14 @@ function useChart() {
   return context;
 }
 
-const INITIAL_DIMENSION = { width: 320, height: 200 };
+// The generated 320×200 made every chart render twice on mount: once in
+// full at that made-up size, then — after ResponsiveContainer measured its
+// box in an effect, forcing a layout of the freshly mounted page — again at
+// the real size, which also restarted the series animation
+// (.claude/plans/perf-inp-plan.md, P1.5). A zero size renders nothing until
+// the measurement arrives (Recharts' `isAcceptableSize`), and <Chart> fixes
+// the box's height itself, so nothing shifts while it waits.
+const INITIAL_DIMENSION = { width: 0, height: 0 };
 
 /**
  * @param {Omit<import("react").ComponentProps<"div">, "children"> & {

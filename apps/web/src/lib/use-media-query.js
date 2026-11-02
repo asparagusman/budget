@@ -13,6 +13,32 @@ function listFor(query) {
   return list;
 }
 
+/** @type {Map<string, (onChange: () => void) => () => void>} */
+const subscribers = new Map();
+
+/**
+ * One `subscribe` per query, kept for the life of the page. React
+ * re-subscribes whenever `useSyncExternalStore` is handed a different
+ * function, so an inline one detached and re-attached a `matchMedia`
+ * listener on every render — and every `<Money>` asks about reduced motion,
+ * so a keystroke on a big page did that hundreds of times
+ * (.claude/plans/perf-inp-plan.md, P1.4).
+ *
+ * @param {string} query
+ */
+function subscriberFor(query) {
+  let subscribe = subscribers.get(query);
+  if (!subscribe) {
+    subscribe = (onChange) => {
+      const list = listFor(query);
+      list.addEventListener("change", onChange);
+      return () => list.removeEventListener("change", onChange);
+    };
+    subscribers.set(query, subscribe);
+  }
+  return subscribe;
+}
+
 /**
  * A CSS media query as a boolean, read SYNCHRONOUSLY on the first render —
  * `useSyncExternalStore`'s snapshot is `matches`, not state seeded by an
@@ -28,14 +54,7 @@ function listFor(query) {
  * @param {string} query
  */
 export function useMediaQuery(query) {
-  return useSyncExternalStore(
-    (onChange) => {
-      const list = listFor(query);
-      list.addEventListener("change", onChange);
-      return () => list.removeEventListener("change", onChange);
-    },
-    () => listFor(query).matches,
-  );
+  return useSyncExternalStore(subscriberFor(query), () => listFor(query).matches);
 }
 
 // Tailwind's own `lg` breakpoint, so `useMediaQuery(LG)` and a `lg:` class

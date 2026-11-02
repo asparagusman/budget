@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { toCents } from "@budget/engine";
 import { SaveIcon } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button.jsx";
@@ -11,16 +10,25 @@ import { EmptyState } from "@/components/empty-state.jsx";
 import { ListSkeleton } from "@/components/loading.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
 import { Money } from "@/components/money.jsx";
+import { QueryError } from "@/components/query-error.jsx";
 import { Stat, StatGroup } from "@/components/stat-tile.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
+import { cellText, changedCells, forgetSentEdits, parseCents } from "@/lib/cell-edits.js";
 import { formatIsoDate } from "@/lib/dates.js";
 import { useSettings } from "@/lib/settings.jsx";
+import { useUnsavedGuard } from "@/lib/use-unsaved-guard.js";
 
 /** @import { Cents } from "@budget/engine" */
+/** @import { CellEdits } from "@/lib/cell-edits.js" */
 /** @typedef {{ ordinal: number, label: string, dueDate: string, actualCents: Cents | null }} HistorySlot */
 
 const LOOKBACK_OPTIONS = /** @type {const} */ (["6", "12", "24", "custom"]);
+
+// The API's cap on `periods` (MAX_SCAFFOLD_PERIODS in @budget/schema's
+// zod/bill-history.js — apps/web deliberately takes no runtime dependency on
+// that package). Asking for more is a 400, so the field clamps instead.
+const MAX_PERIODS = 120;
 
 /** @param {Cents[]} values */
 function computeStats(values) {
@@ -50,16 +58,24 @@ function computeStats(values) {
  * entered here are what the engine averages, and the amount the bill's row
  * prints changes the moment they are saved.
  *
- * @param {{ billId: string, autoFocus?: boolean, onSaved?: () => void }} props
+ * Typed amounts are held per due date over whatever the server says (see
+ * lib/cell-edits.js), so a refetch or a lookback change never wipes them,
+ * and leaving with any unsaved asks first. `onDirtyChange` tells a host that
+ * can close or hide this (the bill sheet) the same thing.
+ *
+ * @param {{ billId: string, autoFocus?: boolean, onSaved?: () => void, onDirtyChange?: (dirty: boolean) => void }} props
  */
-export function BillHistoryEntry({ billId, autoFocus = false, onSaved }) {
+export function BillHistoryEntry({ billId, autoFocus = false, onSaved, onDirtyChange }) {
   const { locale } = useSettings();
   const queryClient = useQueryClient();
   const inputRefs = useRef(/** @type {(HTMLInputElement | null)[]} */ ([]));
 
   const [lookback, setLookback] = useState(/** @type {(typeof LOOKBACK_OPTIONS)[number]} */ ("6"));
   const [customPeriods, setCustomPeriods] = useState("18");
-  const [values, setValues] = useState(/** @type {string[]} */ ([]));
+  const [edits, setEdits] = useState(/** @type {CellEdits} */ ({}));
+
+  // A different bill is a different set of slots.
+  useEffect(() => setEdits({}), [billId]);
 
   const settingsQuery = useQuery({
     queryKey: ["settings"],
@@ -83,7 +99,8 @@ export function BillHistoryEntry({ billId, autoFocus = false, onSaved }) {
     setCustomPeriods(String(def));
   }, [settingsQuery.data]);
 
-  const periods = lookback === "custom" ? Math.max(1, Number(customPeriods) || 1) : Number(lookback);
+  const periods =
+    lookback === "custom" ? Math.min(MAX_PERIODS, Math.max(1, Math.floor(Number(customPeriods)) || 1)) : Number(lookback);
 
   const historyQuery = useQuery({
     queryKey: ["bill-history", billId, periods],
@@ -95,37 +112,30 @@ export function BillHistoryEntry({ billId, autoFocus = false, onSaved }) {
       if (!res.ok) throw new Error(await readApiError(res));
       return /** @type {{ billId: string, slots: HistorySlot[] }} */ (await res.json());
     },
+    // Changing the lookback keeps the current slots on screen until the new
+    // set lands, rather than blanking the form mid-entry. Never across bills.
+    placeholderData: (previous) => (previous?.billId === billId ? previous : undefined),
   });
 
-  const slots = historyQuery.data?.slots ?? [];
-
-  useEffect(() => {
-    setValues(slots.map((s) => (s.actualCents !== null ? String(s.actualCents / 100) : "")));
-    // Only re-syncs when the slot set itself changes (a different bill or
-    // lookback) — never while the operator is mid-edit.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [historyQuery.data]);
+  const slots = useMemo(() => historyQuery.data?.slots ?? [], [historyQuery.data]);
+  const cells = useMemo(() => slots.map((slot) => ({ key: slot.dueDate, storedCents: slot.actualCents })), [slots]);
+  // What Save sends and what counts as unsaved — one diff, so the guard
+  // below can never disagree with the button. Only slots that actually
+  // changed: an untouched blank slot has nothing to remember
+  // (phases/06-fixed-costs.md "Instance storage"), and sending one anyway
+  // would create a bare row with nothing in it.
+  const changes = useMemo(() => changedCells(edits, cells), [edits, cells]);
+  const dirty = changes.length > 0;
 
   const saveMutation = useMutation({
-    mutationFn: async () => {
-      // Only entries that actually changed from what loaded — an untouched
-      // blank slot has nothing to remember (phases/06-fixed-costs.md
-      // "Instance storage"), and submitting one anyway would create a bare
-      // row with nothing in it.
-      const entries = slots
-        .map((slot, i) => {
-          const raw = values[i]?.trim() ?? "";
-          const nextCents = raw === "" ? null : toCents(Number(raw));
-          return nextCents !== slot.actualCents ? { dueDate: slot.dueDate, actualCents: nextCents } : null;
-        })
-        .filter((e) => e !== null);
+    mutationFn: async (/** @type {CellEdits} */ sent) => {
+      const entries = changedCells(sent, cells).map((change) => ({ dueDate: change.key, actualCents: change.nextCents }));
       if (entries.length === 0) return { billInstances: [] };
       const res = await api.bills[":id"].history.$put({ param: { id: billId }, json: { entries } });
       if (!res.ok) throw new Error(await readApiError(res));
       return res.json();
     },
-    onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: ["bill-history", billId] });
+    onSuccess: async (result, sent) => {
       queryClient.invalidateQueries({ queryKey: ["bill-detail", billId] });
       // `bills` carries the entered actuals the fixed-costs table projects
       // its rolling averages from, so it has to be refetched here or the row
@@ -133,16 +143,37 @@ export function BillHistoryEntry({ billId, autoFocus = false, onSaved }) {
       queryClient.invalidateQueries({ queryKey: ["bills"] });
       queryClient.invalidateQueries({ queryKey: ["fixed-costs-summary"] });
       queryClient.invalidateQueries({ queryKey: ["bill-instances"] });
+      // A rolling average moves with every actual, and the balance curve is
+      // drawn from the averaged instances.
+      queryClient.invalidateQueries({ queryKey: ["fixed-costs-balance-curve"] });
+      // Waited for, so the saved figures are on screen before the typing
+      // over them is let go — otherwise the old figures flash back first.
+      await queryClient.invalidateQueries({ queryKey: ["bill-history", billId] });
+      setEdits((current) => forgetSentEdits(current, sent));
       toast.success(result.billInstances.length > 0 ? "History saved." : "Nothing changed.");
       onSaved?.();
     },
     onError: (/** @type {Error} */ err) => toast.error(err.message),
   });
 
+  useUnsavedGuard(dirty && !saveMutation.isPending, {
+    title: "Leave with unsaved history?",
+    description: "The amounts typed into this bill's history haven't been saved yet, and leaving discards them.",
+  });
+
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
+  // Unmounted (another tab, the sheet closed) there is nothing left unsaved
+  // here to warn about.
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
+
   const stats = useMemo(() => {
-    const enteredCents = values.map((v) => (v.trim() === "" ? null : toCents(Number(v)))).filter((v) => v !== null);
+    const enteredCents = cells
+      .map((cell) => parseCents(cellText(edits, cell.key, cell.storedCents)))
+      .filter((v) => v !== null);
     return enteredCents.length > 0 ? computeStats(enteredCents) : null;
-  }, [values]);
+  }, [edits, cells]);
 
   /** @param {number} index */
   function focusSlot(index) {
@@ -176,11 +207,12 @@ export function BillHistoryEntry({ billId, autoFocus = false, onSaved }) {
             </Select>
           </FieldRow>
           {lookback === "custom" ? (
-            <FieldRow label="Periods" htmlFor={`history-custom-${billId}`} className="w-28">
+            <FieldRow label="Periods" htmlFor={`history-custom-${billId}`} className="w-28" hint={`Up to ${MAX_PERIODS}.`}>
               <Input
                 id={`history-custom-${billId}`}
                 type="number"
                 min="1"
+                max={MAX_PERIODS}
                 inputMode="numeric"
                 value={customPeriods}
                 onChange={(e) => setCustomPeriods(e.target.value)}
@@ -188,7 +220,7 @@ export function BillHistoryEntry({ billId, autoFocus = false, onSaved }) {
             </FieldRow>
           ) : null}
         </div>
-        <Button onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>
+        <Button onClick={() => saveMutation.mutate(edits)} disabled={saveMutation.isPending}>
           <SaveIcon />
           {saveMutation.isPending ? "Saving…" : "Save history"}
         </Button>
@@ -212,6 +244,8 @@ export function BillHistoryEntry({ billId, autoFocus = false, onSaved }) {
 
       {historyQuery.isLoading ? (
         <ListSkeleton rows={6} label="Loading bill history" />
+      ) : historyQuery.error ? (
+        <QueryError error={historyQuery.error} what="this bill's history" onRetry={() => historyQuery.refetch()} />
       ) : slots.length === 0 ? (
         <EmptyState title="No history to show" description="This bill has no derivable due dates in the chosen lookback." />
       ) : (
@@ -235,8 +269,11 @@ export function BillHistoryEntry({ billId, autoFocus = false, onSaved }) {
                   step="0.01"
                   inputMode="decimal"
                   className="text-base"
-                  value={values[i] ?? ""}
-                  onChange={(e) => setValues((prev) => prev.map((v, idx) => (idx === i ? e.target.value : v)))}
+                  value={cellText(edits, slot.dueDate, slot.actualCents)}
+                  onChange={(e) => {
+                    const text = e.target.value;
+                    setEdits((prev) => ({ ...prev, [slot.dueDate]: text }));
+                  }}
                   onKeyDown={(e) => handleKeyDown(e, i)}
                 />
               </InputGroup>

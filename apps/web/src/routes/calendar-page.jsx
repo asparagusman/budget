@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { addDaysIso, mustAt, projectPaydays } from "@budget/engine";
+import { projectPaydays } from "@budget/engine";
 import { CalendarDaysIcon, ChevronLeftIcon, ChevronRightIcon, ListIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge.jsx";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet.jsx";
@@ -16,21 +16,36 @@ import {
   useMoneyTick,
 } from "@/components/chart.jsx";
 import { EmptyState } from "@/components/empty-state.jsx";
+import { ListSkeleton } from "@/components/loading.jsx";
 import { Money } from "@/components/money.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
+import { QueryError } from "@/components/query-error.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
 import { registerCommands } from "@/lib/commands.js";
 import { MONTH_LABELS } from "@/lib/constants.js";
 import { formatMoney } from "@/lib/format-money.js";
 import { useSettings } from "@/lib/settings.jsx";
-import { todayIso } from "@/lib/dates.js";
+import { getDateFormat, todayIso } from "@/lib/dates.js";
 import { LG, useMediaQuery } from "@/lib/use-media-query.js";
 import { cn } from "@/lib/utils.js";
 
 /** @import { Cents } from "@budget/engine" */
 /** @typedef {{ billId: string, dueDate: string, expectedCents: Cents, actualCents: Cents | null, isOverride: boolean, isOrphan: boolean }} MergedInstance */
-/** @typedef {{ id: string, name: string }} BillRef */
+/** @typedef {{ id: string, name: string, dueDateConfirmed: boolean }} BillRef */
+
+/**
+ * Whether this instance's date is derived from a due date nobody has
+ * confirmed — an imported bill's placeholder anchor. The calendar is the
+ * screen people read dates off, so it is the one that most needs to say a
+ * date is a guess.
+ *
+ * @param {MergedInstance} instance
+ * @param {Map<string, BillRef>} billsById
+ */
+function isPlaceholder(instance, billsById) {
+  return billsById.get(instance.billId)?.dueDateConfirmed === false;
+}
 
 const WEEKDAY_LABELS = /** @type {const} */ (["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]);
 
@@ -60,8 +75,8 @@ function localDate(iso) {
   return new Date(Number(iso.slice(0, 4)), Number(iso.slice(5, 7)) - 1, Number(iso.slice(8, 10)));
 }
 
-const WEEKDAY_SHORT = new Intl.DateTimeFormat("en-AU", { weekday: "short" });
-const DAY_LONG = new Intl.DateTimeFormat("en-AU", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+const WEEKDAY_SHORT = getDateFormat("en-AU", { weekday: "short" });
+const DAY_LONG = getDateFormat("en-AU", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
 
 /**
  * @param {{ date: string, total: Cents, isPayday: boolean, bills: MergedInstance[], billsById: Map<string, BillRef> }} props
@@ -76,11 +91,23 @@ function DayChips({ date, total, isPayday, bills, billsById }) {
         {isPayday ? <span className="size-1.5 rounded-full bg-positive" title="Payday" /> : null}
       </div>
       <div className="flex flex-col gap-0.5">
-        {shown.map((b) => (
-          <span key={b.billId} className="truncate rounded bg-negative-soft px-1 py-0.5 text-[0.65rem] text-negative">
-            {billsById.get(b.billId)?.name ?? "Bill"}
-          </span>
-        ))}
+        {shown.map((b) => {
+          const placeholder = isPlaceholder(b, billsById);
+          return (
+            <span
+              key={b.billId}
+              className={cn(
+                "truncate rounded bg-negative-soft px-1 py-0.5 text-[0.65rem] text-negative",
+                // No room for a badge in a 7-column cell: an amber dashed
+                // edge marks the guess, and the day's sheet spells it out.
+                placeholder && "outline-1 -outline-offset-1 outline-dashed outline-warning-strong",
+              )}
+            >
+              {billsById.get(b.billId)?.name ?? "Bill"}
+              {placeholder ? <span className="sr-only"> (placeholder date)</span> : null}
+            </span>
+          );
+        })}
         {extra > 0 ? <span className="text-[0.65rem] text-text-subtle">+{extra} more</span> : null}
       </div>
       {total > 0 ? (
@@ -111,8 +138,9 @@ function DayDetailSheet({ date, onOpenChange, instances, isPayday, billsById }) 
         <div className="flex flex-col gap-2 px-4 pb-6">
           {instances.map((i) => (
             <div key={i.billId} className="flex items-center justify-between rounded-(--radius-card) bg-surface-muted p-3 text-sm">
-              <span className="flex items-center gap-2 text-text">
+              <span className="flex flex-wrap items-center gap-2 text-text">
                 {billsById.get(i.billId)?.name ?? "Bill"}
+                {isPlaceholder(i, billsById) ? <Badge variant="attention">Placeholder date</Badge> : null}
                 {i.isOrphan ? <Badge variant="attention">Orphan</Badge> : null}
                 {i.isOverride ? <Badge variant="secondary">Override</Badge> : null}
               </span>
@@ -216,7 +244,11 @@ export function CalendarPage() {
   const isDesktop = useMediaQuery(LG);
   const monthLabel = new Date(year, month, 1).toLocaleDateString("en-AU", { month: "long", year: "numeric" });
   const cells = useMemo(() => monthGridDays(year, month), [year, month]);
-  const monthDatesWithEvents = cells.filter((d) => d !== null && (instancesByDate.has(d) || paydaySet.has(d)));
+  const monthDatesWithEvents = cells.flatMap((d) => (d !== null && (instancesByDate.has(d) || paydaySet.has(d)) ? [d] : []));
+  // A failed load used to fall through to "Nothing this month", which reads
+  // as "no bills are due" — the one thing this screen must never say wrongly.
+  const loadError = instancesQuery.error ?? billsQuery.error ?? paySchedulesQuery.error ?? null;
+  const loading = instancesQuery.isLoading || billsQuery.isLoading || paySchedulesQuery.isLoading;
 
   /** @param {number} delta */
   function goToMonth(delta) {
@@ -233,8 +265,6 @@ export function CalendarPage() {
     setYear(y);
   }
 
-  const heatmapMax = Math.max(1, ...Array.from(instancesByDate.values()).map((list) => list.reduce((s, i) => s + (i.actualCents ?? i.expectedCents), 0)));
-
   // The heat map's text alternative, rolled up to months — see the comment
   // where it is passed to <Chart>.
   const monthlyOutflow = useMemo(() => {
@@ -249,10 +279,17 @@ export function CalendarPage() {
     return totals;
   }, [instancesByDate, year]);
 
-  const outflowRows = monthlyOutflow.map((row) => ({
-    label: row.label.slice(0, 3),
-    outflow: row.totalCents / 100,
-  }));
+  // Memoised so clicking a day or switching Month/Agenda doesn't hand the
+  // chart a new array — Recharts restarts its animation on one
+  // (perf-inp-plan.md, P1.5).
+  const outflowRows = useMemo(
+    () =>
+      monthlyOutflow.map((row) => ({
+        label: row.label.slice(0, 3),
+        outflow: row.totalCents / 100,
+      })),
+    [monthlyOutflow],
+  );
 
   const heaviestMonth = monthlyOutflow.reduce(
     (max, row) => (row.totalCents > max.totalCents ? row : max),
@@ -296,7 +333,15 @@ export function CalendarPage() {
           </Button>
         </div>
 
-        {view === "month" ? (
+        {loadError ? (
+          <div className="p-2 sm:p-4">
+            <QueryError
+              error={loadError}
+              what="this month's bills and paydays"
+              onRetry={() => Promise.all([instancesQuery.refetch(), billsQuery.refetch(), paySchedulesQuery.refetch()])}
+            />
+          </div>
+        ) : view === "month" ? (
           <div className="p-2 sm:p-4">
             <div className="grid grid-cols-7 gap-1 text-center text-xs text-text-muted">
               {WEEKDAY_LABELS.map((w) => (
@@ -331,6 +376,8 @@ export function CalendarPage() {
               )}
             </div>
           </div>
+        ) : loading ? (
+          <ListSkeleton rows={5} label="Loading this month" className="p-4" />
         ) : monthDatesWithEvents.length === 0 ? (
           <EmptyState
             icon={CalendarDaysIcon}
@@ -343,11 +390,11 @@ export function CalendarPage() {
           // the left, what lands that day in the middle, the day's outflow on
           // the right. It used to lead every row with "2026-10-01".
           <ol className="flex flex-col divide-y divide-border">
-            {monthDatesWithEvents.map((date) => {
-              const day = /** @type {string} */ (date);
+            {monthDatesWithEvents.map((day) => {
               const dayInstances = instancesByDate.get(day) ?? [];
               const total = dayInstances.reduce((s, i) => s + (i.actualCents ?? i.expectedCents), 0);
               const isToday = day === todayIsoDate;
+              const hasPlaceholder = dayInstances.some((i) => isPlaceholder(i, billsById));
               return (
                 <li key={day}>
                   <button
@@ -380,6 +427,7 @@ export function CalendarPage() {
                             Payday
                           </Badge>
                         ) : null}
+                        {hasPlaceholder ? <Badge variant="attention">Placeholder date</Badge> : null}
                       </span>
                     </span>
                     {total > 0 ? (
@@ -393,42 +441,47 @@ export function CalendarPage() {
         )}
       </section>
 
-      <section className="rounded-(--radius-card) bg-surface p-4 shadow-(--shadow-card) md:p-5">
-        <h2 className="mb-3 text-sm font-semibold text-text">Outflow by month — {year}</h2>
-        {/* This was a day-by-day calendar heat map. Two problems with that
-            shape: 366 cells of mostly zero say very little about a household
-            whose bills land on a dozen dates, and the panel's own data table
-            was already by MONTH — the comment there said outright that the
-            month totals are "the figure the heatmap is actually
-            communicating". So the figure it was communicating is now what it
-            draws. */}
-        <Chart
-          height={200}
-          loading={instancesQuery.isLoading}
-          ariaLabel={`Bill outflow by month across ${year}. The heaviest month is ${heaviestMonth.label} at ${formatMoney(heaviestMonth.totalCents, { currency, locale })}.`}
-          dataTable={{
-            caption: `Bill outflow by month, ${year}`,
-            columns: ["Month", "Outflow"],
-            rows: monthlyOutflow.map((row) => [row.label, formatMoney(row.totalCents, { currency, locale })]),
-          }}
-          config={{ outflow: { label: "Outflow", color: "var(--negative)" } }}
-        >
-          <BarChart data={outflowRows} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
-            <CartesianGrid vertical={false} />
-            {/* Every month labelled, so a phone gets initials: twelve "Sep"s
-                at 375px ran into each other as "JanFebMar". */}
-            <XAxis
-              dataKey="label"
-              {...AXIS}
-              interval={0}
-              tickFormatter={isDesktop ? undefined : (label) => String(label).slice(0, 1)}
-            />
-            <YAxis {...AXIS} width={56} tickFormatter={moneyTick} />
-            <ChartTooltip content={<MoneyTooltip />} />
-            <Bar dataKey="outflow" fill="var(--color-outflow)" radius={[4, 4, 0, 0]} {...motion} />
-          </BarChart>
-        </Chart>
-      </section>
+      {/* Hidden while the bills failed to load: twelve empty bars would say
+          "nothing goes out this year", which the error above says it can't
+          know. */}
+      {instancesQuery.error ? null : (
+        <section className="rounded-(--radius-card) bg-surface p-4 shadow-(--shadow-card) md:p-5">
+          <h2 className="mb-3 text-sm font-semibold text-text">Outflow by month — {year}</h2>
+          {/* This was a day-by-day calendar heat map. Two problems with that
+              shape: 366 cells of mostly zero say very little about a household
+              whose bills land on a dozen dates, and the panel's own data table
+              was already by MONTH — the comment there said outright that the
+              month totals are "the figure the heatmap is actually
+              communicating". So the figure it was communicating is now what it
+              draws. */}
+          <Chart
+            height={200}
+            loading={instancesQuery.isLoading}
+            ariaLabel={`Bill outflow by month across ${year}. The heaviest month is ${heaviestMonth.label} at ${formatMoney(heaviestMonth.totalCents, { currency, locale })}.`}
+            dataTable={() => ({
+              caption: `Bill outflow by month, ${year}`,
+              columns: ["Month", "Outflow"],
+              rows: monthlyOutflow.map((row) => [row.label, formatMoney(row.totalCents, { currency, locale })]),
+            })}
+            config={{ outflow: { label: "Outflow", color: "var(--negative)" } }}
+          >
+            <BarChart data={outflowRows} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+              <CartesianGrid vertical={false} />
+              {/* Every month labelled, so a phone gets initials: twelve "Sep"s
+                  at 375px ran into each other as "JanFebMar". */}
+              <XAxis
+                dataKey="label"
+                {...AXIS}
+                interval={0}
+                tickFormatter={isDesktop ? undefined : (label) => String(label).slice(0, 1)}
+              />
+              <YAxis {...AXIS} width={56} tickFormatter={moneyTick} />
+              <ChartTooltip content={<MoneyTooltip />} />
+              <Bar dataKey="outflow" fill="var(--color-outflow)" radius={[4, 4, 0, 0]} {...motion} />
+            </BarChart>
+          </Chart>
+        </section>
+      )}
 
       <DayDetailSheet
         date={selectedDate}

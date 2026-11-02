@@ -24,10 +24,24 @@ import { readApiError, withUnreachable } from "@/lib/api-error.js";
 /** @type {Promise<AuthState> | null} */
 let statePromise = null;
 
+// Whether the last auth state this page fetched had a session — a recovery
+// one included, which runs out after an hour. Kept past
+// `invalidateAuthState()`, because the question it answers is "did the app
+// think it was signed in?" — a 401 is only news if it did (see
+// session-expiry.js).
+let lastKnownSignedIn = false;
+
 async function fetchAuthState() {
   const res = await withUnreachable(() => api.auth.state.$get());
   if (!res.ok) throw new Error(await readApiError(res));
-  return /** @type {Promise<AuthState>} */ (res.json());
+  const state = /** @type {AuthState} */ (await res.json());
+  lastKnownSignedIn = state.user !== null;
+  return state;
+}
+
+/** Whether the app last knew itself to be signed in. */
+export function wasSignedIn() {
+  return lastKnownSignedIn;
 }
 
 /**
@@ -116,6 +130,19 @@ export function useAuth() {
   const ctx = useContext(AuthContext);
   if (!ctx) throw new Error("useAuth must be used within an AuthProvider.");
   return ctx;
+}
+
+/**
+ * What to say once a passkey is gone. Removing one signs out the user's
+ * OTHER sessions (the lost device may hold one — apps/api/src/routes/
+ * credentials.js), and that is worth saying: the other phone in the house
+ * being signed out is otherwise a mystery.
+ *
+ * @param {number} revokedSessions
+ */
+export function passkeyRemovedMessage(revokedSessions) {
+  if (revokedSessions === 0) return "Passkey removed.";
+  return `Passkey removed — signed out ${revokedSessions} other session${revokedSessions === 1 ? "" : "s"}.`;
 }
 
 /**

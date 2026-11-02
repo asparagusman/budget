@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { addDaysIso, periodsBetween, toCents } from "@budget/engine";
 import {
   AlertTriangleIcon,
@@ -51,7 +51,9 @@ import { CardsSkeleton } from "@/components/loading.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
 import { Money } from "@/components/money.jsx";
 import { InlineError, NoticeList } from "@/components/notice.jsx";
+import { GoalsTabs } from "@/components/goals-tabs.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
+import { QueryError } from "@/components/query-error.jsx";
 import { QuickBalanceSheet } from "@/components/quick-balance-sheet.jsx";
 import { Stat, StatGroup } from "@/components/stat-tile.jsx";
 import { useConfirm } from "@/components/confirm-dialog.jsx";
@@ -59,9 +61,10 @@ import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
 import { registerCommands } from "@/lib/commands.js";
 import { CADENCE_LABELS, CADENCE_PERIOD_NOUNS } from "@/lib/constants.js";
-import { formatIsoDate, todayIso } from "@/lib/dates.js";
+import { formatIsoDate } from "@/lib/dates.js";
 import { formatMoney } from "@/lib/format-money.js";
 import { useSettings } from "@/lib/settings.jsx";
+import { useTodayIso } from "@/lib/use-today.js";
 
 /** @import { Cadence, Cents } from "@budget/engine" */
 
@@ -78,6 +81,7 @@ import { useSettings } from "@/lib/settings.jsx";
  *   },
  *   account: { id: string, name: string, type: string, annualGrowthRate: number | null },
  *   targetCents: Cents,
+ *   targetComputable: boolean,
  *   currentBalanceCents: Cents,
  *   currentBalanceAsAt: string | null,
  *   contributionPerPayCents: Cents,
@@ -93,7 +97,15 @@ import { useSettings } from "@/lib/settings.jsx";
  *   monthsCovered: number | null,
  *   thresholds: Threshold[] | null,
  * }} Goal
+ *
+ * `targetComputable` is false for a months-of-expenses goal while no
+ * essential cost is recorded: months of nothing is no target. `targetCents`
+ * and `progressPct` are then a placeholder 0, and nothing on the card may
+ * read them as a target — or as "Reached".
  */
+
+// What a goal with no computable target shows wherever a target would be.
+const NEEDS_COSTS = "Needs costs recorded";
 /**
  * @typedef {{
  *   on: string, activeCount: number, payCadence: Cadence, hasPrimaryPaySchedule: boolean,
@@ -141,18 +153,26 @@ function ProgressBar({ goal }) {
       <div className="flex items-baseline justify-between gap-2 text-sm">
         <span className="font-semibold text-text">
           <Money value={goal.currentBalanceCents} />
-          <span className="font-normal text-text-muted">
-            {" of "}
-            <Money value={goal.targetCents} />
+          {goal.targetComputable ? (
+            <span className="font-normal text-text-muted">
+              {" of "}
+              <Money value={goal.targetCents} />
+            </span>
+          ) : null}
+        </span>
+        {goal.targetComputable ? (
+          <span className="inline-flex items-center gap-1 text-xs font-medium text-text-muted">
+            {goal.progressPct.toFixed(1)}%
+            {goal.reached ? <CheckCircle2Icon className="size-3.5 shrink-0 text-text-muted" aria-hidden="true" /> : null}
           </span>
-        </span>
-        <span className="inline-flex items-center gap-1 text-xs font-medium text-text-muted">
-          {goal.progressPct.toFixed(1)}%
-          {goal.reached ? <CheckCircle2Icon className="size-3.5 shrink-0 text-text-muted" aria-hidden="true" /> : null}
-        </span>
+        ) : (
+          <span className="text-xs font-medium text-text-muted">{NEEDS_COSTS}</span>
+        )}
       </div>
       <div className="h-2 w-full overflow-hidden rounded-full bg-surface-muted">
-        <div className="h-full rounded-full bg-(--chart-total)" style={{ width: `${pct}%` }} />
+        {goal.targetComputable ? (
+          <div className="h-full rounded-full bg-(--chart-total)" style={{ width: `${pct}%` }} />
+        ) : null}
       </div>
       <p className="text-xs text-text-subtle">
         {goal.currentBalanceAsAt ? (
@@ -189,7 +209,14 @@ function EtaAndRequired({ goal, summary }) {
         <p className="text-xs font-medium tracking-wide text-text-subtle uppercase">
           At the current contribution
         </p>
-        {goal.reached ? (
+        {!goal.targetComputable ? (
+          <>
+            <p className="mt-1 text-lg font-semibold text-text-muted">{NEEDS_COSTS}</p>
+            <p className="text-xs text-text-muted">
+              With no essential costs recorded there is no target to reach, so no date to reach it by.
+            </p>
+          </>
+        ) : goal.reached ? (
           <p className="mt-1 flex items-center gap-1.5 text-lg font-semibold text-text">
             <CheckCircle2Icon className="size-4 text-text-muted" aria-hidden="true" />
             Reached
@@ -266,9 +293,13 @@ function EtaAndRequired({ goal, summary }) {
  * line runs straight from today's balance to the target on that date — the
  * pace the goal would have to keep.
  *
- * @param {{ goal: Goal, summary: GoalsSummary }} props
+ * Memoised: `goal` and `summary` come straight from the query, so they only
+ * change when the data does. Unmemoised, opening any dialog on the page
+ * re-rendered every goal's chart (perf-inp-plan.md, P2 #9).
  */
-function GoalCurve({ goal, summary }) {
+const GoalCurve = memo(
+  /** @param {{ goal: Goal, summary: GoalsSummary }} props */
+  function GoalCurve({ goal, summary }) {
   const { currency, locale } = useSettings();
   const moneyTick = useMoneyTick();
   const motion = useChartMotion();
@@ -308,7 +339,7 @@ function GoalCurve({ goal, summary }) {
     <Chart
       height={160}
       ariaLabel={`Projected balance for ${goal.goal.name} against a target of ${formatMoney(goal.targetCents, { currency, locale })}, currently ${formatMoney(goal.currentBalanceCents, { currency, locale })}.`}
-      dataTable={{
+      dataTable={() => ({
         caption: `Projected balance for ${goal.goal.name}, against its target`,
         columns: ["Date", "Projected", "Target"],
         rows: goal.curve.map((point) => [
@@ -316,11 +347,15 @@ function GoalCurve({ goal, summary }) {
           formatMoney(point.projectedCents, { currency, locale }),
           formatMoney(goal.targetCents, { currency, locale }),
         ]),
-      }}
+      })}
       empty={goal.curve.length < 2}
       emptyTitle="Nothing to project yet"
       emptyDescription={
-        goal.isFunded ? "This goal is already at its target." : "Fund this account from an allocation line to see a curve."
+        !goal.targetComputable
+          ? "Record your essential costs and this goal gets a target to project towards."
+          : goal.isFunded
+            ? "This goal is already at its target."
+            : "Fund this account from an allocation line to see a curve."
       }
       config={{
         projected: { label: "Projected", color: TOTAL },
@@ -356,7 +391,7 @@ function GoalCurve({ goal, summary }) {
       </ComposedChart>
     </Chart>
   );
-}
+});
 
 /**
  * The emergency fund's own treatment: how long the household could last as the
@@ -367,6 +402,25 @@ function GoalCurve({ goal, summary }) {
  */
 function ExpenseCoverPanel({ goal, summary }) {
   const covered = goal.monthsCovered ?? 0;
+
+  // Months of cover are months of essential costs. With none recorded, the
+  // panel used to say "0.0 months covered" beside a "Reached" — two
+  // confident answers to a question that can't be asked yet.
+  if (!goal.targetComputable) {
+    return (
+      <div className="flex flex-col gap-1">
+        <p className="text-lg font-semibold text-text">{NEEDS_COSTS}</p>
+        <p className="text-xs text-text-muted">
+          This goal is {goal.goal.targetMonths} months of your essential costs, and none are recorded yet — so there
+          is nothing to count months of.{" "}
+          <Link to="/costs/fixed" className="font-medium text-text underline underline-offset-2">
+            Record your bills
+          </Link>{" "}
+          and essential spending, and the months covered appear here.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-3">
@@ -675,7 +729,7 @@ export function GoalsPage() {
   const navigate = useNavigate();
   const confirm = useConfirm();
   const queryClient = useQueryClient();
-  const today = useMemo(todayIso, []);
+  const today = useTodayIso();
 
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState(/** @type {Goal | null} */ (null));
@@ -684,7 +738,9 @@ export function GoalsPage() {
   const goalsQuery = useQuery({
     queryKey: ["goals", today],
     queryFn: async () => {
-      const res = await api.goals.$get({ query: {} });
+      // The browser's today, sent: the server's own clock can sit in another
+      // zone, and every ETA and "months covered" is counted from this date.
+      const res = await api.goals.$get({ query: { on: today } });
       if (!res.ok) throw new Error(await readApiError(res));
       return /** @type {{ goals: Goal[], summary: GoalsSummary, warnings: { code: string, message: string }[] }} */ (
         await res.json()
@@ -808,6 +864,8 @@ export function GoalsPage() {
         }
       />
 
+      <GoalsTabs />
+
       {summary ? (
         <StatGroup aria-label="Goals summary">
           <Stat label="Active goals" value={summary.activeCount} />
@@ -863,6 +921,9 @@ export function GoalsPage() {
 
       {isLoading ? (
         <CardsSkeleton cards={3} height={280} label="Loading goals" />
+      ) : goalsQuery.isError ? (
+        // Not "No goals yet": that invites adding a goal that already exists.
+        <QueryError error={goalsQuery.error} onRetry={() => goalsQuery.refetch()} what="your goals" />
       ) : goals.length === 0 ? (
         <EmptyState
           icon={TargetIcon}

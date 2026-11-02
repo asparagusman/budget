@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   allocationDraftHistory,
+  draftLineProblem,
   draftLineToEngine,
+  draftProblems,
   draftLinesSignature,
   draftLinesToPayload,
   draftStageGoalsToPayload,
@@ -41,6 +43,12 @@ function idOf(label) {
 
 function labels() {
   return useAllocationDraft.getState().lines.map((l) => [l.stage, l.label]);
+}
+
+/** The signature an autosave would send for the draft as it stands. */
+function currentSignature() {
+  const { lines, stageGoals } = useAllocationDraft.getState();
+  return draftLinesSignature(lines, stageGoals);
 }
 
 describe("the value input, which means a different thing per basis", () => {
@@ -96,6 +104,76 @@ describe("what gets sent to the server", () => {
   });
 });
 
+describe("what can't be saved yet", () => {
+  // An incomplete line used to go to the server anyway: the PUT 400'd, the
+  // whole autosave was refused, nothing retried, and the page went on saying
+  // "saving shortly". These are the API's own rules, checked first so the
+  // line is marked and nothing is sent.
+
+  /** @param {Partial<import("./allocation-draft.js").DraftLine>} patch */
+  function line(patch) {
+    return {
+      id: "l",
+      stage: 2,
+      label: "Mojo",
+      basis: /** @type {Basis} */ ("pct_of_gross"),
+      valueText: "10",
+      goalPctText: "",
+      accountId: ACCOUNT,
+      ...patch,
+    };
+  }
+
+  it("passes a complete line, and one whose amount is injected rather than typed", () => {
+    expect(draftLineProblem(line({}))).toBeNull();
+    expect(draftLineProblem(line({ basis: "from_fixed_costs", valueText: "" }))).toBeNull();
+  });
+
+  it("marks a line added but not yet given a value", () => {
+    expect(draftLineProblem(line({ valueText: "" }))).toEqual({ field: "value", message: "Needs a value." });
+    expect(draftLineProblem(line({ basis: "sweep", valueText: "" }))?.message).toBe("Needs a value.");
+    // "." is what the field holds between keystrokes; it is not a number yet.
+    expect(draftLineProblem(line({ valueText: "." }))?.message).toBe("The value isn't a number.");
+  });
+
+  it("marks a percentage over 100 typed on the way to something else", () => {
+    expect(draftLineProblem(line({ valueText: "150" }))?.message).toMatch(/100 is the most/);
+    expect(draftLineProblem(line({ basis: "pct_of_remaining", valueText: "100" }))).toBeNull();
+    // A fixed amount is dollars, not a percentage.
+    expect(draftLineProblem(line({ basis: "fixed_amount", valueText: "150" }))).toBeNull();
+  });
+
+  it("marks a goal outside 0–100 and a line with nowhere to go, on the field at fault", () => {
+    expect(draftLineProblem(line({ goalPctText: "120" }))).toMatchObject({
+      field: "goal",
+      message: expect.stringMatching(/between 0 and 100/),
+    });
+    expect(draftLineProblem(line({ accountId: "" }))).toEqual({
+      field: "destination",
+      message: "Choose where this goes.",
+    });
+  });
+
+  it("marks the second line drawing the same injected total, not the first", () => {
+    const problems = draftProblems(
+      [
+        line({ id: "a", stage: 1, basis: "from_fixed_costs", valueText: "" }),
+        line({ id: "b", stage: 1, basis: "from_fixed_costs", valueText: "" }),
+      ],
+      {},
+    );
+    expect(problems.byLine.has("a")).toBe(false);
+    expect(problems.byLine.get("b")?.message).toMatch(/Only one line/);
+    expect(problems.count).toBe(1);
+  });
+
+  it("marks a section goal over 100, and ignores a cleared one", () => {
+    const problems = draftProblems([line({})], { 1: "", 2: "140", 3: "25" });
+    expect([...problems.byStage.keys()]).toEqual([2]);
+    expect(problems.byLine.size).toBe(0);
+  });
+});
+
 describe("telling our draft apart from the one the other browser saved", () => {
   it("ignores line ids, which the server reassigns on every save", () => {
     useAllocationDraft.getState().load("v1", LOADED);
@@ -119,6 +197,72 @@ describe("telling our draft apart from the one the other browser saved", () => {
   });
 });
 
+describe("remembering what the server holds, across page visits", () => {
+  // The page decides whether to re-adopt the server's draft by comparing it
+  // with this. It used to live in a component ref that restarted at null on
+  // every visit, so every visit reloaded the draft — new line ids, every row
+  // remounted — from a cached preview that could predate this browser's own
+  // last autosave (perf-inp-plan.md, P2 #1).
+  beforeEach(() => {
+    useAllocationDraft.getState().reset();
+  });
+
+  it("records the loaded draft's signature", () => {
+    useAllocationDraft.getState().load("v1", LOADED, [{ stage: 2, goalPct: 20 }]);
+    expect(useAllocationDraft.getState().savedSignature).toBe(
+      serverLinesSignature(LOADED, [{ stage: 2, goalPct: 20 }]),
+    );
+  });
+
+  it("moves it forward to whatever each save sent", () => {
+    useAllocationDraft.getState().load("v1", LOADED);
+    useAllocationDraft.getState().markSaved("after-save");
+    expect(useAllocationDraft.getState().savedSignature).toBe("after-save");
+    expect(useAllocationDraft.getState().serverSignature).toBe("after-save");
+  });
+
+  it("keeps what the server wrote back apart from what was sent", () => {
+    // A goal of 12.345% comes back as 12.35. `dirty` must compare against
+    // what was SENT (or the rounded copy reads unsaved and autosaves in a
+    // loop); the page's "did the other session change it?" check must
+    // compare against what came BACK (or our own save reloads the draft
+    // over the operator's undo history).
+    useAllocationDraft.getState().load("v1", LOADED);
+    useAllocationDraft.getState().updateLine(idOf("Mojo"), { goalPctText: "12.345" });
+    const sent = currentSignature();
+    useAllocationDraft.getState().markSaved(sent, "as-stored");
+    expect(useAllocationDraft.getState().dirty).toBe(false);
+    expect(useAllocationDraft.getState().serverSignature).toBe("as-stored");
+  });
+
+  it("puts loaded lines in section-then-position order, and calls that clean", () => {
+    // The draft's own signature reads position from the array, so a load that
+    // kept the server's arbitrary row order would look edited the moment it
+    // landed — and autosave a reorder nobody made.
+    useAllocationDraft.getState().load("v1", [...LOADED].reverse());
+    expect(labels()).toEqual([
+      [1, "Bills"],
+      [2, "Mojo"],
+      [2, "House"],
+      [3, "Spending"],
+    ]);
+    expect(useAllocationDraft.getState().dirty).toBe(false);
+  });
+
+  it("forgets it on reset", () => {
+    useAllocationDraft.getState().load("v1", LOADED);
+    useAllocationDraft.getState().reset();
+    expect(useAllocationDraft.getState().savedSignature).toBeNull();
+    expect(useAllocationDraft.getState().serverSignature).toBeNull();
+  });
+
+  it("leaves an already-empty draft alone on reset, so nothing re-renders", () => {
+    const before = useAllocationDraft.getState().lines;
+    useAllocationDraft.getState().reset();
+    expect(useAllocationDraft.getState().lines).toBe(before);
+  });
+});
+
 describe("editing the draft", () => {
   beforeEach(() => {
     useAllocationDraft.getState().reset();
@@ -129,7 +273,37 @@ describe("editing the draft", () => {
     expect(useAllocationDraft.getState().dirty).toBe(false);
     useAllocationDraft.getState().updateLine(idOf("Mojo"), { valueText: "12" });
     expect(useAllocationDraft.getState().dirty).toBe(true);
-    useAllocationDraft.getState().markSaved();
+    useAllocationDraft.getState().markSaved(currentSignature());
+    expect(useAllocationDraft.getState().dirty).toBe(false);
+  });
+
+  it("keeps an edit typed while a save was in flight", () => {
+    // The autosave sends "12"; before it answers, the operator types "15".
+    // The save's success used to clear `dirty` outright, so "15" sat on
+    // screen, unsent, with nothing left to send it.
+    const mojo = idOf("Mojo");
+    useAllocationDraft.getState().updateLine(mojo, { valueText: "12" });
+    const sent = currentSignature();
+    useAllocationDraft.getState().updateLine(mojo, { valueText: "15" });
+    useAllocationDraft.getState().markSaved(sent);
+    expect(useAllocationDraft.getState().dirty).toBe(true);
+
+    // The follow-up save sends "15", and only that one clears it.
+    useAllocationDraft.getState().markSaved(currentSignature());
+    expect(useAllocationDraft.getState().dirty).toBe(false);
+  });
+
+  it("is clean again when an edit lands back on what was saved", () => {
+    const mojo = idOf("Mojo");
+    useAllocationDraft.getState().updateLine(mojo, { valueText: "12" });
+    useAllocationDraft.getState().updateLine(mojo, { valueText: "10" });
+    // Nothing differs from the server, so there is nothing to autosave.
+    expect(useAllocationDraft.getState().dirty).toBe(false);
+  });
+
+  it("does not count a change the save would normalise away", () => {
+    // A trailing space is trimmed on the way out, so it is not an edit.
+    useAllocationDraft.getState().updateLine(idOf("Mojo"), { label: "Mojo " });
     expect(useAllocationDraft.getState().dirty).toBe(false);
   });
 
@@ -243,17 +417,49 @@ describe("undo", () => {
     expect(useAllocationDraft.getState().lines.find((l) => l.id === mojo)?.valueText).toBe("12");
   });
 
-  it("restores the lines without un-dirtying the draft", () => {
+  it("makes the draft dirty when an undo goes back past a save", () => {
+    // Type 99, let it autosave, then undo. The screen shows the old value
+    // while the server holds 99 — and an undo that left the draft "saved"
+    // skipped the autosave, so Apply promoted the 99 the operator had undone.
+    const mojo = idOf("Mojo");
+    useAllocationDraft.getState().updateLine(mojo, { valueText: "99" });
+    useAllocationDraft.getState().markSaved(currentSignature());
+    expect(useAllocationDraft.getState().dirty).toBe(false);
+
+    allocationDraftHistory.getState().undo();
+    expect(useAllocationDraft.getState().lines.find((l) => l.id === mojo)?.valueText).toBe("10");
+    expect(useAllocationDraft.getState().dirty).toBe(true);
+
+    // And redo back onto the saved state is clean again: nothing to send.
+    allocationDraftHistory.getState().redo();
+    expect(useAllocationDraft.getState().dirty).toBe(false);
+  });
+
+  it("calls an undo that lands exactly on the saved state clean", () => {
     useAllocationDraft.getState().updateLine(idOf("Mojo"), { valueText: "99" });
-    useAllocationDraft.getState().markSaved();
+    useAllocationDraft.getState().markSaved(currentSignature());
     vi.advanceTimersByTime(400);
     useAllocationDraft.getState().removeLine(idOf("House"));
+    expect(useAllocationDraft.getState().dirty).toBe(true);
 
     allocationDraftHistory.getState().undo();
     expect(labels()).toHaveLength(4);
-    // An undo that also cleared `dirty` would skip the autosave that has to
-    // follow it, and the server would keep the state the operator just undid.
-    expect(useAllocationDraft.getState().dirty).toBe(true);
+    expect(useAllocationDraft.getState().dirty).toBe(false);
+  });
+
+  it("records no undo step for a save, and keeps redo through one", () => {
+    // Saving touches only bookkeeping. It used to push a copy of the current
+    // lines onto the stack — one press of Undo after every autosave did
+    // nothing visible — and to wipe the redo stack.
+    useAllocationDraft.getState().updateLine(idOf("Mojo"), { valueText: "99" });
+    vi.advanceTimersByTime(1000);
+    useAllocationDraft.getState().markSaved(currentSignature());
+    expect(allocationDraftHistory.getState().pastStates).toHaveLength(1);
+
+    allocationDraftHistory.getState().undo();
+    vi.advanceTimersByTime(1000);
+    useAllocationDraft.getState().markSaved(currentSignature());
+    expect(allocationDraftHistory.getState().futureStates).toHaveLength(1);
   });
 
   it("forgets the previous plan's history when a new one is loaded", () => {

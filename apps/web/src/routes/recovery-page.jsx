@@ -11,7 +11,7 @@ import { DataList, DataListRow } from "@/components/data-list.jsx";
 import { useConfirm } from "@/components/confirm-dialog.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
-import { useAuth } from "@/lib/auth.jsx";
+import { passkeyRemovedMessage, useAuth } from "@/lib/auth.jsx";
 
 /**
  * Where a recovery-password session lands, and the only screen it can use.
@@ -72,9 +72,9 @@ export function RecoveryPage() {
       if (!res.ok) throw new Error(await readApiError(res));
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["credentials"] });
-      toast.success("Passkey removed.");
+      toast.success(passkeyRemovedMessage(result.revokedSessions));
     },
     onError: (err) => toast.error(err.message),
   });
@@ -96,7 +96,10 @@ export function RecoveryPage() {
     }
   }
 
-  const users = usersQuery.data ?? [];
+  // Active users only: a deactivated member can't be issued a device link
+  // (the API refuses with `inactive_user`), so offering them would only lead
+  // to an error after the click.
+  const users = (usersQuery.data ?? []).filter((user) => user.isActive);
   const credentials = credentialsQuery.data ?? [];
 
   return (

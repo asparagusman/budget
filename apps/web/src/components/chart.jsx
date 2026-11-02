@@ -12,6 +12,7 @@ import {
   ChartTooltipContent,
 } from "@/components/ui/chart.jsx";
 import { formatMoney } from "@/lib/format-money.js";
+import { getDateFormat } from "@/lib/dates.js";
 import { useReducedMotion } from "@/lib/motion.js";
 import { useSettings } from "@/lib/settings.jsx";
 import { ScrollArea } from "@/components/scroll-area.jsx";
@@ -152,9 +153,9 @@ export function useTimeAxis(fromMs, toMs, target = 8) {
   const { locale } = useSettings();
 
   return useMemo(() => {
-    const dayFmt = new Intl.DateTimeFormat(locale, { day: "numeric", month: "short" });
-    const monthFmt = new Intl.DateTimeFormat(locale, { month: "short" });
-    const monthYearFmt = new Intl.DateTimeFormat(locale, { month: "short", year: "numeric" });
+    const dayFmt = getDateFormat(locale, { day: "numeric", month: "short" });
+    const monthFmt = getDateFormat(locale, { month: "short" });
+    const monthYearFmt = getDateFormat(locale, { month: "short", year: "numeric" });
 
     const valid = Number.isFinite(fromMs) && Number.isFinite(toMs) && toMs > fromMs;
     const from = new Date(fromMs);
@@ -334,11 +335,16 @@ function DataTableView({ table, id }) {
  * well wherever the chart is the only place a figure appears — the operator
  * gets a "Table" toggle and the same numbers as rows.
  *
+ * `dataTable` is a FUNCTION returning the table, called only once the table
+ * is opened. Built eagerly, every row's money and date formatting ran on
+ * every render of every chart's parent — for a table almost nobody opens
+ * (.claude/plans/perf-inp-plan.md, P1.5).
+ *
  * @param {{
  *   children: import("react").ComponentProps<typeof ChartContainer>["children"],
  *   config: import("@/components/ui/chart.jsx").ChartConfig,
  *   ariaLabel?: string,
- *   dataTable?: ChartDataTable | null,
+ *   dataTable?: (() => ChartDataTable) | null,
  *   loading?: boolean,
  *   empty?: boolean,
  *   emptyTitle?: string,
@@ -401,7 +407,7 @@ export function Chart({
           {showTable ? "Hide table" : "Table"}
         </Button>
       </div>
-      {showTable ? <DataTableView table={dataTable} id={tableId} /> : canvas}
+      {showTable ? <DataTableView table={dataTable()} id={tableId} /> : canvas}
     </div>
   );
 }

@@ -4,6 +4,7 @@ import { Link } from "@tanstack/react-router";
 import {
   AlertTriangleIcon,
   CheckCircle2Icon,
+  ChevronRightIcon,
   FileSpreadsheetIcon,
   InfoIcon,
   UploadIcon,
@@ -17,10 +18,11 @@ import { DatePicker } from "@/components/date-picker.jsx";
 import { EmptyState } from "@/components/empty-state.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
 import { Money } from "@/components/money.jsx";
-import { InlineError } from "@/components/notice.jsx";
+import { InlineError, NoticeList } from "@/components/notice.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
 import { ACCOUNT_TYPES, ACCOUNT_TYPE_LABELS, CADENCE_LABELS } from "@/lib/constants.js";
-import { commitImport, fetchImportPreview } from "@/lib/import-api.js";
+import { commitImport, fetchImportPreview, importErrorMessage } from "@/lib/import-api.js";
+import { splitHref, transferRows, visibleOverwrites } from "@/lib/import-review.js";
 import { cn } from "@/lib/utils.js";
 
 /** @import { Cents } from "@budget/engine" */
@@ -243,13 +245,17 @@ function DestinationMapping({ preview, accounts, choices, onChange }) {
  * are expected, and the ones that are not are exactly what this is for
  * (phases/11-polish-mobile-import.md, "Post-import verification").
  *
- * @param {{ result: ImportResult, accounts: ImportPreviewResponse["accounts"], createdNames: string[] }} props
+ * @param {{ result: ImportResult }} props
  */
-function Reconciliation({ result, accounts }) {
+function Reconciliation({ result }) {
   const { reconciliation: r } = result;
-  const nameOf = (/** @type {string} */ id) => accounts.find((a) => a.id === id)?.name ?? "New account";
 
-  /** @param {{ label: string, spreadsheet: Cents | null, imported: Cents, note?: string }} row */
+  /**
+   * `imported` is null for a transfer the workbook made and the app now
+   * doesn't — shown as "—", and as differing, which it does.
+   *
+   * @param {{ label: import("react").ReactNode, spreadsheet: Cents | null, imported: Cents | null, note?: string }} row
+   */
   function CompareRow({ label, spreadsheet, imported, note }) {
     const matches = spreadsheet !== null && spreadsheet === imported;
     return (
@@ -262,9 +268,7 @@ function Reconciliation({ result, accounts }) {
           <span aria-hidden="true" className="text-text-subtle">
             →
           </span>
-          <span className="font-medium text-text">
-            <Money value={imported} />
-          </span>
+          <span className="font-medium text-text">{imported === null ? "—" : <Money value={imported} />}</span>
           {/* No spreadsheet figure ("—") is nothing to reconcile, not a
               discrepancy — amber "differs" there would invent a problem. */}
           {spreadsheet === null ? null : matches ? (
@@ -353,53 +357,39 @@ function Reconciliation({ result, accounts }) {
             )
           }
         >
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div>
-              <p className="mb-1 text-xs font-medium tracking-wide text-text-subtle uppercase">Spreadsheet</p>
-              <ul className="flex flex-col text-sm">
-                {plan.spreadsheetTransfers.map((transfer) => (
-                  <li key={transfer.label} className="flex justify-between gap-3 py-1">
-                    <span className="truncate text-text-muted">{transfer.label}</span>
-                    <span className="shrink-0 tabular-nums text-text-muted">
-                      <Money value={transfer.amountCents} />
-                    </span>
-                  </li>
-                ))}
-                <li className="mt-1 flex justify-between gap-3 border-t border-border pt-1 font-medium">
-                  <span>Total</span>
-                  <span className="tabular-nums">
-                    {plan.spreadsheetTransferTotalCents === null ? (
-                      "—"
-                    ) : (
-                      <Money value={plan.spreadsheetTransferTotalCents} />
-                    )}
-                  </span>
-                </li>
-              </ul>
-            </div>
-            <div>
-              <p className="mb-1 text-xs font-medium tracking-wide text-text-subtle uppercase">Imported</p>
-              <ul className="flex flex-col text-sm">
-                {plan.importedTransfers.map((transfer) => (
-                  <li key={transfer.accountId} className="flex justify-between gap-3 py-1">
-                    <span className="truncate text-text">
-                      {nameOf(transfer.accountId)}
-                      {transfer.isNoOp ? <span className="text-text-subtle"> · no move</span> : null}
-                    </span>
-                    <span className="shrink-0 tabular-nums">
-                      <Money value={transfer.perPayCents} />
-                    </span>
-                  </li>
-                ))}
-                <li className="mt-1 flex justify-between gap-3 border-t border-border pt-1 font-medium">
-                  <span>Total</span>
-                  <span className="tabular-nums">
-                    <Money value={plan.importedTotalPerPayCents} />
-                  </span>
-                </li>
-              </ul>
-            </div>
-          </div>
+          {/* One row per account, the workbook's figure beside the app's —
+              read across, not matched up by eye between two lists. */}
+          <ul className="flex flex-col">
+            <li
+              aria-hidden="true"
+              className="flex justify-end gap-3 pb-1 text-xs font-medium tracking-wide text-text-subtle uppercase"
+            >
+              <span>Spreadsheet → imported</span>
+            </li>
+            {transferRows(plan).map((row) => (
+              <CompareRow
+                key={row.key}
+                label={
+                  <>
+                    {row.name}
+                    {row.isNoOp ? <span className="text-text-subtle"> · no move</span> : null}
+                  </>
+                }
+                spreadsheet={row.spreadsheetCents}
+                imported={row.importedCents}
+                note={
+                  row.sheetLabels.length > 0 && !(row.sheetLabels.length === 1 && row.sheetLabels[0] === row.name)
+                    ? `Workbook: ${row.sheetLabels.join(", ")}`
+                    : undefined
+                }
+              />
+            ))}
+            <CompareRow
+              label={<span className="font-medium">Total</span>}
+              spreadsheet={plan.spreadsheetTransferTotalCents}
+              imported={plan.importedTotalPerPayCents}
+            />
+          </ul>
           <p className="text-xs text-text-muted">
             Gross is <Money value={plan.grossPerPayCents} /> and transfers total{" "}
             <Money value={plan.importedTotalPerPayCents} />.{" "}
@@ -410,6 +400,151 @@ function Reconciliation({ result, accounts }) {
         </Section>
       ))}
     </div>
+  );
+}
+
+/**
+ * What is left to set up, straight from the household's setup checklist — the
+ * same list the dashboard shows, worked out from the database rather than
+ * from this import. It used to be a list of its own, held in this page's
+ * state, so it was gone the moment the operator clicked away to act on it.
+ *
+ * @param {{ setup: ImportResult["setup"] }} props
+ */
+function StillToDo({ setup }) {
+  const remaining = setup.steps.filter((step) => !step.done);
+  if (remaining.length === 0) return null;
+  return (
+    <Section
+      title="Still to do"
+      description="The dashboard keeps this same list and ticks each item off once it's done, so nothing here needs remembering."
+    >
+      <ul className="flex flex-col divide-y divide-border">
+        {remaining.map((step) => {
+          const { to, hash } = splitHref(step.href);
+          return (
+            <li key={step.key}>
+              <Link
+                to={to}
+                hash={hash}
+                className="flex min-h-11 items-center justify-between gap-3 rounded-(--radius-control) px-2 py-2 transition-colors hover:bg-surface-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent)"
+              >
+                <span className="min-w-0">
+                  <span className="block text-sm text-text">
+                    {step.label}
+                    {step.optional ? <span className="text-text-subtle"> · optional</span> : null}
+                  </span>
+                  {step.hint ? <span className="block text-xs text-text-muted">{step.hint}</span> : null}
+                </span>
+                <ChevronRightIcon className="size-4 shrink-0 text-text-subtle" aria-hidden="true" />
+              </Link>
+            </li>
+          );
+        })}
+      </ul>
+    </Section>
+  );
+}
+
+/** @type {Record<string, string>} */
+const OVERWRITE_KIND_LABELS = {
+  bill: "Bill",
+  income_line: "Income line",
+  variable_category: "Variable cost",
+  plan: "Allocation plan",
+};
+
+/** @param {string | number | boolean | null} value */
+function cadenceName(value) {
+  return typeof value === "string" ? (/** @type {Record<string, string>} */ (CADENCE_LABELS)[value] ?? value) : "—";
+}
+
+/**
+ * One field a re-import would change, in words, with money as money.
+ *
+ * @param {{ change: ImportPreviewResponse["reimport"]["overwrites"][number]["changes"][number], fallback: string }} props
+ *   `fallback` — the server's own sentence for the whole overwrite, for a
+ *   field this screen doesn't know how to word.
+ */
+function ReimportChange({ change, fallback }) {
+  const { field, from, to } = change;
+  if ((field === "amount" || field === "budget") && typeof to === "number") {
+    return (
+      <>
+        {field === "amount" ? "Amount" : "Monthly budget, from the import date"}{" "}
+        {typeof from === "number" ? <Money value={from} /> : "—"} → <Money value={to} />
+      </>
+    );
+  }
+  if (field === "frequency" || field === "cadence" || field === "budgetCadence") {
+    return (
+      <>
+        {field === "budgetCadence" ? "Budget cadence" : "How often"} {cadenceName(from)} → {cadenceName(to)}
+      </>
+    );
+  }
+  if (field === "isEssential") return <>{to ? "Becomes essential" : "Stops being essential"}</>;
+  if (field === "incomeVariant") return <>Divides {String(to)} instead of {from === null ? "an unknown variant" : String(from)}</>;
+  if (field === "draft") {
+    return <>Its open draft (v{String(from)}) is replaced by the workbook&apos;s lines, losing any unapplied edits in it</>;
+  }
+  return <>{fallback}</>;
+}
+
+/**
+ * What importing this file over what's already here will change. A re-import
+ * matches rows by name and updates them in place, which is the right thing
+ * for a corrected workbook and a surprise otherwise — so the preview says
+ * row by row what it will overwrite, for the rows that are ticked, and the
+ * plain rules for what it never touches.
+ *
+ * @param {{ reimport: ImportPreviewResponse["reimport"], selected: ReadonlySet<string> }} props
+ */
+function ReimportSummary({ reimport, selected }) {
+  const shown = visibleOverwrites(reimport.overwrites, selected);
+  return (
+    <Section
+      title="Re-importing over what's here"
+      description={`${reimport.matchedCount} row${reimport.matchedCount === 1 ? "" : "s"} in this workbook match${reimport.matchedCount === 1 ? "es" : ""} something already in the app, by name. Matching rows are updated, not duplicated.`}
+    >
+      {shown.length === 0 ? (
+        <p className="text-sm text-text-muted">
+          None of the ticked rows changes anything already here — where they match, the figures are the same.
+        </p>
+      ) : (
+        <NoticeList
+          items={shown.map((overwrite) => ({
+            key: `${overwrite.kind}:${overwrite.name}`,
+            content: (
+              <>
+                <p className="font-medium">
+                  {overwrite.name}
+                  <span className="font-normal text-text-muted"> · {OVERWRITE_KIND_LABELS[overwrite.kind] ?? overwrite.kind}</span>
+                </p>
+                <ul className="mt-0.5 flex flex-col gap-0.5 text-text-muted">
+                  {overwrite.changes.map((change) => (
+                    <li key={change.field}>
+                      <ReimportChange change={change} fallback={overwrite.message} />
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ),
+          }))}
+        />
+      )}
+      <div>
+        <h3 className="text-xs font-medium tracking-wide text-text-subtle uppercase">What a re-import touches</h3>
+        <ul className="mt-1.5 flex flex-col gap-1.5 text-xs text-text-muted">
+          {reimport.rules.map((rule) => (
+            <li key={rule} className="flex gap-2">
+              <span aria-hidden="true">·</span>
+              <span>{rule}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </Section>
   );
 }
 
@@ -465,7 +600,7 @@ export function ImportPage() {
       setPlanVariants(variants);
       setDestinations({});
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not read that file.");
+      setError(importErrorMessage(err, "Could not read that file."));
       setResponse(null);
       setFile(null);
     } finally {
@@ -520,6 +655,8 @@ export function ImportPage() {
   const canImport =
     preview !== null && !busy && unmappedCount === 0 && missingVariants.length === 0 && selected.size > 0;
 
+  const overwriteCount = response ? visibleOverwrites(response.reimport.overwrites, selected).length : 0;
+
   async function runImport() {
     if (!file || !preview) return;
     setBusy(true);
@@ -536,7 +673,7 @@ export function ImportPage() {
       await queryClient.invalidateQueries();
       toast.success("Import complete.");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "The import failed.");
+      setError(importErrorMessage(err, "The import failed."));
     } finally {
       setBusy(false);
     }
@@ -565,35 +702,21 @@ export function ImportPage() {
               </li>
             ))}
           </ul>
+          {result.createdAccountNames.length > 0 ? (
+            <p className="text-sm text-text-muted">
+              New account{result.createdAccountNames.length === 1 ? "" : "s"}: {result.createdAccountNames.join(", ")}.
+              Check each one&apos;s type and growth rate on{" "}
+              <Link to="/accounts" className="font-medium text-text underline underline-offset-2">
+                Accounts
+              </Link>
+              .
+            </p>
+          ) : null}
         </Section>
 
-        {result.nextSteps.length > 0 ? (
-          <Section title="Still to do" description="Decisions the app will not make for you.">
-            <ul className="flex flex-col gap-2 text-sm text-text">
-              {result.nextSteps.map((step) => (
-                <li key={step} className="flex gap-2">
-                  <span aria-hidden="true" className="text-text-subtle">
-                    ·
-                  </span>
-                  <span>{step}</span>
-                </li>
-              ))}
-            </ul>
-            <div className="flex flex-wrap gap-2">
-              <Button asChild variant="outline" size="sm">
-                <Link to="/allocation">Open allocation</Link>
-              </Button>
-              <Button asChild variant="outline" size="sm">
-                <Link to="/accounts">Open accounts</Link>
-              </Button>
-              <Button asChild variant="outline" size="sm">
-                <Link to="/costs/fixed">Open fixed costs</Link>
-              </Button>
-            </div>
-          </Section>
-        ) : null}
+        <StillToDo setup={result.setup} />
 
-        <Reconciliation result={result} accounts={response.accounts} createdNames={result.createdAccountNames} />
+        <Reconciliation result={result} />
       </>
     );
   }
@@ -619,6 +742,10 @@ export function ImportPage() {
             className="sr-only"
             onChange={(e) => {
               const next = e.target.files?.[0];
+              // Cleared straight away: a file input only fires `change` when
+              // its value changes, so after a failed preview choosing the same
+              // file again — the obvious retry — did nothing at all.
+              e.target.value = "";
               if (next) loadPreview(next);
             }}
           />
@@ -654,6 +781,10 @@ export function ImportPage() {
                   ))}
               </ul>
             </Section>
+          ) : null}
+
+          {response && response.reimport.matchedCount > 0 ? (
+            <ReimportSummary reimport={response.reimport} selected={selected} />
           ) : null}
 
           <Section
@@ -911,6 +1042,12 @@ export function ImportPage() {
             {missingVariants.length > 0 ? (
               <p className="text-sm text-text-muted">
                 Choose an income variant for {missingVariants.map((p) => p.name).join(", ")}.
+              </p>
+            ) : null}
+            {overwriteCount > 0 ? (
+              <p className="text-sm text-text-muted">
+                Updates {overwriteCount} record{overwriteCount === 1 ? "" : "s"} already in the app — listed under
+                &ldquo;Re-importing over what&apos;s here&rdquo;.
               </p>
             ) : null}
             <div className="flex items-center justify-between gap-3">

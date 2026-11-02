@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate, useSearch } from "@tanstack/react-router";
+import { Link, useLocation, useNavigate, useSearch } from "@tanstack/react-router";
 import { addDaysIso, projectPaydays, toCents } from "@budget/engine";
 import {
   AlertTriangleIcon,
@@ -40,12 +40,13 @@ import { Money } from "@/components/money.jsx";
 import { InlineError, Notice } from "@/components/notice.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
 import { PageSection } from "@/components/page-section.jsx";
+import { QueryError } from "@/components/query-error.jsx";
 import { useConfirm } from "@/components/confirm-dialog.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
 import { registerCommands } from "@/lib/commands.js";
 import { CADENCES, CADENCE_LABELS } from "@/lib/constants.js";
-import { formatIsoDate, todayIso } from "@/lib/dates.js";
+import { formatIsoDate, getDateFormat, todayIso } from "@/lib/dates.js";
 import { colorFor, entityColors } from "@/lib/entity-colors.js";
 import { useSettings } from "@/lib/settings.jsx";
 import { cn } from "@/lib/utils.js";
@@ -65,6 +66,25 @@ import { cn } from "@/lib/utils.js";
 /** @param {Person[]} people @param {string} personId */
 function personName(people, personId) {
   return people.find((p) => p.id === personId)?.name ?? "Unknown person";
+}
+
+/**
+ * Why something that belongs to a person can't be added yet, and the way
+ * forward — said on the page, where a phone can read it. First run only:
+ * the household's people are added under Admin.
+ *
+ * @param {{ what: string }} props `what` — the plural thing being blocked ("Pay schedules").
+ */
+function NoPeopleNotice({ what }) {
+  return (
+    <Notice>
+      {what} belong to a person, and there&apos;s no one in the household yet.{" "}
+      <Button asChild variant="link" className="h-auto p-0 align-baseline">
+        <Link to="/admin/people">Add the people in your household</Link>
+      </Button>{" "}
+      first.
+    </Notice>
+  );
 }
 
 /** @param {IncomeVariant[]} variants @param {string} variantId */
@@ -394,6 +414,7 @@ function IncomeLineFormDialog({ open, onOpenChange, line, people, submitting, on
           <DialogDescription>One person's income within this variant.</DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+          {people.length === 0 ? <NoPeopleNotice what="Income lines" /> : null}
           <FieldRow label="Person" htmlFor="line-person">
             <Select value={personId} onValueChange={setPersonId}>
               <SelectTrigger id="line-person" className="w-full">
@@ -445,7 +466,7 @@ function IncomeLineFormDialog({ open, onOpenChange, line, people, submitting, on
           </FieldRow>
           {error ? <InlineError>{error}</InlineError> : null}
           <DialogFooter>
-            <Button type="submit" disabled={submitting}>
+            <Button type="submit" disabled={submitting || people.length === 0}>
               {submitting ? "Saving…" : "Save"}
             </Button>
           </DialogFooter>
@@ -467,6 +488,7 @@ function IncomeLineFormDialog({ open, onOpenChange, line, people, submitting, on
  * }} props
  */
 function ScheduleEntryFormDialog({ open, onOpenChange, entry, variants, submitting, onSubmit, onDelete }) {
+  const { locale } = useSettings();
   const [variantId, setVariantId] = useState("");
   const [startsOn, setStartsOn] = useState(todayIso());
   const [openEnded, setOpenEnded] = useState(true);
@@ -545,8 +567,22 @@ function ScheduleEntryFormDialog({ open, onOpenChange, entry, variants, submitti
           >
             <Switch id="entry-open-ended" checked={openEnded} onCheckedChange={setOpenEnded} />
           </FieldRow>
+          {/* "Ends on" is exclusive — the variant stops at the start of that
+              day — but reads as inclusive, so "ends 30 Jun" beside "starts
+              1 Jul" quietly left 30 June with no variant at all. The hint
+              names the last day actually covered, and how to hand over. */}
           {!openEnded ? (
-            <FieldRow label="Ends on" htmlFor="entry-ends">
+            <FieldRow
+              label="Ends on"
+              htmlFor="entry-ends"
+              hint={
+                <>
+                  Not included: this variant stops at the start of that day.
+                  {endsOn > startsOn ? ` Last day covered: ${formatIsoDate(addDaysIso(endsOn, -1), locale)}.` : ""} To hand
+                  over without a gap, use the next entry&apos;s start date here.
+                </>
+              }
+            >
               <DatePicker id="entry-ends" value={endsOn} onChange={setEndsOn} />
             </FieldRow>
           ) : null}
@@ -581,7 +617,7 @@ function ScheduleEntryFormDialog({ open, onOpenChange, entry, variants, submitti
  */
 function quarterTicks(windowFrom, windowStartMs, windowEndMs) {
   const [y0, m0] = windowFrom.split("-").map(Number);
-  const fmt = new Intl.DateTimeFormat("en-AU", { month: "short", year: "numeric" });
+  const fmt = getDateFormat("en-AU", { month: "short", year: "numeric" });
   /** @type {{ ms: number, label: string }[]} */
   const ticks = [];
   let y = /** @type {number} */ (y0);
@@ -861,15 +897,17 @@ function ComparisonPanel({ variants, people, payCadenceLabel }) {
  *   isActive: boolean,
  *   people: Person[],
  *   payCadenceLabel: string | null,
+ *   duplicating: boolean,
  *   onEdit: () => void,
  *   onDuplicate: () => void,
  *   onArchive: () => void,
  *   onAddLine: () => void,
  *   onEditLine: (line: IncomeLine) => void,
  *   onDeleteLine: (id: string) => void,
- * }} props
+ * }} props `duplicating` disables Duplicate while a copy is being made — a
+ *   double click used to make two.
  */
-function VariantCard({ variant, isActive, people, payCadenceLabel, onEdit, onDuplicate, onArchive, onAddLine, onEditLine, onDeleteLine }) {
+function VariantCard({ variant, isActive, people, payCadenceLabel, duplicating, onEdit, onDuplicate, onArchive, onAddLine, onEditLine, onDeleteLine }) {
   return (
     <div
       className={cn(
@@ -886,7 +924,7 @@ function VariantCard({ variant, isActive, people, payCadenceLabel, onEdit, onDup
           {variant.notes ? <p className="mt-1 text-xs text-text-muted">{variant.notes}</p> : null}
         </div>
         <div className="flex shrink-0 items-center gap-1">
-          <Button size="icon-sm" variant="ghost" aria-label="Duplicate variant" onClick={onDuplicate}>
+          <Button size="icon-sm" variant="ghost" aria-label="Duplicate variant" onClick={onDuplicate} disabled={duplicating}>
             <CopyIcon />
           </Button>
           <Button size="icon-sm" variant="ghost" aria-label="Edit variant" onClick={onEdit}>
@@ -945,6 +983,7 @@ function VariantCard({ variant, isActive, people, payCadenceLabel, onEdit, onDup
  *   isActive: boolean,
  *   people: Person[],
  *   payCadenceLabel: string | null,
+ *   duplicating: boolean,
  *   onOpenChange: (open: boolean) => void,
  *   onEdit: () => void,
  *   onDuplicate: () => void,
@@ -986,12 +1025,13 @@ function VariantDetailSheet(props) {
  *   open: boolean,
  *   onOpenChange: (open: boolean) => void,
  *   schedule: PaySchedule | null,
+ *   hasPrimary: boolean,
  *   people: { id: string, name: string }[],
  *   submitting: boolean,
  *   onSubmit: (data: PayScheduleFormData) => Promise<void>,
- * }} props
+ * }} props `hasPrimary` — whether any schedule is primary already.
  */
-function PayScheduleFormDialog({ open, onOpenChange, schedule, people, submitting, onSubmit }) {
+function PayScheduleFormDialog({ open, onOpenChange, schedule, hasPrimary, people, submitting, onSubmit }) {
   const { locale } = useSettings();
   const [personId, setPersonId] = useState("");
   const [anchorDate, setAnchorDate] = useState(todayIso());
@@ -1004,8 +1044,16 @@ function PayScheduleFormDialog({ open, onOpenChange, schedule, people, submittin
     setPersonId(schedule?.personId ?? people[0]?.id ?? "");
     setAnchorDate(schedule?.anchorDate ?? todayIso());
     setCadence(schedule?.cadence ?? "fortnightly");
-    setIsPrimary(schedule?.isPrimary ?? false);
+    // A new schedule starts as Primary when none is: the first schedule a
+    // household adds is the one its cycle runs on, and leaving the switch
+    // off left every per-pay figure in the app blank with no clue why. Said
+    // here rather than defaulted on the server, which can't tell "left
+    // alone" from an explicit "not primary".
+    setIsPrimary(schedule ? schedule.isPrimary : !hasPrimary);
     setError(null);
+    // `hasPrimary` is read once per opening, not tracked: a refetch landing
+    // while the form is open must not flip a switch the operator set.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, schedule, people]);
 
   // Computed entirely client-side — @budget/engine is pure and zero-I/O, so
@@ -1053,6 +1101,7 @@ function PayScheduleFormDialog({ open, onOpenChange, schedule, people, submittin
           <DialogDescription>Any known payday — the rest of the series is derived from it.</DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+          {!schedule && people.length === 0 ? <NoPeopleNotice what="Pay schedules" /> : null}
           {!schedule ? (
             <FieldRow label="Person" htmlFor="schedule-person">
               <Select value={personId} onValueChange={setPersonId}>
@@ -1106,7 +1155,7 @@ function PayScheduleFormDialog({ open, onOpenChange, schedule, people, submittin
           ) : null}
           {error ? <InlineError>{error}</InlineError> : null}
           <DialogFooter>
-            <Button type="submit" disabled={submitting}>
+            <Button type="submit" disabled={submitting || (!schedule && people.length === 0)}>
               {submitting ? "Saving…" : "Save"}
             </Button>
           </DialogFooter>
@@ -1126,14 +1175,33 @@ function PayScheduleFormDialog({ open, onOpenChange, schedule, people, submittin
  * this panel's own: IncomePage already holds both, and a second `useQuery`
  * on the same keys would only be the same cache read written twice.
  *
- * @param {{ people: Person[], schedules: PaySchedule[], isLoading: boolean }} props
+ * @param {{
+ *   people: Person[],
+ *   peopleMissing: boolean,
+ *   schedules: PaySchedule[],
+ *   isLoading: boolean,
+ *   error: Error | null,
+ *   onRetry: () => unknown,
+ * }} props `peopleMissing` — people have loaded and there are none, which
+ *   is what disables adding a schedule.
  */
-function PaySchedulesPanel({ people, schedules, isLoading }) {
+function PaySchedulesPanel({ people, peopleMissing, schedules, isLoading, error, onRetry }) {
   const confirm = useConfirm();
   const { locale } = useSettings();
   const queryClient = useQueryClient();
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState(/** @type {PaySchedule | null} */ (null));
+  const hasPrimary = schedules.some((s) => s.isPrimary);
+
+  // Every "per pay" figure on this page — the variant cards' totals, the
+  // banner — is quoted in the primary schedule's cadence, and comes back
+  // from the server already converted. Refetching only the schedules left
+  // them all on the old cadence until something else happened to reload.
+  function invalidateSchedules() {
+    queryClient.invalidateQueries({ queryKey: ["pay-schedules"] });
+    queryClient.invalidateQueries({ queryKey: ["income-variants"] });
+    queryClient.invalidateQueries({ queryKey: ["income-resolve"] });
+  }
 
   const createMutation = useMutation({
     mutationFn: async (/** @type {PayScheduleFormData} */ data) => {
@@ -1142,7 +1210,7 @@ function PaySchedulesPanel({ people, schedules, isLoading }) {
       return res.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["pay-schedules"] });
+      invalidateSchedules();
       toast.success("Pay schedule added.");
     },
   });
@@ -1154,7 +1222,7 @@ function PaySchedulesPanel({ people, schedules, isLoading }) {
       return res.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["pay-schedules"] });
+      invalidateSchedules();
       toast.success("Pay schedule updated.");
     },
   });
@@ -1166,7 +1234,7 @@ function PaySchedulesPanel({ people, schedules, isLoading }) {
       return res.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["pay-schedules"] });
+      invalidateSchedules();
       toast.success("Pay schedule archived.");
     },
     onError: (err) => toast.error(err.message),
@@ -1227,15 +1295,21 @@ function PaySchedulesPanel({ people, schedules, isLoading }) {
               setFormOpen(true);
             }}
             disabled={people.length === 0}
-            title={people.length === 0 ? "Add a person first." : undefined}
           >
             <PlusIcon />
             Add pay schedule
           </Button>
         }
       >
+        {/* The reason the buttons are disabled, said where it can be read.
+            It used to live in a `title` tooltip, which a phone never shows —
+            so on first run the screen offered two dead buttons and no way
+            forward. */}
+        {peopleMissing ? <NoPeopleNotice what="Pay schedules" /> : null}
         {isLoading ? (
           <ListSkeleton rows={2} label="Loading pay schedules" />
+        ) : error ? (
+          <QueryError error={error} what="your pay schedules" onRetry={onRetry} />
         ) : schedules.length === 0 ? (
           <EmptyState
             icon={CalendarClockIcon}
@@ -1248,7 +1322,6 @@ function PaySchedulesPanel({ people, schedules, isLoading }) {
                   setFormOpen(true);
                 }}
                 disabled={people.length === 0}
-                title={people.length === 0 ? "Add a person in Admin first." : undefined}
               >
                 <PlusIcon />
                 Add pay schedule
@@ -1316,6 +1389,7 @@ function PaySchedulesPanel({ people, schedules, isLoading }) {
         open={formOpen}
         onOpenChange={setFormOpen}
         schedule={editing}
+        hasPrimary={hasPrimary}
         people={people}
         submitting={createMutation.isPending || updateMutation.isPending}
         onSubmit={async (data) => {
@@ -1338,7 +1412,11 @@ export function IncomePage() {
 
   const [variantFormOpen, setVariantFormOpen] = useState(false);
   const [editingVariant, setEditingVariant] = useState(/** @type {IncomeVariant | null} */ (null));
-  const [detailVariant, setDetailVariant] = useState(/** @type {IncomeVariant | null} */ (null));
+  // The id, not the variant: the phone's detail sheet is where lines are
+  // added, edited and deleted, and a stored copy of the variant never saw
+  // any of it — the sheet kept showing the lines as they were when it
+  // opened, which invited adding the "missing" line a second time.
+  const [detailVariantId, setDetailVariantId] = useState(/** @type {string | null} */ (null));
   const [lineForm, setLineForm] = useState(
     /** @type {{ variantId: string, line: IncomeLine | null } | null} */ (null),
   );
@@ -1395,7 +1473,11 @@ export function IncomePage() {
   });
 
   const variants = variantsQuery.data?.variants ?? [];
+  // Looked up afresh each render, so the sheet shows the variant as it is
+  // now. An archived variant drops out of `variants`, which closes it.
+  const detailVariant = detailVariantId ? (variants.find((v) => v.id === detailVariantId) ?? null) : null;
   const people = peopleQuery.data ?? [];
+  const peopleMissing = peopleQuery.isSuccess && people.length === 0;
   const schedule = scheduleQuery.data ?? [];
   const paySchedules = payScheduleQuery.data ?? [];
   const primarySchedule = paySchedules.find((s) => s.isPrimary) ?? null;
@@ -1575,6 +1657,18 @@ export function IncomePage() {
 
   const isLoading = variantsQuery.isLoading || peopleQuery.isLoading;
 
+  // Arriving at /income#pay-schedules — from the dashboard's setup list or
+  // the variable-costs empty state — should land on that section. The router
+  // scrolls to the hash as the page first renders, but everything above it
+  // is a skeleton then and grows as it loads, pushing the section back off
+  // screen; so scroll again once the page has settled.
+  const hash = useLocation({ select: (location) => location.hash });
+  const settled =
+    !isLoading && !scheduleQuery.isLoading && !payScheduleQuery.isLoading && !resolveQuery.isLoading;
+  useEffect(() => {
+    if (settled && hash === "pay-schedules") document.getElementById("pay-schedules")?.scrollIntoView({ block: "start" });
+  }, [settled, hash]);
+
   return (
     <>
       <PageHeader
@@ -1606,21 +1700,25 @@ export function IncomePage() {
         }
       />
 
-      <ActiveVariantBanner
-        resolution={resolveQuery.data}
-        isLoading={resolveQuery.isLoading}
-        variants={variants}
-        payCadenceLabel={payCadenceLabel}
-        override={overrideVariant}
-        onClearOverride={() =>
-          navigate({
-            to: "/income",
-            search: (/** @type {{ variant?: string }} */ prev) => ({ ...prev, variant: undefined }),
-          })
-        }
-      />
+      {resolveQuery.error ? (
+        <QueryError error={resolveQuery.error} what="today's income" onRetry={() => resolveQuery.refetch()} />
+      ) : (
+        <ActiveVariantBanner
+          resolution={resolveQuery.data}
+          isLoading={resolveQuery.isLoading}
+          variants={variants}
+          payCadenceLabel={payCadenceLabel}
+          override={overrideVariant}
+          onClearOverride={() =>
+            navigate({
+              to: "/income",
+              search: (/** @type {{ variant?: string }} */ prev) => ({ ...prev, variant: undefined }),
+            })
+          }
+        />
+      )}
 
-      {!payCadenceLabel && !payScheduleQuery.isLoading ? (
+      {!payCadenceLabel && payScheduleQuery.isSuccess ? (
         <div className="rounded-(--radius-card) bg-surface-muted p-3 text-sm text-text-muted">
           No primary pay schedule is set, so per-pay figures aren&apos;t available yet — only per-month and per-year.{" "}
           <Button
@@ -1642,6 +1740,8 @@ export function IncomePage() {
       <PageSection title="Variant schedule">
         {scheduleQuery.isLoading ? (
           <PanelSkeleton height={140} label="Loading variant schedule" />
+        ) : scheduleQuery.error ? (
+          <QueryError error={scheduleQuery.error} what="the variant schedule" onRetry={() => scheduleQuery.refetch()} />
         ) : schedule.length === 0 ? (
           <EmptyState
             icon={CalendarRangeIcon}
@@ -1671,13 +1771,27 @@ export function IncomePage() {
       <PageSection title="Variants">
         {isLoading ? (
           <CardsSkeleton cards={3} height={300} label="Loading income variants" />
+        ) : variantsQuery.error || peopleQuery.error ? (
+          <QueryError
+            error={variantsQuery.error ?? peopleQuery.error}
+            what="your income variants"
+            onRetry={() => Promise.all([variantsQuery.refetch(), peopleQuery.refetch()])}
+          />
         ) : variants.length === 0 ? (
           <EmptyState
             icon={WalletIcon}
             title="No income variants yet"
             description="Add each income scenario the household goes through — Usual, and any parental-leave phases — starting with Usual."
             action={
-              <Button onClick={() => setVariantFormOpen(true)}>
+              // Clears the edit target first: after archiving the last
+              // variant from its own Edit, the form still held it, and "Add"
+              // opened an edit of the archived record.
+              <Button
+                onClick={() => {
+                  setEditingVariant(null);
+                  setVariantFormOpen(true);
+                }}
+              >
                 <PlusIcon />
                 Add income variant
               </Button>
@@ -1697,6 +1811,7 @@ export function IncomePage() {
                     setEditingVariant(variant);
                     setVariantFormOpen(true);
                   }}
+                  duplicating={duplicateVariant.isPending}
                   onDuplicate={() => duplicateVariant.mutate(variant.id)}
                   onArchive={() => confirmArchiveVariant(variant)}
                   onAddLine={() => setLineForm({ variantId: variant.id, line: null })}
@@ -1710,7 +1825,7 @@ export function IncomePage() {
               {variants.map((variant) => (
                 <DataListRow
                   key={variant.id}
-                  onClick={() => setDetailVariant(variant)}
+                  onClick={() => setDetailVariantId(variant.id)}
                   primary={
                     <span className="flex items-center gap-2">
                       {variant.name}
@@ -1743,8 +1858,11 @@ export function IncomePage() {
           variants) that adjustment #13 settled. */}
       <PaySchedulesPanel
         people={people}
+        peopleMissing={peopleMissing}
         schedules={paySchedules}
         isLoading={payScheduleQuery.isLoading}
+        error={payScheduleQuery.error}
+        onRetry={() => payScheduleQuery.refetch()}
       />
 
       <VariantFormDialog
@@ -1814,17 +1932,18 @@ export function IncomePage() {
         isActive={detailVariant !== null && resolveQuery.data?.variantId === detailVariant.id}
         people={people}
         payCadenceLabel={payCadenceLabel}
-        onOpenChange={(open) => !open && setDetailVariant(null)}
+        onOpenChange={(open) => !open && setDetailVariantId(null)}
         onEdit={() => {
           setEditingVariant(detailVariant);
-          setDetailVariant(null);
+          setDetailVariantId(null);
           setVariantFormOpen(true);
         }}
+        duplicating={duplicateVariant.isPending}
         onDuplicate={() => detailVariant && duplicateVariant.mutate(detailVariant.id)}
         onArchive={async () => {
           if (!detailVariant) return;
           if (!(await confirmArchiveVariant(detailVariant))) return;
-          setDetailVariant(null);
+          setDetailVariantId(null);
         }}
         onAddLine={() => detailVariant && setLineForm({ variantId: detailVariant.id, line: null })}
         onEditLine={(line) => detailVariant && setLineForm({ variantId: detailVariant.id, line })}

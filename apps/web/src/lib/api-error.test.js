@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ApiUnreachableError, readApiError, withUnreachable } from "./api-error.js";
+import { ApiError, ApiUnreachableError, apiErrorFrom, readApiError, withUnreachable } from "./api-error.js";
 
 // The two ways a request fails, kept apart on purpose: the server answered
 // and said no, or nothing answered at all. They need different words on
@@ -22,6 +22,28 @@ describe("readApiError", () => {
     expect(await readApiError(new Response(JSON.stringify({ error: { code: "x" } })))).toBe(
       "Something went wrong.",
     );
+  });
+});
+
+describe("apiErrorFrom", () => {
+  it("keeps the status and code a caller may need to act on", async () => {
+    const err = await apiErrorFrom(
+      new Response(
+        JSON.stringify({ error: { code: "no_income_landing_account", message: "Mark an account first." } }),
+        { status: 400 },
+      ),
+    );
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.message).toBe("Mark an account first.");
+    expect(err.status).toBe(400);
+    expect(err.code).toBe("no_income_landing_account");
+  });
+
+  it("still carries the status when the body is not our error shape", async () => {
+    const err = await apiErrorFrom(new Response("<html>502</html>", { status: 502 }));
+    expect(err.message).toBe("Something went wrong.");
+    expect(err.status).toBe(502);
+    expect(err.code).toBeNull();
   });
 });
 

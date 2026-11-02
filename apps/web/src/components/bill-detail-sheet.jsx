@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { equivalent, toCents } from "@budget/engine";
-import { PlusIcon, Trash2Icon } from "lucide-react";
+import { toCents } from "@budget/engine";
+import { CheckIcon, PlusIcon, Trash2Icon } from "lucide-react";
 import { toast } from "sonner";
 import { BarChart, Bar, CartesianGrid, XAxis } from "recharts";
 import { Badge } from "@/components/ui/badge.jsx";
@@ -30,10 +30,10 @@ import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
 import { AMOUNT_MODEL_LABELS, CADENCE_LABELS, MONTH_LABELS } from "@/lib/constants.js";
 import { formatIsoDate, todayIso } from "@/lib/dates.js";
-import { historySpread } from "@/lib/fixed-costs-draft.js";
+import { historySpread, restatedFigures } from "@/lib/fixed-costs-draft.js";
 import { useSettings } from "@/lib/settings.jsx";
 
-/** @import { Cadence, Cents } from "@budget/engine" */
+/** @import { Cadence, Cents, WindowFigures } from "@budget/engine" */
 /** @import { Bill } from "@/lib/fixed-costs-draft.js" */
 /** @typedef {{ id: string, name: string }} Person */
 /** @typedef {{ id: string, name: string, kind: "fixed" | "variable", isEssential: boolean, colour: string | null, sortOrder: number }} CostCategory */
@@ -124,6 +124,10 @@ function StepChangesPanel({ bill }) {
     queryClient.invalidateQueries({ queryKey: ["bill-detail", bill.id] });
     queryClient.invalidateQueries({ queryKey: ["bills"] });
     queryClient.invalidateQueries({ queryKey: ["fixed-costs-summary"] });
+    // A step change moves every instance after it, and the balance curve on
+    // the page behind this sheet is drawn from those instances.
+    queryClient.invalidateQueries({ queryKey: ["fixed-costs-balance-curve"] });
+    queryClient.invalidateQueries({ queryKey: ["bill-instances"] });
   }
 
   const createMutation = useMutation({
@@ -242,6 +246,8 @@ function SeasonalFactorEditor({ bill }) {
       queryClient.invalidateQueries({ queryKey: ["bill-detail", bill.id] });
       queryClient.invalidateQueries({ queryKey: ["bills"] });
       queryClient.invalidateQueries({ queryKey: ["fixed-costs-summary"] });
+      queryClient.invalidateQueries({ queryKey: ["fixed-costs-balance-curve"] });
+      queryClient.invalidateQueries({ queryKey: ["bill-instances"] });
     },
     onError: (/** @type {Error} */ err) => toast.error(err.message),
   });
@@ -403,11 +409,17 @@ function OrphanedInstancesPanel({ bill }) {
   const orphansQuery = useQuery({
     queryKey: ["bill-instances", "orphans", bill.id],
     queryFn: async () => {
-      const res = await api["bill-instances"].$get({ query: { from: "2000-01-01", to: "2100-01-01" } });
+      // Narrowed on the server: this bill, orphans only. Unfiltered, this was
+      // every active bill projected across the whole window — tens of
+      // thousands of rows parsed on every open, to keep a handful
+      // (perf-inp-plan.md, P2 #6).
+      const res = await api["bill-instances"].$get({
+        query: { from: "2000-01-01", to: "2100-01-01", billId: bill.id, orphansOnly: "true" },
+      });
       if (!res.ok) throw new Error(await readApiError(res));
       /** @type {{ instances: { billId: string, dueDate: string, expectedCents: Cents | null, actualCents: Cents | null, id: string | null, isOrphan: boolean }[] }} */
       const { instances } = await res.json();
-      return instances.filter((i) => i.billId === bill.id && i.isOrphan);
+      return instances;
     },
   });
 
@@ -421,6 +433,8 @@ function OrphanedInstancesPanel({ bill }) {
       queryClient.invalidateQueries({ queryKey: ["bill-instances"] });
       queryClient.invalidateQueries({ queryKey: ["bills"] });
       queryClient.invalidateQueries({ queryKey: ["fixed-costs-summary"] });
+      queryClient.invalidateQueries({ queryKey: ["fixed-costs-balance-curve"] });
+      queryClient.invalidateQueries({ queryKey: ["bill-detail", bill.id] });
       toast.success("Orphaned instance deleted.");
     },
     onError: (/** @type {Error} */ err) => toast.error(err.message),
@@ -480,25 +494,84 @@ function OrphanedInstancesPanel({ bill }) {
  * One bill restated at the cadences the household actually budgets in, from
  * the amount the app really budgets rather than the typed base.
  *
- * @param {{ amountCents: Cents, frequency: Cadence }} props
+ * Built from the bill's own row figures — what the server averaged over the
+ * contribution window, the same `restatedFigures` the table row prints. It
+ * used to restate `baseAmountCents`, which is only the fallback for a rolling
+ * average and the starting point for a seasonal, escalating or stepped bill,
+ * so for every one of those the sheet and the row it was opened from
+ * disagreed.
+ *
+ * @param {{ figures: Pick<WindowFigures, "perMonthCents" | "perYearCents">, frequency: Cadence }} props
  */
-function CadenceBreakdown({ amountCents, frequency }) {
-  /** @type {Cadence[]} */
-  const targets = ["weekly", "monthly", "quarterly", "yearly"];
+function CadenceBreakdown({ figures, frequency }) {
+  const restated = restatedFigures(figures);
+  /** @type {{ cadence: Cadence, cents: Cents }[]} */
+  const targets = [
+    { cadence: "weekly", cents: restated.weeklyCents },
+    { cadence: "monthly", cents: restated.monthlyCents },
+    { cadence: "quarterly", cents: restated.quarterlyCents },
+    { cadence: "yearly", cents: restated.yearlyCents },
+  ];
   return (
     <div className="flex flex-col gap-2 rounded-(--radius-card) bg-surface-muted p-4">
       <h4 className="text-sm font-semibold text-text">Same bill, other cadences</h4>
       <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
-        {targets.map((target) => (
-          <div key={target}>
-            <dt className="text-xs text-text-subtle">{CADENCE_LABELS[target]}</dt>
-            <dd className={target === frequency ? "font-semibold text-text" : "font-medium text-text-muted"}>
-              <Money value={equivalent(amountCents, frequency, target)} />
+        {targets.map(({ cadence, cents }) => (
+          <div key={cadence}>
+            <dt className="text-xs text-text-subtle">{CADENCE_LABELS[cadence]}</dt>
+            <dd className={cadence === frequency ? "font-semibold text-text" : "font-medium text-text-muted"}>
+              <Money value={cents} />
             </dd>
           </div>
         ))}
       </dl>
     </div>
+  );
+}
+
+/**
+ * The imported due date, called what it is. Changing the date on the Fixed
+ * Costs table confirms it on its own; this is for the placeholder that
+ * happens to be right.
+ *
+ * @param {{ bill: BillDetail }} props
+ */
+function PlaceholderDateNotice({ bill }) {
+  const { locale } = useSettings();
+  const queryClient = useQueryClient();
+
+  const confirmMutation = useMutation({
+    mutationFn: async () => {
+      const res = await api.bills[":id"].$patch({ param: { id: bill.id }, json: { dueDateConfirmed: true } });
+      if (!res.ok) throw new Error(await readApiError(res));
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["bill-detail", bill.id] });
+      queryClient.invalidateQueries({ queryKey: ["bills"] });
+      // The dashboard counts placeholder dates in its warnings and setup list.
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      toast.success("Due date confirmed.");
+    },
+    onError: (/** @type {Error} */ err) => toast.error(err.message),
+  });
+
+  return (
+    <Notice>
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+        <div className="min-w-0">
+          <p className="font-medium">Due {formatIsoDate(bill.anchorDate, locale)} is a placeholder date</p>
+          <p className="text-text-muted">
+            The import gave every bill the same stand-in date, and the calendar and balance curve are worked out from
+            it. Set the real one with Edit on the Fixed Costs table — or, if this one is right, say so.
+          </p>
+        </div>
+        <Button size="sm" variant="outline" onClick={() => confirmMutation.mutate()} disabled={confirmMutation.isPending}>
+          <CheckIcon />
+          {confirmMutation.isPending ? "Confirming…" : "This date is right"}
+        </Button>
+      </div>
+    </Notice>
   );
 }
 
@@ -511,19 +584,38 @@ function CadenceBreakdown({ amountCents, frequency }) {
  * menus it used to take, because the row itself is now editable and this
  * modal no longer has to be the way in to renaming a bill.
  *
+ * `figures` is the bill's row on the table — the server's figures over the
+ * contribution window — so "Same bill, other cadences" restates the amount
+ * the row shows rather than the typed base.
+ *
  * @param {{
  *   billId: string | null,
+ *   figures: WindowFigures | null,
  *   onOpenChange: (open: boolean) => void,
  *   categories: CostCategory[],
  *   people: Person[],
  *   onArchive: (id: string) => void,
  * }} props
  */
-export function BillDetailSheet({ billId, onOpenChange, categories, people, onArchive }) {
+export function BillDetailSheet({ billId, figures, onOpenChange, categories, people, onArchive }) {
+  const confirm = useConfirm();
+  const [tab, setTab] = useState("history");
+  // Whether the History tab holds typed amounts that aren't saved. That tab
+  // unmounts when another is chosen and the whole sheet unmounts on close,
+  // and either one used to drop everything typed without a word.
+  const [historyDirty, setHistoryDirty] = useState(false);
+
+  // Every bill opens on History, the tab the sheet is mostly opened for.
+  useEffect(() => {
+    setTab("history");
+    setHistoryDirty(false);
+  }, [billId]);
+
   const detailQuery = useQuery({
     queryKey: ["bill-detail", billId],
     queryFn: async () => {
-      const res = await api.bills[":id"].$get({ param: { id: /** @type {string} */ (billId) } });
+      if (billId === null) throw new Error("No bill is open.");
+      const res = await api.bills[":id"].$get({ param: { id: billId } });
       if (!res.ok) throw new Error(await readApiError(res));
       return /** @type {BillDetail} */ ((await res.json()).bill);
     },
@@ -535,8 +627,30 @@ export function BillDetailSheet({ billId, onOpenChange, categories, people, onAr
   const owner = bill?.ownerPersonId ? people.find((p) => p.id === bill.ownerPersonId)?.name : "Shared";
   const spread = bill ? historySpread(bill.history) : null;
 
+  /** Resolves true when it is fine to lose the History tab's typing. */
+  async function historyMayGo() {
+    if (!historyDirty) return true;
+    return confirm({
+      title: "Discard the history you've typed?",
+      description: "The amounts entered under History haven't been saved yet.",
+      confirmLabel: "Discard",
+      cancelLabel: "Keep editing",
+    });
+  }
+
+  /** @param {boolean} open */
+  async function handleOpenChange(open) {
+    if (open || (await historyMayGo())) onOpenChange(open);
+  }
+
+  /** @param {string} next */
+  async function handleTabChange(next) {
+    if (tab === "history" && next !== "history" && !(await historyMayGo())) return;
+    setTab(next);
+  }
+
   return (
-    <Sheet open={billId !== null} onOpenChange={onOpenChange}>
+    <Sheet open={billId !== null} onOpenChange={handleOpenChange}>
       <SheetContent side="bottom" scrollable className="max-h-[90vh]">
         <SheetHeader>
           <SheetTitle className="flex flex-wrap items-center gap-2">
@@ -570,19 +684,21 @@ export function BillDetailSheet({ billId, onOpenChange, categories, people, onAr
               </div>
             ) : null}
 
+            {bill.dueDateConfirmed ? null : <PlaceholderDateNotice bill={bill} />}
+
             <OrphanedInstancesPanel bill={bill} />
 
-            <Tabs defaultValue="history">
+            <Tabs value={tab} onValueChange={handleTabChange}>
               <TabsList>
                 <TabsTrigger value="history">History</TabsTrigger>
                 <TabsTrigger value="model">Amount model</TabsTrigger>
                 <TabsTrigger value="steps">Step changes</TabsTrigger>
               </TabsList>
               <TabsContent value="history" className="pt-4">
-                <BillHistoryEntry billId={bill.id} />
+                <BillHistoryEntry billId={bill.id} onDirtyChange={setHistoryDirty} />
               </TabsContent>
               <TabsContent value="model" className="flex flex-col gap-6 pt-4">
-                <CadenceBreakdown amountCents={bill.baseAmountCents} frequency={bill.frequency} />
+                {figures ? <CadenceBreakdown figures={figures} frequency={bill.frequency} /> : null}
                 {bill.amountModel === "seasonal" ? <SeasonalFactorEditor bill={bill} /> : null}
                 {bill.amountModel === "rolling_average" ? <RollingAveragePreview bill={bill} /> : null}
                 {bill.amountModel === "escalating" ? (
