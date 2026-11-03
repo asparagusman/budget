@@ -49,41 +49,50 @@ sudo apt-get update && sudo apt-get install -y git curl jq
 curl -fsSL https://get.docker.com | sh
 sudo usermod -aG docker "$USER"     # log out and back in
 
-# Avahi announces names on the network as <name>.local. Most desktop distros
-# (Linux Mint, Ubuntu desktop) already run it.
+# Avahi announces names on the network as <name>.local. Linux Mint already runs it.
 sudo apt-get install -y avahi-daemon avahi-utils
 sudo systemctl enable --now avahi-daemon
-
-# Caddy: the front door on port 80. It answers http://budget.local and passes
-# it to the app (step 5). Skip if the host already runs it.
-sudo apt-get install -y caddy
 
 docker --version && docker compose version
 ```
 
-Then give the machine the extra name `budget.local`, without renaming it — it may already be known
-by its own name to other things on the network. A small service announces the alias, at this
-machine's address on the home network (find it with `ip -4 -br addr`):
+**What's already on this host.** The homeserver runs Home Assistant from `~/docker` (one compose
+file): Home Assistant, Matter, OTBR, and **Caddy**, the front door on port 80. Caddy is a container
+on host networking, built from `~/docker/splash-src`, whose `Caddyfile` serves `homeserver.local`
+and `homeassistant.local`. Each `.local` name is an alias the machine announces through a small
+script and a systemd unit (`avahi-alias-homeassistant.service`). Budget follows both patterns: one
+more alias here, and one more block in that Caddyfile (step 5). The repo is cloned beside them, as
+`~/docker/budget`.
+
+Give the machine the extra name `budget.local`, the same way `homeassistant.local` is:
 
 ```sh
-sudo tee /etc/systemd/system/budget-mdns.service >/dev/null <<'EOF'
+sudo tee /usr/local/bin/avahi-alias-budget.sh >/dev/null <<'EOF'
+#!/bin/bash
+IP=$(hostname -I | awk '{print $1}')
+exec avahi-publish -a -R budget.local "$IP"
+EOF
+sudo chmod +x /usr/local/bin/avahi-alias-budget.sh
+
+sudo tee /etc/systemd/system/avahi-alias-budget.service >/dev/null <<'EOF'
 [Unit]
-Description=Announce budget.local on the home network
-After=avahi-daemon.service network-online.target
+Description=Avahi alias for budget.local
+After=avahi-daemon.service
 Requires=avahi-daemon.service
 
 [Service]
-ExecStart=/usr/bin/avahi-publish -a -R budget.local 192.168.0.211
+ExecStart=/usr/local/bin/avahi-alias-budget.sh
 Restart=always
 
 [Install]
 WantedBy=multi-user.target
 EOF
-sudo systemctl enable --now budget-mdns
+sudo systemctl daemon-reload
+sudo systemctl enable --now avahi-alias-budget
 avahi-resolve -n budget.local
 ```
 
-Put this machine's own address where `192.168.0.211` is. `avahi-resolve` should print it back. Then, from a laptop or
+`avahi-resolve` should print this machine's home-network address (`hostname -I`'s first). Then, from a laptop or
 phone on the same Wi-Fi, open `http://budget.local` once the stack is up (step 4) to check the name
 resolves there too. iPhones, Macs and Windows resolve `.local` names; Android does from version 13.
 If an Android phone can't find it, add a DNS entry on the router mapping `budget.local` to this
@@ -113,7 +122,7 @@ whole disk at install time is the easy path; `cryptsetup` on a second disk that 
 ## 2. Get the code
 
 ```sh
-git clone <your remote> budget && cd budget
+cd ~/docker && git clone https://github.com/asparagusman/budget.git budget && cd budget
 ```
 
 The repo is the deployment artefact — there is no registry, and the images are built on the host.
@@ -226,19 +235,22 @@ without the `migrate` service; bring the stack up again with the compose file ra
 
 ## 5. Put it on the network
 
-Add this block to `/etc/caddy/Caddyfile`, alongside anything already there:
+Add this block to the end of `~/docker/splash-src/Caddyfile`, after the `homeassistant.local` one:
 
 ```
 http://budget.local {
-	reverse_proxy 127.0.0.1:8080
+    reverse_proxy localhost:8080
 }
 ```
 
 The `http://` matters: without it Caddy tries to get an HTTPS certificate for the name, which no one
-issues for `.local`. Then:
+issues for `.local`. Unlike Home Assistant's block, it keeps Caddy's `X-Forwarded-For`: nginx reads
+it to tell the household's devices apart for the api's rate limiter.
+
+The Caddyfile is built into the Caddy image, so rebuild it to apply:
 
 ```sh
-sudo caddy validate --config /etc/caddy/Caddyfile && sudo systemctl reload caddy
+cd ~/docker && docker compose up -d --build caddy && docker logs caddy --tail 5
 ```
 
 On a phone on the home Wi-Fi, open `http://budget.local`. If it doesn't load, check in this order:
@@ -309,7 +321,7 @@ held, beside what the app now computes.
 Order matters, and three of the four steps are done for you:
 
 ```sh
-cd budget
+cd ~/docker/budget
 git rev-parse --short HEAD          # note it: this is what you roll back to
 git pull                                                              # 1. pull
 APP_VERSION=$(git rev-parse --short HEAD) docker compose -f infra/docker-compose.yml up -d --build
