@@ -1,8 +1,8 @@
 # Deploying budget
 
 One household, two people, one Linux thin client on the home network, at `http://budget.local`. No
-public ingress, no CI,
-no monitoring stack — see [`../.claude/plans/phases/11-polish-mobile-import.md`](../.claude/plans/phases/11-polish-mobile-import.md)
+public ingress, no CI (the server pulls its own updates — see [Updating](#updating)), no monitoring
+stack — see [`../.claude/plans/phases/11-polish-mobile-import.md`](../.claude/plans/phases/11-polish-mobile-import.md)
 "Non-goals" for why each of those is deliberately absent.
 
 Everything below is meant to be followed top to bottom on a machine that has nothing on it yet.
@@ -199,7 +199,7 @@ Four services, in this order, enforced by compose rather than by you remembering
    `api` waits for it to exit **successfully**, so the app can never start against a schema older
    than its own code.
 3. **`api`** — Hono on `${PORT}`, published on `127.0.0.1` only.
-4. **`web`** — nginx serving the built SPA on `127.0.0.1:8080`, proxying `/api/` to the api
+4. **`web`** — nginx serving the built SPA on `127.0.0.1:8090`, proxying `/api/` to the api
    container. Caddy puts it on the network as `http://budget.local` (step 5).
 
 Check it:
@@ -239,7 +239,7 @@ Add this block to the end of `~/docker/splash-src/Caddyfile`, after the `homeass
 
 ```
 http://budget.local {
-    reverse_proxy localhost:8080
+    reverse_proxy localhost:8090
 }
 ```
 
@@ -255,7 +255,7 @@ cd ~/docker && docker compose up -d --build caddy && docker logs caddy --tail 5
 
 On a phone on the home Wi-Fi, open `http://budget.local`. If it doesn't load, check in this order:
 
-1. `curl -s localhost:8080/ | head -c 100` on the host returns HTML — the stack is serving.
+1. `curl -s localhost:8090/ | head -c 100` on the host returns HTML — the stack is serving.
 2. `curl -s -H 'Host: budget.local' localhost/ | head -c 100` returns the same — Caddy is passing
    it through.
 3. `avahi-resolve -n budget.local` on the host prints its address — the name is being announced.
@@ -318,47 +318,87 @@ held, beside what the app now computes.
 
 ## Updating
 
-Order matters, and three of the four steps are done for you:
+### Automatically (set up once)
+
+The server checks GitHub every five minutes and, when `main` has moved, pulls it and rebuilds —
+[`deploy.sh`](deploy.sh), run by a systemd timer. Nothing reaches in from outside: the server asks,
+GitHub answers. So a push to `main` is a deploy, live within about ten minutes (the check, then the
+build).
 
 ```sh
-cd ~/docker/budget
-git rev-parse --short HEAD          # note it: this is what you roll back to
-git pull                                                              # 1. pull
-APP_VERSION=$(git rev-parse --short HEAD) docker compose -f infra/docker-compose.yml up -d --build
-#                                                                     # 2. rebuild
-#                                                                     # 3. migrate  (the one-shot
-#                                                                     #    `migrate` service)
-#                                                                     # 4. restart  (api waits for
-#                                                                     #    migrate to exit 0)
-curl -s localhost:3001/health | jq '.version, .migrations'
+sudo tee /etc/systemd/system/budget-deploy.service >/dev/null <<'EOF'
+[Unit]
+Description=Deploy Budget from GitHub when main has changed
+After=network-online.target docker.service
+Wants=network-online.target
 
-# Every build leaves the previous images and build cache behind. On a thin
-# client's disk that adds up within months.
-docker image prune -f
-docker builder prune -f --keep-storage 2GB   # newer Docker also spells it --reserved-space
+[Service]
+Type=oneshot
+User=asparagusman
+ExecStart=/bin/bash /home/asparagusman/docker/budget/infra/deploy.sh
+EOF
+
+sudo tee /etc/systemd/system/budget-deploy.timer >/dev/null <<'EOF'
+[Unit]
+Description=Check GitHub for Budget updates every five minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
+EOF
+sudo systemctl daemon-reload && sudo systemctl enable --now budget-deploy.timer
+systemctl list-timers budget-deploy.timer
 ```
 
-`--build` is not optional. Without it compose happily reuses the image it already has and serves
-the code you had before the pull, which then looks like "the fix didn't work".
+What a deploy did, or why it failed:
+
+```sh
+journalctl -u budget-deploy -n 50 --no-pager
+```
+
+It only ever deploys `main`, and only while the checkout is on `main`: put the server on another
+commit (below) and the timer stands down until it is back. `infra/deploy.sh --force` rebuilds now,
+changed or not.
+
+### By hand
+
+```sh
+cd ~/docker/budget && bash infra/deploy.sh --force
+```
+
+That is the same pull, rebuild, migrate and restart, in the order compose enforces: the one-shot
+`migrate` service runs before the api starts, and the api waits for it to exit 0. Then it checks
+`/health` and prunes old images and build cache, which on a thin client's disk add up within months.
+
+`--build` is what makes the new code run. Without it compose happily reuses the image it already
+has and serves the code you had before the pull, which then looks like "the fix didn't work".
+
+### When a deploy breaks
 
 **A failed migration is an outage.** Compose removes the old `api` container *before* the new one
 waits on `migrate`, so if `migrate` exits non-zero the new `api` never starts and the old one is
-already gone (a rebuilt `web` waits on a healthy `api` too). The database itself is untouched: all
-pending migrations run in one transaction, so a failure rolls every one of them back. Read why:
+already gone (a rebuilt `web` waits on a healthy `api` too). The deploy's journal says so. The
+database itself is untouched: all pending migrations run in one transaction, so a failure rolls
+every one of them back. Read why:
 
 ```sh
 docker compose -f infra/docker-compose.yml logs migrate
 ```
 
-Then roll the code back to the commit you noted, and bring that up the same way:
+The usual fix is to push a revert of the bad commit to `main`; the timer deploys it like anything
+else. To get the app back up straight away instead, put the server on the last good commit (the
+journal's "was …" line names it):
 
 ```sh
-git checkout <previous sha>
+cd ~/docker/budget && git checkout <previous sha>
 APP_VERSION=$(git rev-parse --short HEAD) docker compose -f infra/docker-compose.yml up -d --build
 ```
 
-That leaves the checkout on a detached HEAD. Once the migration is fixed upstream, `git checkout
-main && git pull` (or whichever branch you deploy) and run the update again.
+That leaves the checkout on a detached HEAD, so the timer stands down. Once the fix is on `main`,
+`git checkout main` and the next check deploys it.
 
 ---
 
@@ -435,9 +475,9 @@ is proportionate.
 docker compose -f infra/docker-compose.yml exec db psql -U budget -d budget
 ```
 
-**Ports.** Only `web` (8080) and `api` (3001) publish anything, and both only on the host's
+**Ports.** Only `web` (8090) and `api` (3001) publish anything, and both only on the host's
 loopback (`127.0.0.1`), so nothing on the network reaches either directly. Caddy, on port 80, is
-what makes 8080 reachable as `http://budget.local`; nothing makes 3001 reachable off the host — it
+what makes 8090 reachable as `http://budget.local`; nothing makes 3001 reachable off the host — it
 is published only so `curl localhost:3001/health` works here. Postgres publishes nothing at all;
 `docker-compose.dev.yml` exists solely to add a published 5432 for local development and must never
 be merged in on this host.
