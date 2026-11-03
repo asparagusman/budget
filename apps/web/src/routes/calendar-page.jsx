@@ -15,8 +15,7 @@ import {
   useChartMotion,
   useMoneyTick,
 } from "@/components/chart.jsx";
-import { EmptyState } from "@/components/empty-state.jsx";
-import { ListSkeleton } from "@/components/loading.jsx";
+import { BillsAgenda, DAY_LONG, isPlaceholder, localDate } from "@/components/bills-agenda.jsx";
 import { Money } from "@/components/money.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
 import { QueryError } from "@/components/query-error.jsx";
@@ -24,7 +23,7 @@ import { registerCommands } from "@/lib/commands.js";
 import { MONTH_LABELS } from "@/lib/constants.js";
 import { formatMoney } from "@/lib/format-money.js";
 import { useSettings } from "@/lib/settings.jsx";
-import { getDateFormat, todayIso } from "@/lib/dates.js";
+import { todayIso } from "@/lib/dates.js";
 import { LG, useMediaQuery } from "@/lib/use-media-query.js";
 import { cn } from "@/lib/utils.js";
 import { billsQueryOptions, calendarInstancesQueryOptions, paySchedulesQueryOptions } from "@/lib/queries.js";
@@ -32,19 +31,6 @@ import { billsQueryOptions, calendarInstancesQueryOptions, paySchedulesQueryOpti
 /** @import { Cents } from "@budget/engine" */
 /** @typedef {{ billId: string, dueDate: string, expectedCents: Cents, actualCents: Cents | null, isOverride: boolean, isOrphan: boolean }} MergedInstance */
 /** @typedef {{ id: string, name: string, dueDateConfirmed: boolean }} BillRef */
-
-/**
- * Whether this instance's date is derived from a due date nobody has
- * confirmed — an imported bill's placeholder anchor. The calendar is the
- * screen people read dates off, so it is the one that most needs to say a
- * date is a guess.
- *
- * @param {MergedInstance} instance
- * @param {Map<string, BillRef>} billsById
- */
-function isPlaceholder(instance, billsById) {
-  return billsById.get(instance.billId)?.dueDateConfirmed === false;
-}
 
 const WEEKDAY_LABELS = /** @type {const} */ (["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]);
 
@@ -63,19 +49,6 @@ function monthGridDays(year, month) {
   while (cells.length % 7 !== 0) cells.push(null);
   return cells;
 }
-
-/**
- * An ISO date's parts as a local Date, so formatting never shifts it a day the
- * way `new Date("2026-10-01")` (UTC midnight) does west of Greenwich.
- *
- * @param {string} iso
- */
-function localDate(iso) {
-  return new Date(Number(iso.slice(0, 4)), Number(iso.slice(5, 7)) - 1, Number(iso.slice(8, 10)));
-}
-
-const WEEKDAY_SHORT = getDateFormat("en-AU", { weekday: "short" });
-const DAY_LONG = getDateFormat("en-AU", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
 
 /**
  * @param {{ date: string, total: Cents, isPayday: boolean, bills: MergedInstance[], billsById: Map<string, BillRef> }} props
@@ -198,6 +171,16 @@ export function CalendarPage() {
     }
   }, [primarySchedule, yearWindow]);
 
+  // The Agenda view fetches its own month, so it can share one component
+  // with /fixed-costs; the grid, the chart and the day sheet read the year.
+  const monthWindow = useMemo(
+    () => ({
+      from: `${year}-${String(month + 1).padStart(2, "0")}-01`,
+      to: month === 11 ? `${year + 1}-01-01` : `${year}-${String(month + 2).padStart(2, "0")}-01`,
+    }),
+    [year, month],
+  );
+
   useEffect(
     () =>
       registerCommands([
@@ -222,11 +205,9 @@ export function CalendarPage() {
   const isDesktop = useMediaQuery(LG);
   const monthLabel = new Date(year, month, 1).toLocaleDateString("en-AU", { month: "long", year: "numeric" });
   const cells = useMemo(() => monthGridDays(year, month), [year, month]);
-  const monthDatesWithEvents = cells.flatMap((d) => (d !== null && (instancesByDate.has(d) || paydaySet.has(d)) ? [d] : []));
   // A failed load used to fall through to "Nothing this month", which reads
   // as "no bills are due" — the one thing this screen must never say wrongly.
   const loadError = instancesQuery.error ?? billsQuery.error ?? paySchedulesQuery.error ?? null;
-  const loading = instancesQuery.isLoading || billsQuery.isLoading || paySchedulesQuery.isLoading;
 
   /** @param {number} delta */
   function goToMonth(delta) {
@@ -354,68 +335,13 @@ export function CalendarPage() {
               )}
             </div>
           </div>
-        ) : loading ? (
-          <ListSkeleton rows={5} label="Loading this month" className="p-4" />
-        ) : monthDatesWithEvents.length === 0 ? (
-          <EmptyState
-            icon={CalendarDaysIcon}
-            title="Nothing this month"
-            description="No paydays or bills fall in this month."
-            className="rounded-none shadow-none"
-          />
         ) : (
-          // An agenda reads down a date column: weekday over day number on
-          // the left, what lands that day in the middle, the day's outflow on
-          // the right. It used to lead every row with "2026-10-01".
-          <ol className="flex flex-col divide-y divide-border">
-            {monthDatesWithEvents.map((day) => {
-              const dayInstances = instancesByDate.get(day) ?? [];
-              const total = dayInstances.reduce((s, i) => s + (i.actualCents ?? i.expectedCents), 0);
-              const isToday = day === todayIsoDate;
-              const hasPlaceholder = dayInstances.some((i) => isPlaceholder(i, billsById));
-              return (
-                <li key={day}>
-                  <button
-                    type="button"
-                    onClick={() => setSelectedDate(day)}
-                    aria-label={DAY_LONG.format(localDate(day))}
-                    className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-surface-muted focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-(--accent)"
-                  >
-                    <span
-                      className={cn(
-                        "flex w-9 shrink-0 flex-col items-center leading-tight",
-                        isToday ? "text-accent-brand" : "text-text",
-                      )}
-                    >
-                      <span className="text-[0.6875rem] font-medium tracking-wide text-text-subtle uppercase">
-                        {WEEKDAY_SHORT.format(localDate(day))}
-                      </span>
-                      <span className="text-lg font-semibold tabular-nums">{Number(day.slice(8, 10))}</span>
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="flex items-center gap-2">
-                        <span className="truncate text-sm text-text">
-                          {dayInstances.map((i) => billsById.get(i.billId)?.name ?? "Bill").join(", ") || (
-                            <span className="text-text-muted">No bills</span>
-                          )}
-                        </span>
-                        {paydaySet.has(day) ? (
-                          <Badge variant="secondary">
-                            <span className="size-1.5 rounded-full bg-positive" aria-hidden="true" />
-                            Payday
-                          </Badge>
-                        ) : null}
-                        {hasPlaceholder ? <Badge variant="attention">Placeholder date</Badge> : null}
-                      </span>
-                    </span>
-                    {total > 0 ? (
-                      <Money value={total} className="shrink-0 text-sm font-semibold text-negative tabular-nums" />
-                    ) : null}
-                  </button>
-                </li>
-              );
-            })}
-          </ol>
+          <BillsAgenda
+            window={monthWindow}
+            emptyTitle="Nothing this month"
+            emptyDescription="No paydays or bills fall in this month."
+            onSelectDay={setSelectedDate}
+          />
         )}
       </section>
 

@@ -1,6 +1,6 @@
 import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { addDaysIso } from "@budget/engine";
 import {
   CalendarClockIcon,
@@ -17,6 +17,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Input } from "@/components/ui/input.jsx";
 import { BillDetailSheet } from "@/components/bill-detail-sheet.jsx";
 import { SectionsSkeleton, StatsSkeleton } from "@/components/loading.jsx";
+import { BillsAgenda } from "@/components/bills-agenda.jsx";
 import { BillsBalanceCurve } from "@/components/bills-balance-curve.jsx";
 import { CategoryGroup } from "@/components/fixed-costs-table.jsx";
 import { DataList, DataListRow } from "@/components/data-list.jsx";
@@ -80,6 +81,9 @@ const CONTRIBUTION_WINDOW_DAYS = 1461;
 /** The balance curve's own horizon — see `<BillsBalanceCurve>` for why it is
  * deliberately shorter than the contribution window. */
 const CURVE_WINDOW_DAYS = 365;
+
+/** Six weeks: three fortnightly paydays, and every monthly bill at least once. */
+const AGENDA_WINDOW_DAYS = 42;
 
 /**
  * @param {{
@@ -191,6 +195,7 @@ export function FixedCostsPage() {
     [today],
   );
   const curveWindow = useMemo(() => ({ from: today, to: addDaysIso(today, CURVE_WINDOW_DAYS) }), [today]);
+  const agendaWindow = useMemo(() => ({ from: today, to: addDaysIso(today, AGENDA_WINDOW_DAYS) }), [today]);
 
   const [categoryManagerOpen, setCategoryManagerOpen] = useState(false);
   const [detailBillId, setDetailBillId] = useState(/** @type {string | null} */ (null));
@@ -796,6 +801,27 @@ export function FixedCostsPage() {
           })}
         </div>
       )}
+
+      {/* The calendar's Agenda over the next six weeks — the same list and
+          the same expected balance, read from today rather than by month. */}
+      <section
+        aria-labelledby="fixed-costs-upcoming"
+        className="overflow-hidden rounded-(--radius-card) bg-surface shadow-(--shadow-card)"
+      >
+        <div className="flex items-center justify-between gap-2 border-b border-border px-4 py-3">
+          <h2 id="fixed-costs-upcoming" className="text-sm font-semibold text-text">
+            Next six weeks
+          </h2>
+          <Link to="/calendar" className="text-xs font-medium text-text-muted underline-offset-2 hover:underline">
+            Open calendar
+          </Link>
+        </div>
+        <BillsAgenda
+          window={agendaWindow}
+          emptyTitle="Nothing in the next six weeks"
+          emptyDescription="No paydays or bills fall in the next six weeks."
+        />
+      </section>
 
       <BillsBalanceCurve window={curveWindow} />
 
