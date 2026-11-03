@@ -18,7 +18,7 @@ export const invites = pgTable("invites", {
   id: uuid("id").primaryKey().defaultRandom(),
   codeHash: text("code_hash").notNull().unique(),
   purpose: invitePurpose("purpose").notNull(),
-  // Set for 'new_device' — the existing user the new passkey attaches to.
+  // Set for 'new_device' — the existing user the new device signs in as.
   targetUserId: uuid("target_user_id").references(() => users.id, {
     onDelete: "cascade",
   }),

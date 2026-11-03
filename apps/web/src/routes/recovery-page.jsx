@@ -1,27 +1,29 @@
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckIcon, CopyIcon, KeyRoundIcon, Trash2Icon } from "lucide-react";
+import { KeyRoundIcon } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button.jsx";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card.jsx";
-import { Input } from "@/components/ui/input.jsx";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select.jsx";
 import { DataList, DataListRow } from "@/components/data-list.jsx";
 import { useConfirm } from "@/components/confirm-dialog.jsx";
+import { WaitingDevicesList } from "@/components/device-approvals.jsx";
+import { InlineError } from "@/components/notice.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
-import { passkeyRemovedMessage, useAuth } from "@/lib/auth.jsx";
+import { useAuth } from "@/lib/auth.jsx";
 
 /**
  * Where a recovery-password session lands, and the only screen it can use.
  *
- * The password exists for exactly one situation: every passkey is gone, and
- * somebody needs to get a new one registered without shell access to the box.
- * So this screen is that errand and nothing else — mint a new-device invite,
- * open it, and remove the passkey that was lost. The API enforces the same
- * boundary independently (apps/api/src/middleware/auth.js); this is what it
- * looks like from the front, not what makes it true.
+ * The password exists for exactly one situation: every approved device is
+ * gone, and somebody needs a device let in again without shell access to the
+ * box. So this screen is that errand and nothing else — sign this device in
+ * (as anyone in the household), approve one that's waiting, and sign out the
+ * devices that were lost. The API enforces the same boundary independently
+ * (apps/api/src/middleware/auth.js); this is what it looks like from the
+ * front, not what makes it true.
  *
  * See todo.md #17 for why the password is confined rather than simply being
  * a second way in.
@@ -32,8 +34,7 @@ export function RecoveryPage() {
   const confirm = useConfirm();
   const queryClient = useQueryClient();
   const [targetUserId, setTargetUserId] = useState(/** @type {string} */ (state?.user?.id ?? ""));
-  const [link, setLink] = useState(/** @type {string | null} */ (null));
-  const [copied, setCopied] = useState(false);
+  const [error, setError] = useState(/** @type {string | null} */ (null));
 
   const usersQuery = useQuery({
     queryKey: ["users"],
@@ -44,38 +45,48 @@ export function RecoveryPage() {
     },
   });
 
-  const credentialsQuery = useQuery({
-    queryKey: ["credentials"],
+  const sessionsQuery = useQuery({
+    queryKey: ["sessions"],
     queryFn: async () => {
-      const res = await api.credentials.$get();
+      const res = await api.sessions.$get();
       if (!res.ok) throw new Error(await readApiError(res));
-      return (await res.json()).credentials;
+      return (await res.json()).sessions;
     },
   });
 
-  const inviteMutation = useMutation({
+  // Ask, approve, collect — the same three steps as a device joining any
+  // other way, all from here: this device asks to join, this recovery
+  // session approves it, and collecting the approval swaps the hour-long
+  // recovery session for an ordinary one.
+  const signInHere = useMutation({
     mutationFn: async (/** @type {string} */ userId) => {
-      const res = await api.invites.$post({ json: { purpose: "new_device", targetUserId: userId } });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return (await res.json()).invite;
+      const asked = await api.auth["device-requests"].$post({ json: { deviceName: "Recovered device" } });
+      if (!asked.ok) throw new Error(await readApiError(asked));
+      const { request } = await asked.json();
+      const approved = await api["device-requests"][":id"].approve.$post({
+        param: { id: request.id },
+        json: { userId },
+      });
+      if (!approved.ok) throw new Error(await readApiError(approved));
+      const collected = await api.auth["device-requests"].current.$get();
+      if (!collected.ok) throw new Error(await readApiError(collected));
+      if ((await collected.json()).status !== "approved") throw new Error("Couldn't sign this device in. Try again.");
     },
-    // The raw code is shown exactly once — only its hash is stored — so it
-    // goes straight into a field the operator can copy rather than a toast
-    // they might miss (phases/03-auth.md "Schema").
-    onSuccess: (invite) => setLink(`${window.location.origin}/invite/${invite.code}`),
-    onError: (err) => toast.error(err.message),
+    onSuccess: async () => {
+      queryClient.clear();
+      await refresh();
+      toast.success("This device is signed in. Rename it in Admin → My devices.");
+      navigate({ to: "/", replace: true });
+    },
+    onError: (err) => setError(err.message),
   });
 
-  const removeCredential = useMutation({
+  const signOutDevice = useMutation({
     mutationFn: async (/** @type {string} */ id) => {
-      const res = await api.credentials[":id"].$delete({ param: { id } });
+      const res = await api.sessions[":id"].$delete({ param: { id } });
       if (!res.ok) throw new Error(await readApiError(res));
-      return res.json();
     },
-    onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: ["credentials"] });
-      toast.success(passkeyRemovedMessage(result.revokedSessions));
-    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
     onError: (err) => toast.error(err.message),
   });
 
@@ -85,22 +96,11 @@ export function RecoveryPage() {
     navigate({ to: "/login", replace: true });
   }
 
-  async function copy() {
-    if (!link) return;
-    try {
-      await navigator.clipboard.writeText(link);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      toast.error("Couldn't copy — select and copy the link manually.");
-    }
-  }
-
-  // Active users only: a deactivated member can't be issued a device link
-  // (the API refuses with `inactive_user`), so offering them would only lead
-  // to an error after the click.
+  // Active users only: a deactivated member can't be given a device (the API
+  // refuses with `inactive_user`), so offering them would only lead to an
+  // error after the click.
   const users = (usersQuery.data ?? []).filter((user) => user.isActive);
-  const credentials = credentialsQuery.data ?? [];
+  const devices = (sessionsQuery.data ?? []).filter((s) => s.authMethod === "device");
 
   return (
     <Card className="w-full max-w-md">
@@ -111,17 +111,16 @@ export function RecoveryPage() {
         </CardTitle>
         <CardDescription>
           You are signed in with the recovery password, {state?.user?.displayName}. It opens this screen and
-          nothing else — create a device link, open it on the device you want to use, and register a passkey
-          there. This session expires in an hour.
+          nothing else, and it expires in an hour. Sign this device in properly to use the app.
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-6">
         <div className="flex flex-col gap-3">
-          <h3 className="text-sm font-semibold text-text">New device link</h3>
+          <h3 className="text-sm font-semibold text-text">Sign this device in</h3>
           <div className="flex items-center gap-2">
             <Select value={targetUserId} onValueChange={setTargetUserId}>
-              <SelectTrigger className="w-full" aria-label="Who the passkey is for">
-                <SelectValue placeholder="Who is it for?" />
+              <SelectTrigger className="w-full" aria-label="Whose device this is">
+                <SelectValue placeholder="Whose device is it?" />
               </SelectTrigger>
               <SelectContent>
                 {users.map((user) => (
@@ -132,54 +131,48 @@ export function RecoveryPage() {
               </SelectContent>
             </Select>
             <Button
-              onClick={() => inviteMutation.mutate(targetUserId)}
-              disabled={!targetUserId || inviteMutation.isPending}
+              onClick={() => {
+                setError(null);
+                signInHere.mutate(targetUserId);
+              }}
+              disabled={!targetUserId || signInHere.isPending}
             >
-              Create
+              {signInHere.isPending ? "Signing in…" : "Sign in"}
             </Button>
           </div>
-          {link ? (
-            <div className="flex items-center gap-2">
-              <Input readOnly value={link} onFocus={(e) => e.target.select()} />
-              <Button type="button" size="icon" variant="outline" onClick={copy} aria-label="Copy link">
-                {copied ? <CheckIcon className="text-text-muted" /> : <CopyIcon />}
-              </Button>
-            </div>
-          ) : (
-            <p className="text-xs text-text-muted">
-              The link works once and expires in 24 hours. It is shown here only — it cannot be looked up again.
-            </p>
-          )}
+          {error ? <InlineError>{error}</InlineError> : null}
         </div>
 
+        <WaitingDevicesList poll />
+
         <div className="flex flex-col gap-3">
-          <h3 className="text-sm font-semibold text-text">Your passkeys</h3>
-          {credentials.length === 0 ? (
-            <p className="text-sm text-text-muted">None registered — the link above is how you add one.</p>
+          <h3 className="text-sm font-semibold text-text">Your devices</h3>
+          {devices.length === 0 ? (
+            <p className="text-sm text-text-muted">None signed in.</p>
           ) : (
             <DataList>
-              {credentials.map((credential) => (
+              {devices.map((device) => (
                 <DataListRow
-                  key={credential.id}
-                  primary={credential.deviceName}
-                  secondary={credential.lastUsedAt ? "Used before" : "Never used"}
+                  key={device.id}
+                  primary={device.deviceName ?? "Unnamed device"}
+                  secondary={`Signed in ${new Date(device.createdAt).toLocaleDateString()}`}
                   trailing={
                     <Button
-                      size="icon-sm"
+                      size="sm"
                       variant="ghost"
                       className="text-text-muted hover:text-text"
-                      aria-label={`Remove ${credential.deviceName}`}
+                      disabled={signOutDevice.isPending}
                       onClick={async () => {
                         const ok = await confirm({
-                          title: `Remove ${credential.deviceName}?`,
+                          title: `Sign out ${device.deviceName ?? "this device"}?`,
                           description:
-                            "That device will no longer be able to sign in. Remove a passkey you have lost, not the one you are about to create.",
-                          confirmLabel: "Remove",
+                            "Sign out a device you've lost. It has to ask to join again before it can be used.",
+                          confirmLabel: "Sign out",
                         });
-                        if (ok) removeCredential.mutate(credential.id);
+                        if (ok) signOutDevice.mutate(device.id);
                       }}
                     >
-                      <Trash2Icon />
+                      Sign out
                     </Button>
                   }
                 />
@@ -189,7 +182,7 @@ export function RecoveryPage() {
         </div>
 
         <Button variant="outline" onClick={signOut}>
-          Sign out
+          Sign out of recovery
         </Button>
       </CardContent>
     </Card>

@@ -50,6 +50,7 @@ import { AllocationProportionBar, accountName } from "@/components/allocation-pr
 import { DatePicker } from "@/components/date-picker.jsx";
 import { Delta } from "@/components/delta.jsx";
 import { EmptyState } from "@/components/empty-state.jsx";
+import { PanelSkeleton, SectionsSkeleton } from "@/components/loading.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
 import { FidelityBadge } from "@/components/fidelity-badge.jsx";
 import { GoodLifeFidelity } from "@/components/good-life-fidelity.jsx";
@@ -61,6 +62,7 @@ import { TopBarAction } from "@/components/topbar-action.jsx";
 import { UnallocatedIndicator, isBalanced } from "@/components/unallocated-indicator.jsx";
 import { useConfirm } from "@/components/confirm-dialog.jsx";
 import { api } from "@/lib/api.js";
+import { copyText } from "@/lib/copy-text.js";
 import { ApiError, apiErrorFrom, readApiError } from "@/lib/api-error.js";
 import { useFlashOnChange } from "@/lib/motion.js";
 import {
@@ -91,6 +93,12 @@ import { formatMoney } from "@/lib/format-money.js";
 import { useSettings } from "@/lib/settings.jsx";
 import { cn } from "@/lib/utils.js";
 import { ScrollArea } from "@/components/scroll-area.jsx";
+import {
+  accountsQueryOptions,
+  allocationPlansQueryOptions,
+  incomeResolveQueryOptions,
+  incomeVariantsQueryOptions,
+} from "@/lib/queries.js";
 
 /** @import { AllocationResult, Basis, Cadence, Cents, TransferDelta } from "@budget/engine" */
 /** @import { DraftLine, DraftStageGoals, LineProblem } from "@/lib/allocation-draft.js" */
@@ -1313,7 +1321,7 @@ function TransfersPanel({ rows, inputs, editing, totalPerPayCents, current }) {
     // Exactly what gets typed into the bank: no symbol, no thousands
     // separator (phases/08-allocation.md "Acceptance criteria").
     try {
-      await navigator.clipboard.writeText((cents / 100).toFixed(2));
+      await copyText((cents / 100).toFixed(2));
       toast.success("Amount copied.");
     } catch {
       toast.error("Couldn't copy — your browser blocked clipboard access.");
@@ -1821,14 +1829,7 @@ function DraftSaveStatus({ dirty, saving, problemCount, failure, localSignature,
  * /allocation crashed on `.map` of an object.
  */
 function useIncomeVariantsQuery() {
-  return useQuery({
-    queryKey: ["income-variants"],
-    queryFn: async () => {
-      const res = await api["income-variants"].$get();
-      if (!res.ok) throw new Error(await readApiError(res));
-      return res.json();
-    },
-  });
+  return useQuery(incomeVariantsQueryOptions());
 }
 
 /**
@@ -1896,25 +1897,11 @@ export function AllocationPage() {
   const undoDepth = useStore(allocationDraftHistory, (s) => s.pastStates.length);
   const redoDepth = useStore(allocationDraftHistory, (s) => s.futureStates.length);
 
-  const plansQuery = useQuery({
-    queryKey: ["allocation-plans"],
-    queryFn: async () => {
-      const res = await api["allocation-plans"].$get();
-      if (!res.ok) throw new Error(await readApiError(res));
-      return /** @type {{ plans: Plan[] }} */ (await res.json()).plans;
-    },
-  });
+  const plansQuery = useQuery(allocationPlansQueryOptions());
 
   const variantsQuery = useIncomeVariantsQuery();
 
-  const accountsQuery = useQuery({
-    queryKey: ["accounts"],
-    queryFn: async () => {
-      const res = await api.accounts.$get();
-      if (!res.ok) throw new Error(await readApiError(res));
-      return /** @type {Account[]} */ ((await res.json()).accounts);
-    },
-  });
+  const accountsQuery = useQuery(accountsQueryOptions());
 
   const plans = plansQuery.data ?? [];
   const accounts = accountsQuery.data ?? [];
@@ -1926,14 +1913,7 @@ export function AllocationPage() {
   // rather than read off a preview: the preview is fetched FOR a plan, so
   // using it to choose the plan is circular — the page would have to open on
   // the wrong one first to find out which is right.
-  const resolveQuery = useQuery({
-    queryKey: ["income-resolve", on],
-    queryFn: async () => {
-      const res = await api.income.resolve.$get({ query: { on } });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return /** @type {{ variantId: string | null }} */ (await res.json());
-    },
-  });
+  const resolveQuery = useQuery(incomeResolveQueryOptions(on));
 
   // With no `?plan=` in the URL the page used to open on `plans[0]` — first
   // by insertion order, and nothing to do with what is actually running.
@@ -2367,7 +2347,7 @@ export function AllocationPage() {
       .map((r) => `${r.name}\t${((r.newPerPayCents ?? r.currentPerPayCents ?? 0) / 100).toFixed(2)}`)
       .join("\n");
     try {
-      await navigator.clipboard.writeText(text);
+      await copyText(text);
       toast.success(`${actionable.length} transfer${actionable.length === 1 ? "" : "s"} copied.`);
     } catch {
       toast.error("Couldn't copy — your browser blocked clipboard access.");
@@ -2696,7 +2676,9 @@ export function AllocationPage() {
               and a chart inside `display: none` measures its container at
               0x0 and draws nothing. The media query keeps it out of the tree
               entirely; the classes stay for the layout. */}
-          <aside className="sticky top-4 hidden rounded-(--radius-card) bg-surface p-5 shadow-(--shadow-card) lg:block">
+          {/* Pinned just below the page's own pinned header (PageHeader
+              publishes its height), not under it. */}
+          <aside className="sticky top-[calc(var(--page-header-h,0px)+1rem)] hidden rounded-(--radius-card) bg-surface p-5 shadow-(--shadow-card) lg:block">
             {isDesktop ? (
               <PreviewPanel
                 rows={transferRows}
@@ -2709,6 +2691,14 @@ export function AllocationPage() {
               />
             ) : null}
           </aside>
+        </div>
+      ) : !previewQuery.isError && (plansQuery.isPending || previewQuery.isPending) ? (
+        // The preview waits on the plans to know which plan to ask for, so
+        // this covers both legs. Same two columns as the real thing: the
+        // stages, and the transfers beside them.
+        <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[minmax(0,1fr)_19rem]">
+          <SectionsSkeleton sections={[3, 4, 2]} label="Loading this allocation" />
+          <PanelSkeleton height={420} label="Loading transfers" />
         </div>
       ) : null}
 

@@ -96,9 +96,15 @@ services:
       SESSION_SECRET: ${SESSION_SECRET:?compose reads infra/.env - see infra/README.md step 3}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?compose reads infra/.env - see infra/README.md step 3}
       APP_VERSION: ${APP_VERSION:-dev}
+      # Where the app writes its backups: the bind mount below.
+      BACKUP_DIR: /backups
       # Containers default to UTC, and the api's "today" is local time — so
       # without this, today is still yesterday until 10–11am in Australia.
       TZ: ${TZ:-Australia/Sydney}
+    # A host folder, not a named volume, so the files can be copied off the box
+    # with nothing but scp. Relative to this file: infra/backups/, gitignored.
+    volumes:
+      - ./backups:/backups
     # Loopback only: the host itself (curl localhost:3001/health) is the one
     # thing that needs this. Browsers reach the api through web's /api/.
     ports:
@@ -120,11 +126,13 @@ services:
     depends_on:
       api:
         condition: service_healthy
-    # Loopback only. `tailscale serve` on this host is what makes the app
-    # reachable from other devices; publishing on every interface would put
-    # the bootstrap screen on the LAN too.
+    # The household's address: http://budget.local, on port 80 of this host,
+    # reachable from the home network (infra/README.md step 5). This is the
+    # one service anything off the host can reach. Until the first user exists
+    # it serves the set-up screen to whoever opens it first, so set up
+    # straight after the first start (step 6).
     ports:
-      - "127.0.0.1:8080:80"
+      - "80:80"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/ || exit 1"]
       interval: 5s

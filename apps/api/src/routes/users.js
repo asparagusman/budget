@@ -1,6 +1,6 @@
-import { credentials, invites, sessions, updateUserSchema, users } from "@budget/schema";
+import { deviceRequests, invites, sessions, updateUserSchema, users } from "@budget/schema";
 import { zValidator } from "@hono/zod-validator";
-import { and, eq, isNull, ne, or } from "drizzle-orm";
+import { and, eq, gt, isNull, ne, or } from "drizzle-orm";
 import { Hono } from "hono";
 import { getUserId } from "../lib/app-env.js";
 import { writeAuditLog } from "../lib/audit.js";
@@ -17,15 +17,25 @@ export function createUsersRoutes({ db }) {
       const rows = await db.query.users.findMany({
         orderBy: (u, { asc }) => asc(u.createdAt),
       });
+      const now = new Date();
       const result = [];
       for (const user of rows) {
-        const credentialCount = await db.$count(credentials, eq(credentials.userId, user.id));
+        // Signed-in devices: live sessions, not counting a recovery one.
+        const deviceCount = await db.$count(
+          sessions,
+          and(
+            eq(sessions.userId, user.id),
+            eq(sessions.authMethod, "device"),
+            isNull(sessions.revokedAt),
+            gt(sessions.expiresAt, now),
+          ),
+        );
         result.push({
           id: user.id,
           displayName: user.displayName,
           email: user.email,
           isActive: user.isActive,
-          credentialCount,
+          deviceCount,
         });
       }
       return c.json({ users: result });
@@ -78,12 +88,14 @@ export function createUsersRoutes({ db }) {
           .returning({ id: sessions.id });
         // And the doors they could still walk back through. An unredeemed
         // invite they minted is a link still in their hands — a fresh account,
-        // or a passkey on whoever it names — and a `new_device` invite FOR
-        // them would come back to life on reactivation.
+        // or a device for whoever it names — and a `new_device` invite FOR
+        // them would come back to life on reactivation. The same goes for a
+        // device approved for them that hasn't collected its session yet.
         const withdrawn = await tx
           .delete(invites)
           .where(and(isNull(invites.consumedAt), or(eq(invites.createdBy, id), eq(invites.targetUserId, id))))
           .returning({ id: invites.id });
+        await tx.delete(deviceRequests).where(eq(deviceRequests.approvedUserId, id));
         return { updated, ended: { revokedSessions: revoked.length, revokedInvites: withdrawn.length } };
       });
       if (!result) {

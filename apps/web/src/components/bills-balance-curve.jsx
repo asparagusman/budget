@@ -1,11 +1,9 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { toCents } from "@budget/engine";
 import { ChevronDownIcon, ChevronRightIcon } from "lucide-react";
 import { toast } from "sonner";
 import { Area, CartesianGrid, ComposedChart, ReferenceLine, XAxis, YAxis } from "recharts";
 import { Button } from "@/components/ui/button.jsx";
-import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/components/ui/input-group.jsx";
 import {
   AXIS,
   Chart,
@@ -20,6 +18,7 @@ import {
   useTimeAxis,
 } from "@/components/chart.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
+import { MoneyInput } from "@/components/money-input.jsx";
 import { Money } from "@/components/money.jsx";
 import { InlineError } from "@/components/notice.jsx";
 import { api } from "@/lib/api.js";
@@ -79,18 +78,20 @@ export function BillsBalanceCurve({ window }) {
   const [open, setOpen] = useState(false);
   // `null` means "whatever the server resolved" — the saved override, or the
   // bills account's own latest balance. A string is an unsaved what-if the
-  // operator has typed. Starting at `null` rather than "0" is the whole point
-  // of this control: the curve no longer answers from a number nobody chose.
-  const [whatIfDollars, setWhatIfDollars] = useState(/** @type {string | null} */ (null));
+  // operator has typed, and `null` is the field cleared with nothing typed
+  // yet — which asks the server for its own figure, never for a zero. Starting
+  // at `undefined` rather than 0 is the whole point of this control: the
+  // curve no longer answers from a number nobody chose.
+  const [whatIfCents, setWhatIfCents] = useState(/** @type {Cents | null | undefined} */ (undefined));
 
   const curveQuery = useQuery({
-    queryKey: ["fixed-costs-balance-curve", window.from, window.to, whatIfDollars],
+    queryKey: ["fixed-costs-balance-curve", window.from, window.to, whatIfCents],
     queryFn: async () => {
       const res = await api["fixed-costs"]["balance-curve"].$get({
         query: {
           from: window.from,
           to: window.to,
-          ...(whatIfDollars === null ? {} : { opening: String(toCents(Number(whatIfDollars) || 0)) }),
+          ...(typeof whatIfCents === "number" ? { opening: String(whatIfCents) } : {}),
         },
       });
       if (!res.ok) throw new Error(await readApiError(res));
@@ -111,7 +112,7 @@ export function BillsBalanceCurve({ window }) {
     onSuccess: (_data, billsOpeningBalanceCents) => {
       // Back to following the saved figure — the input is no longer a what-if
       // once the what-if has been saved.
-      setWhatIfDollars(null);
+      setWhatIfCents(undefined);
       queryClient.invalidateQueries({ queryKey: ["settings"] });
       queryClient.invalidateQueries({ queryKey: ["fixed-costs-balance-curve"] });
       toast.success(billsOpeningBalanceCents === null ? "Following the bills account balance" : "Starting balance saved");
@@ -122,9 +123,9 @@ export function BillsBalanceCurve({ window }) {
   const saved = curveQuery.data?.savedOpeningBalance ?? null;
   // The field shows the typed what-if if there is one, otherwise the saved
   // figure the server resolved — never a hardcoded zero.
-  const openingDollars = whatIfDollars ?? (saved ? (saved.openingBalanceCents / 100).toFixed(2) : "");
-  const openingCents = toCents(Number(openingDollars) || 0);
-  const isDirty = whatIfDollars !== null && saved !== null && openingCents !== saved.openingBalanceCents;
+  const openingCents = whatIfCents === undefined ? (saved?.openingBalanceCents ?? null) : whatIfCents;
+  const isBlank = whatIfCents === null;
+  const isDirty = typeof whatIfCents === "number" && saved !== null && whatIfCents !== saved.openingBalanceCents;
 
   // Memoised so the chart's rows keep their identity across unrelated
   // renders: Recharts restarts its entrance animation whenever its data is a
@@ -159,29 +160,21 @@ export function BillsBalanceCurve({ window }) {
         <div className="flex flex-col gap-4 border-t border-border p-5">
           <div className="flex flex-wrap items-end gap-3">
             <FieldRow label="Starting balance" htmlFor="curve-opening" className="max-w-40">
-              <InputGroup>
-                <InputGroupAddon>
-                  <InputGroupText>$</InputGroupText>
-                </InputGroupAddon>
-                <InputGroupInput
-                  id="curve-opening"
-                  type="number"
-                  step="0.01"
-                  inputMode="decimal"
-                  value={openingDollars}
-                  onChange={(e) => setWhatIfDollars(e.target.value)}
-                />
-              </InputGroup>
+              <MoneyInput id="curve-opening" allowNegative value={openingCents} onChange={setWhatIfCents} />
             </FieldRow>
             {isDirty ? (
               <>
-                <Button size="sm" onClick={() => saveOpening.mutate(openingCents)} disabled={saveOpening.isPending}>
+                <Button size="sm" onClick={() => saveOpening.mutate(whatIfCents ?? null)} disabled={saveOpening.isPending}>
                   Save
                 </Button>
-                <Button size="sm" variant="ghost" onClick={() => setWhatIfDollars(null)}>
+                <Button size="sm" variant="ghost" onClick={() => setWhatIfCents(undefined)}>
                   Discard
                 </Button>
               </>
+            ) : isBlank ? (
+              <Button size="sm" variant="ghost" onClick={() => setWhatIfCents(undefined)}>
+                Discard
+              </Button>
             ) : saved?.source === "override" ? (
               <Button size="sm" variant="ghost" onClick={() => saveOpening.mutate(null)} disabled={saveOpening.isPending}>
                 Use account balance
@@ -194,11 +187,13 @@ export function BillsBalanceCurve({ window }) {
           <p className="text-xs text-text-muted">
             {isDirty
               ? "Unsaved what-if — the curve below uses this figure, but nothing has been saved."
-              : saved?.source === "override"
-                ? `Saved override.${saved.accountName ? ` ${saved.accountName}'s own balance is used if you clear it.` : ""}`
-                : saved?.source === "account"
-                  ? `From ${saved.accountName}${saved.asAt ? `, recorded ${formatIsoDate(saved.asAt, locale)}` : ""}. Type a figure to override it.`
-                  : "No income-landing account balance recorded yet, so this starts from zero. Record one, or type a figure and save it."}
+              : isBlank
+                ? "Nothing typed, so the curve below still uses the figure it started from. Type a figure to try another."
+                : saved?.source === "override"
+                  ? `Saved override.${saved.accountName ? ` ${saved.accountName}'s own balance is used if you clear it.` : ""}`
+                  : saved?.source === "account"
+                    ? `From ${saved.accountName}${saved.asAt ? `, recorded ${formatIsoDate(saved.asAt, locale)}` : ""}. Type a figure to override it.`
+                    : "No income-landing account balance recorded yet, so this starts from zero. Record one, or type a figure and save it."}
           </p>
           {curveQuery.data ? (
             <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-(--radius-control) bg-surface-muted px-4 py-3">
@@ -211,7 +206,7 @@ export function BillsBalanceCurve({ window }) {
                   <Button
                     size="sm"
                     variant="outline"
-                    onClick={() => setWhatIfDollars(((curveQuery.data.openingBalanceCents - withdrawable) / 100).toFixed(2))}
+                    onClick={() => setWhatIfCents(curveQuery.data.openingBalanceCents - withdrawable)}
                   >
                     Preview taking it out
                   </Button>

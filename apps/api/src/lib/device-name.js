@@ -1,7 +1,7 @@
 /**
  * A best-effort, human-readable guess at the device from its User-Agent —
  * good enough as a default label. The operator can always rename it to
- * something more useful ("Lachlan's iPhone") via `PATCH /credentials/:id`.
+ * something more useful ("Lachlan's iPhone") from Admin → Devices (`PATCH /sessions/:id`).
  *
  * @param {string | undefined} userAgent
  */

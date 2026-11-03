@@ -1,7 +1,7 @@
 import { memo, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { addDaysIso, periodsBetween, toCents } from "@budget/engine";
+import { addDaysIso, periodsBetween } from "@budget/engine";
 import {
   AlertTriangleIcon,
   BanknoteIcon,
@@ -25,7 +25,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog.jsx";
 import { Input } from "@/components/ui/input.jsx";
-import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/components/ui/input-group.jsx";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select.jsx";
 import { Textarea } from "@/components/ui/textarea.jsx";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip.jsx";
@@ -47,8 +46,9 @@ import {
 import { DatePicker } from "@/components/date-picker.jsx";
 import { Delta } from "@/components/delta.jsx";
 import { EmptyState } from "@/components/empty-state.jsx";
-import { CardsSkeleton } from "@/components/loading.jsx";
+import { CardsSkeleton, StatsSkeleton } from "@/components/loading.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
+import { MoneyInput, NumberInput } from "@/components/money-input.jsx";
 import { Money } from "@/components/money.jsx";
 import { InlineError, NoticeList } from "@/components/notice.jsx";
 import { GoalsTabs } from "@/components/goals-tabs.jsx";
@@ -65,6 +65,7 @@ import { formatIsoDate } from "@/lib/dates.js";
 import { formatMoney } from "@/lib/format-money.js";
 import { useSettings } from "@/lib/settings.jsx";
 import { useTodayIso } from "@/lib/use-today.js";
+import { accountsQueryOptions, goalsQueryOptions } from "@/lib/queries.js";
 
 /** @import { Cadence, Cents } from "@budget/engine" */
 
@@ -552,8 +553,8 @@ function GoalFormDialog({ open, onOpenChange, accounts, editing, submitting, onS
   const [accountId, setAccountId] = useState("");
   const [name, setName] = useState("");
   const [mode, setMode] = useState(/** @type {(typeof TARGET_MODES)[number]} */ ("amount"));
-  const [amount, setAmount] = useState("");
-  const [months, setMonths] = useState("");
+  const [amountCents, setAmountCents] = useState(/** @type {number | null} */ (null));
+  const [months, setMonths] = useState(/** @type {number | null} */ (null));
   const [targetDate, setTargetDate] = useState("");
   const [note, setNote] = useState("");
   const [status, setStatus] = useState(/** @type {"active" | "achieved" | "abandoned"} */ ("active"));
@@ -564,8 +565,8 @@ function GoalFormDialog({ open, onOpenChange, accounts, editing, submitting, onS
     setAccountId(editing?.goal.accountId ?? pickable[0]?.id ?? "");
     setName(editing?.goal.name ?? "");
     setMode(editing?.goal.targetMode ?? "amount");
-    setAmount(editing?.goal.targetAmountCents != null ? String(editing.goal.targetAmountCents / 100) : "");
-    setMonths(editing?.goal.targetMonths != null ? String(editing.goal.targetMonths) : "");
+    setAmountCents(editing?.goal.targetAmountCents ?? null);
+    setMonths(editing?.goal.targetMonths ?? null);
     setTargetDate(editing?.goal.targetDate ?? "");
     setNote(editing?.goal.note ?? "");
     setStatus(editing?.goal.status ?? "active");
@@ -579,15 +580,15 @@ function GoalFormDialog({ open, onOpenChange, accounts, editing, submitting, onS
     setError(null);
     if (!accountId) return setError("Choose an account.");
     if (name.trim() === "") return setError("Name the goal.");
-    if (mode === "amount" && amount.trim() === "") return setError("Enter a target amount.");
-    if (mode === "months_of_expenses" && months.trim() === "") return setError("Enter a number of months.");
+    if (mode === "amount" && amountCents === null) return setError("Enter a target amount.");
+    if (mode === "months_of_expenses" && months === null) return setError("Enter a number of months.");
     try {
       await onSubmit({
         accountId,
         name: name.trim(),
         targetMode: mode,
-        targetAmountCents: mode === "amount" ? toCents(Number(amount)) : null,
-        targetMonths: mode === "months_of_expenses" ? Number(months) : null,
+        targetAmountCents: mode === "amount" ? amountCents : null,
+        targetMonths: mode === "months_of_expenses" ? months : null,
         targetDate: targetDate === "" ? null : targetDate,
         note: note.trim() === "" ? null : note.trim(),
         status,
@@ -650,31 +651,11 @@ function GoalFormDialog({ open, onOpenChange, accounts, editing, submitting, onS
           </FieldRow>
           {mode === "amount" ? (
             <FieldRow label="Target amount" htmlFor="goal-amount" required>
-              <InputGroup>
-                <InputGroupAddon>
-                  <InputGroupText>$</InputGroupText>
-                </InputGroupAddon>
-                <InputGroupInput
-                  id="goal-amount"
-                  type="number"
-                  step="0.01"
-                  inputMode="decimal"
-                  value={amount}
-                  onChange={(e) => setAmount(e.target.value)}
-                />
-              </InputGroup>
+              <MoneyInput id="goal-amount" value={amountCents} onChange={setAmountCents} />
             </FieldRow>
           ) : (
             <FieldRow label="Months of expenses" htmlFor="goal-months" required>
-              <Input
-                id="goal-months"
-                type="number"
-                step="0.5"
-                min="0"
-                inputMode="decimal"
-                value={months}
-                onChange={(e) => setMonths(e.target.value)}
-              />
+              <NumberInput id="goal-months" step={0.5} max={999} value={months} onChange={setMonths} />
             </FieldRow>
           )}
           <FieldRow
@@ -735,27 +716,9 @@ export function GoalsPage() {
   const [editing, setEditing] = useState(/** @type {Goal | null} */ (null));
   const [balanceFor, setBalanceFor] = useState(/** @type {{ accountId: string | null } | null} */ (null));
 
-  const goalsQuery = useQuery({
-    queryKey: ["goals", today],
-    queryFn: async () => {
-      // The browser's today, sent: the server's own clock can sit in another
-      // zone, and every ETA and "months covered" is counted from this date.
-      const res = await api.goals.$get({ query: { on: today } });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return /** @type {{ goals: Goal[], summary: GoalsSummary, warnings: { code: string, message: string }[] }} */ (
-        await res.json()
-      );
-    },
-  });
+  const goalsQuery = useQuery(goalsQueryOptions(today));
 
-  const accountsQuery = useQuery({
-    queryKey: ["accounts"],
-    queryFn: async () => {
-      const res = await api.accounts.$get();
-      if (!res.ok) throw new Error(await readApiError(res));
-      return /** @type {Account[]} */ ((await res.json()).accounts);
-    },
-  });
+  const accountsQuery = useQuery(accountsQueryOptions());
 
   const accounts = accountsQuery.data ?? [];
   const goals = goalsQuery.data?.goals ?? [];
@@ -913,6 +876,8 @@ export function GoalsPage() {
             }
           />
         </StatGroup>
+      ) : isLoading ? (
+        <StatsSkeleton labels={["Active goals", "Required", "Allocated", "Shortfall"]} label="Loading the goals summary" />
       ) : null}
 
       {warnings.length > 0 ? (

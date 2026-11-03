@@ -3,14 +3,15 @@ import { ChevronDownIcon, ChevronRightIcon, PlusIcon, RotateCcwIcon, SlidersHori
 import { Badge } from "@/components/ui/badge.jsx";
 import { Button } from "@/components/ui/button.jsx";
 import { Input } from "@/components/ui/input.jsx";
-import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/components/ui/input-group.jsx";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select.jsx";
 import { DatePicker } from "@/components/date-picker.jsx";
+import { IntegerInput, MoneyInput, PercentInput } from "@/components/money-input.jsx";
 import { Money } from "@/components/money.jsx";
 import { InlineError } from "@/components/notice.jsx";
 import { AMOUNT_MODEL_LABELS, AMOUNT_MODELS, CADENCES, CADENCE_LABELS } from "@/lib/constants.js";
 import { formatIsoDate } from "@/lib/dates.js";
 import { billToDraft, draftSignature, isBlankGhost, restatedFigures } from "@/lib/fixed-costs-draft.js";
+import { formatDecimalText, formatMoneyText, parseDecimalText, parseMoneyText } from "@/lib/numeric-text.js";
 import { cn } from "@/lib/utils.js";
 import { ScrollArea } from "@/components/scroll-area.jsx";
 
@@ -231,20 +232,14 @@ function EditRow({ row, people, accounts, onChange, onRemove, onOpenBill }) {
         </Select>
       </td>
       <td className="px-2 py-2 align-top">
-        <InputGroup className="h-8 w-28">
-          <InputGroupAddon>
-            <InputGroupText>$</InputGroupText>
-          </InputGroupAddon>
-          <InputGroupInput
-            type="number"
-            step="0.01"
-            inputMode="decimal"
-            aria-label={draft.amountModel === "flat" ? "Amount" : "Base amount"}
-            value={draft.amountText}
-            disabled={draft.removed}
-            onChange={(e) => onChange(draft.key, { amountText: e.target.value })}
-          />
-        </InputGroup>
+        <MoneyInput
+          density="cell"
+          className="h-8 w-28"
+          aria-label={draft.amountModel === "flat" ? "Amount" : "Base amount"}
+          value={parseMoneyText(draft.amountText)}
+          disabled={draft.removed}
+          onChange={(cents) => onChange(draft.key, { amountText: formatMoneyText(cents) })}
+        />
         {draft.amountModel !== "flat" ? (
           <p className="mt-1 text-xs text-text-subtle">base / fallback</p>
         ) : null}
@@ -300,33 +295,26 @@ function EditRow({ row, people, accounts, onChange, onRemove, onOpenBill }) {
             </SelectContent>
           </Select>
           {draft.amountModel === "rolling_average" ? (
-            <Input
+            <IntegerInput
+              density="cell"
               className="h-8 w-16"
-              type="number"
-              min="1"
-              step="1"
-              inputMode="numeric"
+              min={1}
               aria-label="How many past actuals to average"
-              value={draft.rollingWindowText}
+              value={parseDecimalText(draft.rollingWindowText, 0)}
               disabled={draft.removed}
-              onChange={(e) => onChange(draft.key, { rollingWindowText: e.target.value })}
+              onChange={(n) => onChange(draft.key, { rollingWindowText: formatDecimalText(n, 0) })}
             />
           ) : null}
           {draft.amountModel === "escalating" ? (
-            <InputGroup className="h-8 w-24">
-              <InputGroupInput
-                type="number"
-                step="0.1"
-                inputMode="decimal"
-                aria-label="Percent per year"
-                value={draft.escalationPctText}
-                disabled={draft.removed}
-                onChange={(e) => onChange(draft.key, { escalationPctText: e.target.value })}
-              />
-              <InputGroupAddon align="inline-end">
-                <InputGroupText>%</InputGroupText>
-              </InputGroupAddon>
-            </InputGroup>
+            <PercentInput
+              density="cell"
+              className="h-8 w-24"
+              decimals={4}
+              aria-label="Percent per year"
+              value={parseDecimalText(draft.escalationPctText, 4)}
+              disabled={draft.removed}
+              onChange={(pct) => onChange(draft.key, { escalationPctText: formatDecimalText(pct, 4) })}
+            />
           ) : null}
         </div>
         {/* The models that need data this table cannot hold say so, and say
@@ -546,20 +534,13 @@ function CategoryGroupMobile({ category, rows, totals, editing, people, locale, 
                   )}
                 </div>
                 <div className="grid grid-cols-2 gap-2">
-                  <InputGroup className="h-9">
-                    <InputGroupAddon>
-                      <InputGroupText>$</InputGroupText>
-                    </InputGroupAddon>
-                    <InputGroupInput
-                      type="number"
-                      step="0.01"
-                      inputMode="decimal"
-                      aria-label={draft.amountModel === "flat" ? "Amount" : "Base amount"}
-                      value={draft.amountText}
-                      disabled={draft.removed}
-                      onChange={(e) => onChange(draft.key, { amountText: e.target.value })}
-                    />
-                  </InputGroup>
+                  <MoneyInput
+                    className="h-9"
+                    aria-label={draft.amountModel === "flat" ? "Amount" : "Base amount"}
+                    value={parseMoneyText(draft.amountText)}
+                    disabled={draft.removed}
+                    onChange={(cents) => onChange(draft.key, { amountText: formatMoneyText(cents) })}
+                  />
                   <Select
                     value={draft.frequency}
                     disabled={draft.removed}
@@ -595,33 +576,24 @@ function CategoryGroupMobile({ category, rows, totals, editing, people, locale, 
                     </SelectContent>
                   </Select>
                   {draft.amountModel === "rolling_average" ? (
-                    <Input
+                    <IntegerInput
                       className="h-9"
-                      type="number"
-                      min="1"
-                      step="1"
-                      inputMode="numeric"
+                      min={1}
                       aria-label="How many past actuals to average"
-                      value={draft.rollingWindowText}
+                      value={parseDecimalText(draft.rollingWindowText, 0)}
                       disabled={draft.removed}
-                      onChange={(e) => onChange(draft.key, { rollingWindowText: e.target.value })}
+                      onChange={(n) => onChange(draft.key, { rollingWindowText: formatDecimalText(n, 0) })}
                     />
                   ) : null}
                   {draft.amountModel === "escalating" ? (
-                    <InputGroup className="h-9">
-                      <InputGroupInput
-                        type="number"
-                        step="0.1"
-                        inputMode="decimal"
-                        aria-label="Percent per year"
-                        value={draft.escalationPctText}
-                        disabled={draft.removed}
-                        onChange={(e) => onChange(draft.key, { escalationPctText: e.target.value })}
-                      />
-                      <InputGroupAddon align="inline-end">
-                        <InputGroupText>%</InputGroupText>
-                      </InputGroupAddon>
-                    </InputGroup>
+                    <PercentInput
+                      className="h-9"
+                      decimals={4}
+                      aria-label="Percent per year"
+                      value={parseDecimalText(draft.escalationPctText, 4)}
+                      disabled={draft.removed}
+                      onChange={(pct) => onChange(draft.key, { escalationPctText: formatDecimalText(pct, 4) })}
+                    />
                   ) : null}
                 </div>
                 <div className="grid grid-cols-2 items-end gap-2">

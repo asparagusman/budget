@@ -12,11 +12,11 @@ import { createAuthRoutes } from "./auth.js";
 // The recovery password is the one credential in this app that is phishable,
 // so what it is ALLOWED to do is the security property — not how well it is
 // hashed. These tests are mostly about that boundary: a session opened with
-// it can mint a new-device invite and nothing else, it cannot change or
+// it can get a device approved and nothing else, it cannot change or
 // remove itself, and it expires in an hour.
 //
 // See todo.md #17: the decision was one password, held by one user, that can
-// only ever produce another passkey.
+// only ever produce another approved device.
 
 const GOOD_PASSWORD = "correct-horse-battery-staple-42";
 
@@ -35,12 +35,12 @@ function createGuardedApp() {
   const guarded = new Hono();
   guarded.use("*", requireAuth(db));
   return guarded
-    .route("/auth", createAuthRoutes({ db, env: /** @type {any} */ ({ PUBLIC_ORIGIN: "https://budget.test", APP_VERSION: "test" }) }))
+    .route("/auth", createAuthRoutes({ db, env: /** @type {any} */ ({ PUBLIC_ORIGIN: "http://budget.local", APP_VERSION: "test" }) }))
     .get("/invites", (c) => c.json({ ok: true }))
     .post("/invites", (c) => c.json({ ok: true }))
     .get("/users", (c) => c.json({ ok: true }))
     .delete("/users/:id", (c) => c.json({ ok: true }))
-    .delete("/credentials/:id", (c) => c.json({ ok: true }))
+    .post("/device-requests/:id/approve", (c) => c.json({ ok: true }))
     .get("/dashboard", (c) => c.json({ ok: true }))
     .post("/allocation-versions", (c) => c.json({ ok: true }));
 }
@@ -59,7 +59,7 @@ afterEach(async () => {
 /** @param {string} token */
 const cookie = (token) => ({ cookie: `${SESSION_COOKIE}=${token}` });
 
-/** @param {"passkey" | "recovery_password"} authMethod */
+/** @param {"device" | "recovery_password"} authMethod */
 async function signIn(authMethod) {
   const { token } = await createSession(db, { userId, userAgent: "test", authMethod });
   return token;
@@ -88,19 +88,19 @@ async function setPassword(/** @type {string} */ token, password = GOOD_PASSWORD
 }
 
 describe("setting the recovery password", () => {
-  it("requires a passkey session, never a recovery one", async () => {
-    expect((await setPassword(await signIn("passkey"))).status).toBe(200);
+  it("requires an approved device, never a recovery session", async () => {
+    expect((await setPassword(await signIn("device"))).status).toBe(200);
 
     const recoveryToken = await signIn("recovery_password");
     const res = await setPassword(recoveryToken, "another-long-enough-password-1");
     expect(res.status).toBe(403);
     // A credential that can change itself is a credential an attacker can
-    // keep — the password's own replacement has to cost a passkey.
-    expect((await body(res)).error.code).toBe("passkey_required");
+    // keep — the password's own replacement has to cost an approved device.
+    expect((await body(res)).error.code).toBe("device_required");
   });
 
   it("refuses one that is too short or too simple", async () => {
-    const token = await signIn("passkey");
+    const token = await signIn("device");
     expect((await setPassword(token, "short")).status).toBe(400);
     // Sixteen of one character is long enough and still not a password.
     expect((await setPassword(token, "aaaaaaaaaaaaaaaaaa")).status).toBe(400);
@@ -109,11 +109,11 @@ describe("setting the recovery password", () => {
   });
 
   it("does not count padding towards the length", async () => {
-    expect((await setPassword(await signIn("passkey"), `   hunter2   `)).status).toBe(400);
+    expect((await setPassword(await signIn("device"), `   hunter2   `)).status).toBe(400);
   });
 
   it("stores a salted hash, never the password", async () => {
-    await setPassword(await signIn("passkey"));
+    await setPassword(await signIn("device"));
     const [user] = await db.select().from(users).where(eq(users.id, userId));
     expect(user?.recoveryPasswordHash).toBeTruthy();
     expect(user?.recoveryPasswordHash).not.toContain(GOOD_PASSWORD);
@@ -122,7 +122,7 @@ describe("setting the recovery password", () => {
   });
 
   it("keeps the household to one, and says who holds it", async () => {
-    await setPassword(await signIn("passkey"));
+    await setPassword(await signIn("device"));
 
     const [second] = await db.insert(users).values({ displayName: "Ben" }).returning();
     const { token } = await createSession(db, { userId: /** @type {string} */ (second?.id), userAgent: "test" });
@@ -139,23 +139,23 @@ describe("setting the recovery password", () => {
   });
 
   it("signs out the sessions the old password opened when it is replaced", async () => {
-    const passkeyToken = await signIn("passkey");
-    await setPassword(passkeyToken);
+    const deviceToken = await signIn("device");
+    await setPassword(deviceToken);
     const recoveryToken = await signIn("recovery_password");
     expect((await request("/invites", { token: recoveryToken })).status).toBe(200);
 
     // Rotating because the old one got out has to close the door it already
     // opened, the way removing it does — not leave it ajar for the hour.
-    expect((await setPassword(passkeyToken, "a-second-long-recovery-phrase-2")).status).toBe(200);
+    expect((await setPassword(deviceToken, "a-second-long-recovery-phrase-2")).status).toBe(200);
     expect((await request("/invites", { token: recoveryToken })).status).toBe(401);
-    expect((await request("/dashboard", { token: passkeyToken })).status).toBe(200);
+    expect((await request("/dashboard", { token: deviceToken })).status).toBe(200);
 
     const rows = await db.select().from(sessions).where(eq(sessions.authMethod, "recovery_password"));
     expect(rows.every((row) => row.revokedAt !== null)).toBe(true);
   });
 
   it("replaces the holder's own password without complaint", async () => {
-    const token = await signIn("passkey");
+    const token = await signIn("device");
     await setPassword(token);
     expect((await setPassword(token, "a-second-long-recovery-phrase-2")).status).toBe(200);
 
@@ -169,7 +169,7 @@ describe("setting the recovery password", () => {
 
 describe("signing in with it", () => {
   beforeEach(async () => {
-    await setPassword(await signIn("passkey"));
+    await setPassword(await signIn("device"));
   });
 
   /** @param {string} password */
@@ -203,11 +203,11 @@ describe("signing in with it", () => {
   });
 
   it("cannot be used once it has been removed", async () => {
-    const passkeyToken = await signIn("passkey");
+    const deviceToken = await signIn("device");
     const recoveryToken = await body(await login(GOOD_PASSWORD));
     expect(recoveryToken.authMethod).toBe("recovery_password");
 
-    expect((await request("/auth/recovery-password", { method: "DELETE", token: passkeyToken })).status).toBe(200);
+    expect((await request("/auth/recovery-password", { method: "DELETE", token: deviceToken })).status).toBe(200);
     expect((await login(GOOD_PASSWORD)).status).toBe(400);
 
     // And the session it had already opened is revoked with it, rather than
@@ -222,15 +222,15 @@ describe("what a recovery session may reach", () => {
   let token;
 
   beforeEach(async () => {
-    await setPassword(await signIn("passkey"));
+    await setPassword(await signIn("device"));
     token = await signIn("recovery_password");
   });
 
-  it("can do the things that get a passkey back", async () => {
+  it("can do the things that get a device approved", async () => {
     expect((await request("/invites", { token })).status).toBe(200);
     expect((await request("/invites", { method: "POST", token })).status).toBe(200);
     expect((await request("/users", { token })).status).toBe(200);
-    expect((await request("/credentials/some-id", { method: "DELETE", token })).status).toBe(200);
+    expect((await request("/device-requests/some-id/approve", { method: "POST", token })).status).toBe(200);
   });
 
   it("cannot reach a single figure in the app", async () => {
@@ -241,19 +241,19 @@ describe("what a recovery session may reach", () => {
   });
 
   it("cannot deactivate anyone, even though it can list users", async () => {
-    // Read to pick an invite target; nothing more. Otherwise a phished
+    // Read to pick whose device it is; nothing more. Otherwise a phished
     // password could lock the household out of its own recovery.
     expect((await request(`/users/${userId}`, { method: "DELETE", token })).status).toBe(403);
   });
 
-  it("lets a passkey session through to everything", async () => {
-    const passkey = await signIn("passkey");
-    expect((await request("/dashboard", { token: passkey })).status).toBe(200);
-    expect((await request(`/users/${userId}`, { method: "DELETE", token: passkey })).status).toBe(200);
+  it("lets an approved device through to everything", async () => {
+    const device = await signIn("device");
+    expect((await request("/dashboard", { token: device })).status).toBe(200);
+    expect((await request(`/users/${userId}`, { method: "DELETE", token: device })).status).toBe(200);
   });
 
   it("tells /auth/state how the browser signed in", async () => {
     expect((await body(await request("/auth/state", { token }))).authMethod).toBe("recovery_password");
-    expect((await body(await request("/auth/state", { token: await signIn("passkey") }))).authMethod).toBe("passkey");
+    expect((await body(await request("/auth/state", { token: await signIn("device") }))).authMethod).toBe("device");
   });
 });

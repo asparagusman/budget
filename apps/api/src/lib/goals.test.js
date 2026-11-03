@@ -1,4 +1,4 @@
-import { accounts, bills, variableActuals, variableBudgets } from "@budget/schema";
+import { accounts, balanceSnapshots, bills, variableActuals, variableBudgets } from "@budget/schema";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createReadApp, get } from "../test/app.js";
@@ -69,6 +69,50 @@ describe("/net-worth, after an account is archived", () => {
   });
 });
 
+describe("/net-worth, when balances were entered account by account", () => {
+  /** @type {ReturnType<typeof createReadApp>} */
+  let app;
+  /** @type {() => Promise<void>} */
+  let close;
+
+  beforeAll(async () => {
+    ({ app, close } = await householdAfter(async (db) => {
+      // One account's balance goes in a month before the rest. Until the others
+      // follow, the total is that one account's alone — a climb from almost
+      // nothing that the household's net worth never made.
+      await db.insert(balanceSnapshots).values({
+        accountId: HOUSEHOLD_IDS.everyday,
+        asAt: "2026-01-10",
+        amountCents: 10_000,
+      });
+    }));
+  });
+
+  afterAll(async () => {
+    await close();
+  });
+
+  it("starts where every account that has a balance first has one", async () => {
+    const netWorth = await get(app, `/net-worth?from=2026-01-01&to=${ON}`);
+    // The rest were first recorded on 2026-02-13. The external mortgage's
+    // balance (recorded only on ON) is not net worth, so it can't push this
+    // later.
+    expect(netWorth.knownFrom).toBe("2026-02-13");
+  });
+
+  it("has no balances at all, and so no start, before any is recorded", async () => {
+    const empty = await householdAfter(async (db) => {
+      await db.delete(balanceSnapshots);
+    });
+    try {
+      const netWorth = await get(empty.app, `/net-worth?from=2026-01-01&to=${ON}`);
+      expect(netWorth.knownFrom).toBeNull();
+    } finally {
+      await empty.close();
+    }
+  });
+});
+
 describe("a months-of-expenses goal before any costs are recorded", () => {
   /** @type {ReturnType<typeof createReadApp>} */
   let app;
@@ -121,11 +165,5 @@ describe("a months-of-expenses goal before any costs are recorded", () => {
     const dashboard = await get(app, `/dashboard?on=${ON}`);
     const cover = dashboard.goals.find((/** @type {any} */ g) => g.id === HOUSEHOLD_IDS.mojoGoal);
     expect(cover).toMatchObject({ targetComputable: false, reached: false });
-    expect(dashboard.mojo).toMatchObject({
-      goalId: HOUSEHOLD_IDS.mojoGoal,
-      targetComputable: false,
-      monthsCovered: null,
-      nextThresholdMonths: null,
-    });
   });
 });

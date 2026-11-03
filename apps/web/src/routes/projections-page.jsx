@@ -1,11 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { addDaysIso } from "@budget/engine";
 import { BanknoteIcon, InfoIcon, TrendingUpIcon } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button.jsx";
-import { Input } from "@/components/ui/input.jsx";
-import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/components/ui/input-group.jsx";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select.jsx";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip.jsx";
 import { Area, AreaChart, CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
@@ -26,6 +23,7 @@ import {
 } from "@/components/chart.jsx";
 import { DataList, DataListRow } from "@/components/data-list.jsx";
 import { EmptyState } from "@/components/empty-state.jsx";
+import { PercentInput } from "@/components/money-input.jsx";
 import { PanelSkeleton } from "@/components/loading.jsx";
 import { Money } from "@/components/money.jsx";
 import { NoticeList } from "@/components/notice.jsx";
@@ -39,9 +37,11 @@ import { registerCommands } from "@/lib/commands.js";
 import { formatIsoDate } from "@/lib/dates.js";
 import { colorFor, entityColors } from "@/lib/entity-colors.js";
 import { formatMoney } from "@/lib/format-money.js";
+import { roundTo } from "@/lib/numeric-text.js";
 import { useSettings } from "@/lib/settings.jsx";
 import { useTodayIso } from "@/lib/use-today.js";
 import { ScrollArea } from "@/components/scroll-area.jsx";
+import { accountsQueryOptions, netWorthQueryOptions, projectionsQueryOptions } from "@/lib/queries.js";
 
 /** @import { Cents } from "@budget/engine" */
 
@@ -75,7 +75,6 @@ import { ScrollArea } from "@/components/scroll-area.jsx";
  */
 
 const HORIZON_OPTIONS = /** @type {const} */ (["12", "24", "36", "60"]);
-const NET_WORTH_LOOKBACK_DAYS = 730;
 
 /**
  * The growth rate, edited as a real annual percentage. The spreadsheet stored
@@ -83,55 +82,57 @@ const NET_WORTH_LOOKBACK_DAYS = 730;
  * projected figure was invisible for months
  * (phases/09-goals-projections.md "/projections").
  *
- * @param {{ account: ProjectedAccount, saving: boolean, onSave: (annualGrowthRate: number) => void }} props
+ * `compact` is the table's: a column of these only needs to hold "15.3896%",
+ * and the narrower it is the more of the horizons fit beside it.
+ *
+ * @param {{ account: ProjectedAccount, saving: boolean, compact?: boolean, onSave: (annualGrowthRate: number) => void }} props
  */
-function GrowthRateInput({ account, saving, onSave }) {
-  const asPercent = (account.annualGrowthRate * 100).toFixed(4).replace(/\.?0+$/, "");
-  const [text, setText] = useState(asPercent);
+function GrowthRateInput({ account, saving, compact = false, onSave }) {
+  // Four places of percent is the six of a fraction that the column holds.
+  const stored = roundTo(account.annualGrowthRate * 100, 4);
+  const [pct, setPct] = useState(/** @type {number | null} */ (stored));
 
   // Re-sync when the server's value changes (another session, or our own save
   // landing) — but never while this field is the one being typed in.
   useEffect(() => {
-    setText(asPercent);
-  }, [asPercent]);
+    setPct(stored);
+  }, [stored]);
 
   function commit() {
-    const parsed = Number(text.trim() === "" ? "0" : text);
-    if (Number.isNaN(parsed) || parsed < 0) {
-      setText(asPercent);
+    // Cleared is not 0%: it keeps the rate that is stored, and the field says
+    // so by showing it again.
+    if (pct === null) {
+      setPct(stored);
       return;
     }
-    // Six decimal places is what the column holds, and snapping here avoids
-    // sending 0.05032500000000001 for a typed 5.0325.
-    const next = Number((parsed / 100).toFixed(6));
+    // Snapping here avoids sending 0.05032500000000001 for a typed 5.0325.
+    const next = roundTo(pct / 100, 6);
     if (next === account.annualGrowthRate) return;
     onSave(next);
   }
 
   return (
-    <InputGroup className="h-9 w-28">
-      <InputGroupInput
-        aria-label={`${account.name} annual growth rate`}
-        type="number"
-        step="0.01"
-        min="0"
-        inputMode="decimal"
-        disabled={saving}
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        onBlur={commit}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            commit();
-          }
-          if (e.key === "Escape") setText(asPercent);
-        }}
-      />
-      <InputGroupAddon align="inline-end">
-        <InputGroupText className="text-xs">%</InputGroupText>
-      </InputGroupAddon>
-    </InputGroup>
+    <PercentInput
+      aria-label={`${account.name} annual growth rate`}
+      density={compact ? "cell" : "field"}
+      // Wide enough for four decimals ("15.3896"). The digits are
+      // right-aligned against the unit, so the compact field drops its left
+      // padding rather than growing the column.
+      className={compact ? "h-8 w-22" : "h-9 w-28"}
+      inputClassName={compact ? "pl-0.5" : undefined}
+      decimals={4}
+      disabled={saving}
+      value={pct}
+      onChange={setPct}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          commit();
+        }
+        if (e.key === "Escape") setPct(stored);
+      }}
+    />
   );
 }
 
@@ -139,17 +140,24 @@ function GrowthRateInput({ account, saving, onSave }) {
  * @param {{ projections: Projections, savingId: string | null, onSaveRate: (accountId: string, rate: number) => void }} props
  */
 function ProjectionsTable({ projections, savingId, onSaveRate }) {
+  // Sized to fit a 1440px window with the sidebar open (a 1120px content
+  // column) at the longest horizon, seven figure columns. That is why the cells
+  // pad px-1.5 rather than the app's usual px-3, and why "a month" sits once in
+  // the header instead of after every contribution.
   return (
     <ScrollArea axis="x" className="rounded-(--radius-card) bg-surface shadow-(--shadow-card)">
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b border-border text-left text-xs text-text-muted">
-            <th className="sticky left-0 z-10 bg-surface px-4 py-3 font-medium">Account</th>
-            <th className="px-3 py-3 text-right font-medium">Balance</th>
-            <th className="px-3 py-3 text-right font-medium">Contribution</th>
-            <th className="px-3 py-3 font-medium whitespace-nowrap">Growth (p.a.)</th>
+            <th className="sticky left-0 z-10 bg-surface py-3 pr-1.5 pl-4 font-medium">Account</th>
+            <th className="px-1.5 py-3 text-right font-medium">Balance</th>
+            <th className="px-1.5 py-3 text-right font-medium">
+              Contribution
+              <span className="block font-normal text-text-subtle">a month</span>
+            </th>
+            <th className="px-1.5 py-3 font-medium whitespace-nowrap">Growth (p.a.)</th>
             {projections.horizons.map((h) => (
-              <th key={h} className="px-3 py-3 text-right font-medium whitespace-nowrap">
+              <th key={h} className="px-1.5 py-3 text-right font-medium whitespace-nowrap">
                 {h} mo
               </th>
             ))}
@@ -158,7 +166,7 @@ function ProjectionsTable({ projections, savingId, onSaveRate }) {
         <tbody className="divide-y divide-border">
           {projections.accounts.map((account) => (
             <tr key={account.id}>
-              <td className="sticky left-0 z-10 bg-surface px-4 py-3 whitespace-nowrap">
+              <td className="sticky left-0 z-10 bg-surface py-3 pr-1.5 pl-4 whitespace-nowrap">
                 <p className="font-medium text-text">{account.name}</p>
                 <p className="text-xs text-text-subtle">
                   {account.currentBalanceAsAt
@@ -166,22 +174,22 @@ function ProjectionsTable({ projections, savingId, onSaveRate }) {
                     : "no balance recorded"}
                 </p>
               </td>
-              <td className="px-3 py-3 text-right whitespace-nowrap text-text">
+              <td className="px-1.5 py-3 text-right whitespace-nowrap text-text">
                 <Money value={account.currentBalanceCents} />
               </td>
-              <td className="px-3 py-3 text-right whitespace-nowrap text-text-muted">
+              <td className="px-1.5 py-3 text-right whitespace-nowrap text-text-muted">
                 <Money value={account.contributionPerMonthCents} />
-                <span className="text-text-subtle">/month</span>
               </td>
-              <td className="px-3 py-3">
+              <td className="px-1.5 py-3">
                 <GrowthRateInput
+                  compact
                   account={account}
                   saving={savingId === account.id}
                   onSave={(rate) => onSaveRate(account.id, rate)}
                 />
               </td>
               {projections.horizons.map((h) => (
-                <td key={h} className="px-3 py-3 text-right whitespace-nowrap text-text">
+                <td key={h} className="px-1.5 py-3 text-right whitespace-nowrap text-text">
                   <Money value={account.byHorizon[String(h)] ?? 0} />
                 </td>
               ))}
@@ -190,17 +198,17 @@ function ProjectionsTable({ projections, savingId, onSaveRate }) {
         </tbody>
         <tfoot>
           <tr className="border-t border-border text-xs">
-            <td className="sticky left-0 z-10 bg-surface px-4 py-3 font-medium whitespace-nowrap text-text-muted">
+            <td className="sticky left-0 z-10 bg-surface py-3 pr-1.5 pl-4 font-medium whitespace-nowrap text-text-muted">
               Household total
               <span className="block text-xs font-normal text-text-subtle">savings &amp; investment only</span>
             </td>
-            <td className="px-3 py-3 text-right font-semibold whitespace-nowrap text-text">
+            <td className="px-1.5 py-3 text-right font-semibold whitespace-nowrap text-text">
               <Money value={projections.totalSeries[0]?.projectedCents ?? 0} />
             </td>
             <td />
             <td />
             {projections.horizons.map((h) => (
-              <td key={h} className="px-3 py-3 text-right font-semibold whitespace-nowrap text-text">
+              <td key={h} className="px-1.5 py-3 text-right font-semibold whitespace-nowrap text-text">
                 <Money value={projections.totalSeries[h]?.projectedCents ?? 0} />
               </td>
             ))}
@@ -422,36 +430,11 @@ export function ProjectionsPage() {
   const [savingId, setSavingId] = useState(/** @type {string | null} */ (null));
   const [balanceOpen, setBalanceOpen] = useState(false);
 
-  const projectionsQuery = useQuery({
-    queryKey: ["projections", months, today],
-    queryFn: async () => {
-      // The browser's today: "now" on every series is counted from it, and
-      // the server's own clock can sit in another zone.
-      const res = await api.projections.$get({ query: { months, on: today } });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return /** @type {Projections} */ (await res.json());
-    },
-  });
+  const projectionsQuery = useQuery(projectionsQueryOptions(months, today));
 
-  const netWorthQuery = useQuery({
-    queryKey: ["net-worth", today],
-    queryFn: async () => {
-      const res = await api["net-worth"].$get({
-        query: { from: addDaysIso(today, -NET_WORTH_LOOKBACK_DAYS), to: today },
-      });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return /** @type {NetWorth} */ (await res.json());
-    },
-  });
+  const netWorthQuery = useQuery(netWorthQueryOptions(today));
 
-  const accountsQuery = useQuery({
-    queryKey: ["accounts"],
-    queryFn: async () => {
-      const res = await api.accounts.$get();
-      if (!res.ok) throw new Error(await readApiError(res));
-      return /** @type {Account[]} */ ((await res.json()).accounts);
-    },
-  });
+  const accountsQuery = useQuery(accountsQueryOptions());
 
   const saveRate = useMutation({
     mutationFn: async (/** @type {{ accountId: string, annualGrowthRate: number }} */ { accountId, annualGrowthRate }) => {
@@ -564,6 +547,13 @@ export function ProjectionsPage() {
           loading={netWorthQuery.isLoading}
           onUpdateBalance={() => setBalanceOpen(true)}
         />
+      ) : netWorthQuery.isLoading ? (
+        // Held open at the panel's height (two figures over a 220px chart):
+        // it sits above everything else here, so arriving late pushed the
+        // whole page down.
+        <PageSection title="Net worth">
+          <PanelSkeleton height={340} label="Loading net worth" />
+        </PageSection>
       ) : netWorthQuery.isError ? (
         // The panel used to just not appear, which reads as "this page has
         // no net worth section" rather than "it didn't load".
@@ -589,9 +579,13 @@ export function ProjectionsPage() {
                 accumulated, so compounding it would project money you&apos;ve already used.
               </TooltipContent>
             </Tooltip>
-            {projections?.allocationPlan
-              ? `Contributions from the ${projections.allocationPlan.name} allocation`
-              : "No active allocation — contributions read as zero"}
+            {/* Nothing until it's known: "no active allocation" while the
+                answer is still in flight is a claim, not a placeholder. */}
+            {!projections
+              ? null
+              : projections.allocationPlan
+                ? `Contributions from the ${projections.allocationPlan.name} allocation`
+                : "No active allocation — contributions read as zero"}
           </span>
         }
         actions={

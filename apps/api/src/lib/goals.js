@@ -480,10 +480,18 @@ export async function loadNetWorth(db, window) {
     totalCents: sumCents(accounts.map((a) => mustAt(a.points, i, "net worth point").balanceCents)),
   }));
 
-  // Before this date nothing was ever recorded, so every total above is a
-  // zero that means "unknown" rather than "empty". Exposed so the chart can
-  // start where the data does instead of drawing a cliff up from nothing.
-  const knownFrom = snapshots.length > 0 ? mustAt(snapshots, 0, "earliest snapshot").asAt : null;
+  // Before this date the totals are not net worth: a zero that means "unknown"
+  // rather than "empty", and after it, until every account has its first
+  // balance, a partial sum that climbs each time another account is entered.
+  // The history starts on the first date every account that has ever been
+  // given a balance has one — where the balances exist as a set — so the line
+  // never draws a climb that didn't happen. An account with no snapshot at all
+  // is counted as zero everywhere and takes no part, and an external one is
+  // not in `accountRows`, so its balances can't move the date.
+  const firstSnapshotOn = accountRows
+    .map((account) => snapshots.find((s) => s.accountId === account.id)?.asAt ?? null)
+    .filter((asAt) => asAt !== null);
+  const knownFrom = firstSnapshotOn.length > 0 ? firstSnapshotOn.reduce((a, b) => (a > b ? a : b)) : null;
 
   return { window, knownFrom, accounts, totalPoints };
 }

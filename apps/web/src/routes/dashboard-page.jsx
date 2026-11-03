@@ -14,8 +14,6 @@ import {
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge.jsx";
 import { Button } from "@/components/ui/button.jsx";
-import { Skeleton } from "@/components/ui/skeleton.jsx";
-import { AllocationFlow } from "@/components/allocation-flow.jsx";
 import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts";
 import {
   AXIS,
@@ -29,15 +27,14 @@ import {
   useMoneyTick,
   useTimeAxis,
 } from "@/components/chart.jsx";
-import { Delta } from "@/components/delta.jsx";
 import { FidelityBadge } from "@/components/fidelity-badge.jsx";
-import { GoodLifeFidelity } from "@/components/good-life-fidelity.jsx";
 import { Money } from "@/components/money.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
 import { QueryError } from "@/components/query-error.jsx";
 import { QuickBalanceSheet } from "@/components/quick-balance-sheet.jsx";
 import { UnallocatedIndicator, isBalanced } from "@/components/unallocated-indicator.jsx";
 import { api } from "@/lib/api.js";
+import { copyText } from "@/lib/copy-text.js";
 import { readApiError } from "@/lib/api-error.js";
 import { registerCommands } from "@/lib/commands.js";
 import { CADENCE_LABELS, CADENCE_PERIOD_NOUNS } from "@/lib/constants.js";
@@ -46,6 +43,8 @@ import { formatMoney } from "@/lib/format-money.js";
 import { useSettings } from "@/lib/settings.jsx";
 import { useTodayIso } from "@/lib/use-today.js";
 import { cn } from "@/lib/utils.js";
+import { dashboardQueryOptions } from "@/lib/queries.js";
+import { CARD_GRID, DashboardSkeleton } from "@/components/dashboard-skeleton.jsx";
 
 /** @import { Cadence, Cents, OverAllocation, Transfer } from "@budget/engine" */
 
@@ -78,32 +77,26 @@ import { cn } from "@/lib/utils.js";
  *     applied: DashApplied,
  *     lines: { id: string, stage: number, label: string, accountId: string }[],
  *     resolvedLines: DashResolvedLine[], breakdown: DashBreakdown[],
- *     unallocatedPerMonthCents: Cents, goodLifeFidelityCents: Cents,
+ *     unallocatedPerMonthCents: Cents, goodLifeFidelityCents: Cents, nonEssentialPoolPerMonthCents: Cents,
  *     overAllocation: OverAllocation | null, hasDraft: boolean,
  *   } | null,
  *   accounts: DashAccount[],
  *   netWorth: { totalCents: Cents, series: { date: string, totalCents: Cents }[], stalestAsAt: string | null, staleDays: number | null, staleAfterDays: number, accountsWithoutBalance: number },
- *   mojo: {
- *     goalId: string, name: string, accountName: string, balanceCents: Cents,
- *     monthsCovered: number | null, burnPerMonthCents: Cents,
- *     nextThresholdMonths: number | null, periodsToNextThreshold: number | null,
- *     approxMonthsToNextThreshold: number | null, nextThresholdEta: string | null, payCadence: Cadence,
- *     targetComputable: boolean,
- *   } | null,
  *   goals: { id: string, name: string, accountName: string, progressPct: number, etaDate: string | null, aheadBehindDays: number | null, isFunded: boolean, reached: boolean, currentBalanceCents: Cents, targetCents: Cents, targetComputable: boolean }[],
  *   setup: DashSetup,
  *   warnings: { code: string, message: string, href: string }[],
  * }} DashboardData
  *
- * - `goals[].targetComputable` / `mojo.targetComputable` — false for a
+ * - `goals[].targetComputable` — false for a
  *   months-of-expenses goal before any essential cost is recorded; its
  *   `targetCents` and `progressPct` are then a placeholder 0, not a target.
  */
 /**
- * @typedef {{ billId: string, billName: string, dueDate: string, dueDateConfirmed: boolean, amountCents: Cents }} UpcomingBill
+ * @typedef {{ billId: string, billName: string, ownerName: string | null, dueDate: string, dueDateConfirmed: boolean, amountCents: Cents }} UpcomingBill
  *
  * `dueDateConfirmed` is false for an imported bill whose date is still the
  * import's placeholder — every "due on" for it is a guess until it's set.
+ * `ownerName` is the person the bill belongs to; null means Shared.
  */
 /**
  * @typedef {Transfer & { appliedPerPayCents: Cents | null, driftPerPayCents: Cents | null }} DashTransfer
@@ -151,12 +144,6 @@ const BREAKDOWN_HINTS = {
   saving: "Saving, investing, giving, buffer",
   leftover: "What's left for day to day",
 };
-
-// Two columns on desktop: a 4/6 main column and a 2/6 rail, over three rows
-// whose middle one is `1fr`. A card spanning into the flexible row is left out
-// of the auto rows' sizing, so the hero's row is exactly as tall as the hero
-// and the slack lands in the cards that span — never as a gap under a card.
-const CYCLE_GRID = "grid grid-cols-1 gap-4 md:gap-6 lg:grid-cols-6 lg:grid-rows-[auto_1fr_auto]";
 
 /**
  * Every card on this screen: one surface, one radius, one shadow, and a quiet
@@ -407,7 +394,7 @@ function WarningsStrip({ warnings }) {
  * @param {{ data: DashboardData }} props
  */
 function HeroCard({ data }) {
-  const { allocation, cycle, variant } = data;
+  const { allocation, cycle, variant, variable } = data;
   const perPeriod = cycle ? CADENCE_PERIOD_NOUNS[cycle.payCadence][0] : "month";
   const incomePerPayCents = allocation?.grossPerPayCents ?? variant.totalPerPayCents;
   const incomePerMonthCents = allocation?.grossPerMonthCents ?? variant.totalPerMonthCents;
@@ -498,21 +485,40 @@ function HeroCard({ data }) {
                     />
                   </div>
                   <p className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-text-muted">
-                    <span>{group.pctOfGross !== null ? `${group.pctOfGross.toFixed(1)}% of income` : "—"}</span>
-                    {/* The goal, where the household set one, said the way
-                        it asked for it: what you're doing, against what you
-                        meant to. Where there is no goal the group keeps the
-                        hint it always had. */}
-                    {group.fidelity !== null ? (
-                      <FidelityBadge fidelity={group.fidelity} goalPct={group.goalPct} />
-                    ) : hint !== null ? (
-                      <span>· {hint}</span>
+                    {/* The goal, where the household set one, said as the two
+                        figures it compares: what you're doing, against what
+                        you meant to. Where there is no goal the group keeps
+                        the share and the hint it always had. */}
+                    {group.fidelity !== null && group.pctOfGross !== null && group.goalPct !== null ? (
+                      <FidelityBadge fidelity={group.fidelity} goalPct={group.goalPct} actualPct={group.pctOfGross} />
                     ) : (
-                      <span>
-                        · {group.lineCount} {group.lineCount === 1 ? "line" : "lines"}
-                      </span>
+                      <>
+                        <span>{group.pctOfGross !== null ? `${group.pctOfGross.toFixed(1)}% of income` : "—"}</span>
+                        {hint !== null ? (
+                          <span>· {hint}</span>
+                        ) : (
+                          <span>
+                            · {group.lineCount} {group.lineCount === 1 ? "line" : "lines"}
+                          </span>
+                        )}
+                      </>
                     )}
                   </p>
+                  {/* The one figure the old "good life" card carried: a month's
+                      worth of what is left over, against what was aimed for.
+                      Under Leftover because that is the column it answers. */}
+                  {group.key === "leftover" ? (
+                    <p className="mt-1 text-xs text-text-muted">
+                      ≈ <Money value={allocation.nonEssentialPoolPerMonthCents} className="font-medium text-text" />
+                      /month for non-essentials
+                      {variable.nonEssentialPerMonthCents > 0 ? (
+                        <>
+                          {" · target "}
+                          <Money value={variable.nonEssentialPerMonthCents} />
+                        </>
+                      ) : null}
+                    </p>
+                  ) : null}
                 </dd>
               </div>
             );
@@ -537,12 +543,12 @@ function HeroCard({ data }) {
 function TransfersCard({ data, accounts }) {
   const { allocation, cycle } = data;
   const nameOf = (/** @type {string} */ id) => accounts.find((a) => a.id === id)?.name ?? "Unknown account";
-  const cadenceLabel = cycle ? CADENCE_LABELS[cycle.payCadence].toLowerCase() : "month";
+  const perPeriod = cycle ? CADENCE_PERIOD_NOUNS[cycle.payCadence][0] : "month";
 
   /** @param {Cents} cents */
   async function copyAmount(cents) {
     try {
-      await navigator.clipboard.writeText((cents / 100).toFixed(2));
+      await copyText((cents / 100).toFixed(2));
       toast.success("Amount copied.");
     } catch {
       toast.error("Couldn't copy — your browser blocked clipboard access.");
@@ -560,11 +566,7 @@ function TransfersCard({ data, accounts }) {
   }
 
   return (
-    <Card
-      title="Standing transfers"
-     
-      to="/allocation"
-    >
+    <Card title="Standing transfers" to="/allocation">
       <ul className="flex flex-col divide-y divide-border">
         {allocation.transfers.map((transfer) => (
           <li key={transfer.accountId}>
@@ -606,7 +608,7 @@ function TransfersCard({ data, accounts }) {
         ))}
       </ul>
       <p className="mt-auto text-xs text-text-subtle">
-        Per {cadenceLabel}. Tap a row to copy its amount.
+        Per {perPeriod}. Tap a row to copy its amount.
       </p>
     </Card>
   );
@@ -624,11 +626,7 @@ function UpcomingCard({ data }) {
   const { bills } = data;
 
   return (
-    <Card
-      title="Upcoming bills"
-     
-      to="/costs/fixed"
-    >
+    <Card title="Upcoming bills" to="/costs/fixed">
       {bills.upcoming.length === 0 ? (
         <p className="text-sm text-text-muted">
           {bills.billCount === 0
@@ -640,7 +638,14 @@ function UpcomingCard({ data }) {
           {bills.upcoming.map((instance) => (
             <li key={`${instance.billId}:${instance.dueDate}`} className="flex items-start justify-between gap-3 py-2">
               <div className="min-w-0">
-                <p className="truncate text-sm font-medium text-text">{instance.billName}</p>
+                <p className="truncate text-sm font-medium text-text">
+                  {instance.billName}
+                  {/* Whose it is, so "Car rego" is not a guess between two
+                      people. A shared bill is just its name. */}
+                  {instance.ownerName ? (
+                    <span className="font-normal text-text-muted"> · {instance.ownerName}</span>
+                  ) : null}
+                </p>
                 <p className="text-xs text-text-muted">
                   {relativeDayLabel(daysBetween(data.on, instance.dueDate))}
                   <span className="text-text-subtle"> · {formatIsoDate(instance.dueDate, locale)}</span>
@@ -713,7 +718,6 @@ function NetWorthCard({ data, onUpdateBalance }) {
   return (
     <Card
       title="Net worth"
-     
       to="/accounts"
       aside={
         <Button size="sm" variant="ghost" onClick={onUpdateBalance}>
@@ -793,84 +797,6 @@ function NetWorthCard({ data, onUpdateBalance }) {
 }
 
 /**
- * How long the household could last, and when the next month of cover lands.
- * Durations are periods of the pay cadence and approximate months — never
- * weeks (phases/09-goals-projections.md "/goals").
- *
- * @param {{ mojo: NonNullable<DashboardData["mojo"]> }} props
- */
-function MojoCard({ mojo }) {
-  const { locale } = useSettings();
-  const [singular, plural] = CADENCE_PERIOD_NOUNS[mojo.payCadence];
-  const periods = mojo.periodsToNextThreshold;
-
-  // Months of cover are months of essential costs, and with none recorded
-  // there is nothing to count in: no figure, no markers. Said as what it
-  // needs, never as "every marker is covered" (which is what an empty list of
-  // markers used to read as).
-  if (!mojo.targetComputable) {
-    return (
-      <Card title={mojo.name} to="/goals">
-        <div>
-          <p className="text-lg font-semibold text-text">Needs costs recorded</p>
-          <p className="mt-0.5 text-xs text-text-muted">
-            <Money value={mojo.balanceCents} className="font-medium text-text" /> in {mojo.accountName}. Months of
-            cover are measured against your essential costs, and none are recorded yet.
-          </p>
-        </div>
-        <Link
-          to="/costs/fixed"
-          className="self-start text-xs font-medium text-text-muted underline underline-offset-2 hover:text-text"
-        >
-          Record your bills <span aria-hidden="true">→</span>
-        </Link>
-      </Card>
-    );
-  }
-
-  return (
-    <Card title={mojo.name} to="/goals">
-      <div>
-        <p className="text-3xl font-bold tracking-tight text-text tabular-nums">
-          {mojo.monthsCovered !== null ? mojo.monthsCovered.toFixed(1) : "—"}
-          <span className="ml-1.5 text-base font-medium text-text-muted">months covered</span>
-        </p>
-        <p className="mt-0.5 text-xs text-text-muted">
-          <Money value={mojo.balanceCents} className="font-medium text-text" /> in {mojo.accountName} · essentials run{" "}
-          <Money value={mojo.burnPerMonthCents} />
-          /month
-        </p>
-      </div>
-      {mojo.nextThresholdMonths !== null ? (
-        <p className="rounded-(--radius-control) bg-surface-muted p-3 text-sm text-text">
-          Next marker:{" "}
-          <strong>
-            {mojo.nextThresholdMonths} month{mojo.nextThresholdMonths === 1 ? "" : "s"}
-          </strong>
-          {periods !== null ? (
-            <>
-              {" in about "}
-              {periods} {periods === 1 ? singular : plural}
-              {mojo.approxMonthsToNextThreshold !== null
-                ? ` (${mojo.approxMonthsToNextThreshold} month${mojo.approxMonthsToNextThreshold === 1 ? "" : "s"})`
-                : ""}
-              {mojo.nextThresholdEta ? `, ${formatIsoDate(mojo.nextThresholdEta, locale)}` : ""}.
-            </>
-          ) : (
-            <>, but nothing is being contributed, so it never arrives.</>
-          )}
-        </p>
-      ) : (
-        <p className="flex items-center gap-2 text-sm text-text">
-          <CheckCircle2Icon className="size-4 shrink-0 text-text-muted" aria-hidden="true" />
-          Every marker is covered.
-        </p>
-      )}
-    </Card>
-  );
-}
-
-/**
  * Days for a near miss, months once it runs to years — "20061 days sooner" is
  * a true number that tells the operator nothing. Same rule as /goals'
  * `EtaAndRequired`.
@@ -898,7 +824,7 @@ function GoalsCard({ goals }) {
           contribution.
         </p>
       ) : (
-        <ul className="grid grid-cols-1 gap-x-8 gap-y-4 lg:grid-cols-2">
+        <ul className="grid grid-cols-1 gap-x-8 gap-y-4 md:grid-cols-2 lg:grid-cols-1">
           {goals.map((goal) => (
             <li key={goal.id} className="flex flex-col gap-1.5">
               <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5">
@@ -958,66 +884,6 @@ function GoalsCard({ goals }) {
           ))}
         </ul>
       )}
-    </Card>
-  );
-}
-
-/**
- * The prize pool against the non-essential target, and how variable spending
- * is actually tracking against its budget.
- *
- * @param {{ data: DashboardData }} props
- */
-function GoodLifeCard({ data }) {
-  const { allocation, variable, cycle } = data;
-  const cadenceLabel = cycle ? CADENCE_LABELS[cycle.payCadence].toLowerCase() : "month";
-
-  return (
-    <Card title="The good life" to="/costs/variable">
-      <p className="text-sm text-text">
-        {allocation ? (
-          <GoodLifeFidelity
-            cents={allocation.goodLifeFidelityCents}
-            targetPerMonthCents={variable.nonEssentialPerMonthCents}
-          />
-        ) : (
-          <>
-            Your non-essential target is <Money value={variable.nonEssentialPerMonthCents} /> a month. An active
-            allocation is what says whether you are hitting it.
-          </>
-        )}
-      </p>
-      <dl className="flex flex-col gap-2 text-xs">
-        <div className="flex items-baseline justify-between gap-4">
-          <dt className="min-w-0 text-text-muted">Essentials, per {cadenceLabel}</dt>
-          <dd className="font-medium text-text tabular-nums">
-            {variable.essentialPerPayCents !== null ? (
-              <Money value={variable.essentialPerPayCents} />
-            ) : (
-              <Money value={variable.essentialPerMonthCents} />
-            )}
-          </dd>
-        </div>
-        <div className="flex items-baseline justify-between gap-4">
-          <dt className="min-w-0 text-text-muted">Actually spending, per month</dt>
-          <dd className="flex shrink-0 items-center justify-end gap-2 text-right">
-            {variable.trailingAveragePerMonthCents !== null ? (
-              <>
-                <span className="font-medium text-text tabular-nums">
-                  <Money value={variable.trailingAveragePerMonthCents} />
-                </span>
-                {variable.varianceCents !== null ? (
-                  <Delta value={variable.varianceCents} kind="cents" variance />
-                ) : null}
-              </>
-            ) : (
-              <span className="text-text-subtle">
-                {variable.cyclesRecorded === 0 ? "no cycles recorded yet" : "not enough history"}
-              </span>
-            )}
-          </dd>
-        </div>
-      </dl>
     </Card>
   );
 }
@@ -1112,33 +978,15 @@ function linkTo(href) {
 }
 
 /**
- * Card-shaped placeholders in the real grid positions, so nothing moves when
- * the data lands (phases/10-dashboard.md "Skeletons, not spinners").
- */
-function DashboardSkeleton() {
-  return (
-    <>
-      <Skeleton className="h-36 rounded-(--radius-card)" />
-      <div className={CYCLE_GRID}>
-        <Skeleton className="h-64 rounded-(--radius-card) lg:col-span-4" />
-        <Skeleton className="h-64 rounded-(--radius-card) lg:col-span-2 lg:row-span-2" />
-        <Skeleton className="h-80 rounded-(--radius-card) lg:col-span-4" />
-      </div>
-    </>
-  );
-}
-
-/**
  * Where are we right now, without opening anything else. Read-only except for
  * one balance update: every other figure is a link into the screen that owns
  * it, and nothing on this page computes a financial figure of its own
  * (phases/10-dashboard.md).
  *
- * The card order in the DOM is the MOBILE order — most-checked first — and
- * `lg:order-*` rearranges the first grid for desktop (income beside the
- * standing orders, the flow beside what is due), so the phone gets the
- * priority order for free rather than through a second markup tree. The second
- * grid is already in reading order on both.
+ * The card order in the DOM is the MOBILE order — cycle summary, income,
+ * transfers, bills, goals, net worth — and `CARD_GRID` places the same markup
+ * for desktop, so the phone gets the priority order for free rather than
+ * through a second markup tree.
  */
 export function DashboardPage() {
   const navigate = useNavigate();
@@ -1156,12 +1004,7 @@ export function DashboardPage() {
   const [balanceFor, setBalanceFor] = useState(/** @type {{ accountId: string | null } | null} */ (null));
 
   const dashboardQuery = useQuery({
-    queryKey: ["dashboard", on],
-    queryFn: async () => {
-      const res = await api.dashboard.$get({ query: { on } });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return /** @type {DashboardData} */ (await res.json());
-    },
+    ...dashboardQueryOptions(on),
     // Stepping to another pay cycle keeps this cycle on screen (dimmed, see
     // below) until the next one arrives. Without it every step dropped to
     // the skeleton and rebuilt the whole grid — both charts remounted, the
@@ -1322,73 +1165,28 @@ export function DashboardPage() {
               this grid's children are conditional and hand-numbered inline
               delays would go stale.
 
-              DOM order is the phone's order. On desktop the cards are placed
-              into two columns — income over the flow, the transfers over
-              what's due — with the middle row flexible, so each column's
-              cards end level with the other's instead of the short card
-              leaving a hole under itself. */}
-          <div data-stagger className={CYCLE_GRID}>
-            <div className="flex flex-col lg:col-span-4 lg:col-start-1 lg:row-start-1">
+              At `xl`: income across two columns on row 1, the standing orders
+              down the third column over rows 1-2, bills and net worth side by
+              side over rows 2-3, and goals under the transfers on row 3. */}
+          <div data-stagger className={CARD_GRID}>
+            <div className="flex flex-col lg:col-span-2 xl:col-start-1 xl:row-start-1">
               <HeroCard data={data} />
             </div>
 
-            <div className="flex flex-col lg:col-span-2 lg:col-start-5 lg:row-span-2 lg:row-start-1">
+            <div className="flex flex-col xl:col-start-3 xl:row-span-2 xl:row-start-1">
               <TransfersCard data={data} accounts={data.accounts} />
             </div>
 
-            <div className="flex flex-col lg:col-span-2 lg:col-start-5 lg:row-start-3">
+            <div className="flex flex-col xl:col-start-1 xl:row-span-2 xl:row-start-2">
               <UpcomingCard data={data} />
             </div>
 
-            {result && data.allocation ? (
-              <div className="flex flex-col lg:col-span-4 lg:col-start-1 lg:row-span-2 lg:row-start-2">
-                <Card title="Where the money goes" to="/allocation">
-                  {/* `lines` is gone with the sankey: slices are keyed by
-                      destination, which the result's own transfers carry. */}
-                  {/* This card's height is set by the rail beside it (transfers
-                      over upcoming bills), which runs taller than a 300px pie.
-                      A larger canvas fills most of that, and centring takes
-                      up the rest as margin rather than a blank strip under
-                      the chart. */}
-                  <div className="flex flex-1 flex-col justify-center">
-                    <AllocationFlow result={result} accounts={data.accounts} heading={null} height={400} />
-                  </div>
-                </Card>
-              </div>
-            ) : null}
-          </div>
-
-          {/* The slower-moving half: where the household is heading rather
-              than what the cycle needs. Net worth leads with the two short
-              cards stacked beside it, and goals take the full width under
-              them. */}
-          <div className="grid grid-cols-1 gap-4 md:gap-6 lg:grid-cols-6">
-            <div
-              className={cn(
-                "flex flex-col lg:col-span-4 lg:col-start-1 lg:row-start-1",
-                data.mojo && "lg:row-span-2",
-              )}
-            >
-              <NetWorthCard data={data} onUpdateBalance={() => setBalanceFor({ accountId: null })} />
-            </div>
-
-            {data.mojo ? (
-              <div className="flex flex-col lg:col-span-2 lg:col-start-5 lg:row-start-1">
-                <MojoCard mojo={data.mojo} />
-              </div>
-            ) : null}
-
-            <div className={cn("flex flex-col lg:col-span-6", data.mojo ? "lg:row-start-3" : "lg:row-start-2")}>
+            <div className="flex flex-col xl:col-start-3 xl:row-start-3">
               <GoalsCard goals={data.goals} />
             </div>
 
-            <div
-              className={cn(
-                "flex flex-col lg:col-span-2 lg:col-start-5",
-                data.mojo ? "lg:row-start-2" : "lg:row-start-1",
-              )}
-            >
-              <GoodLifeCard data={data} />
+            <div className="flex flex-col xl:col-start-2 xl:row-span-2 xl:row-start-2">
+              <NetWorthCard data={data} onUpdateBalance={() => setBalanceFor({ accountId: null })} />
             </div>
           </div>
         </div>

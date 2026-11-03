@@ -8,6 +8,29 @@ import { InvitePage } from "@/routes/invite-page.jsx";
 import { RecoveryPage } from "@/routes/recovery-page.jsx";
 import { NotFoundPage } from "@/routes/not-found-page.jsx";
 import { ensureAuthState, invalidateAuthState } from "@/lib/auth.jsx";
+import { todayIso } from "@/lib/dates.js";
+import { queryClient } from "@/lib/query-client.js";
+import {
+  accountsQueryOptions,
+  allocationPlansQueryOptions,
+  billsDueSoonQueryOptions,
+  billsQueryOptions,
+  calendarInstancesQueryOptions,
+  costCategoriesQueryOptions,
+  dashboardQueryOptions,
+  goalsQueryOptions,
+  houseQueryOptions,
+  incomeResolveQueryOptions,
+  incomeVariantsQueryOptions,
+  netWorthQueryOptions,
+  paySchedulesQueryOptions,
+  peopleQueryOptions,
+  projectionsQueryOptions,
+  variableBudgetsQueryOptions,
+  variableCostsCyclesQueryOptions,
+  variableCostsSummaryQueryOptions,
+  variantScheduleQueryOptions,
+} from "@/lib/queries.js";
 
 // Every authenticated page is code-split. Route-level splitting is the whole
 // of phase 11's performance story: the dashboard should not pay to download
@@ -30,6 +53,20 @@ import { ensureAuthState, invalidateAuthState } from "@/lib/auth.jsx";
  */
 function page(importer, exportName) {
   return lazyRouteComponent(importer, exportName);
+}
+
+// The data half of the same trick. A page's queries otherwise start only
+// once its chunk has downloaded and it has mounted, so every first visit
+// opened on a skeleton. A route `loader` runs on the same hover that fetches
+// the chunk, so both download at once and the page usually opens on its
+// data. Fired and forgotten, never awaited: a slow request must not hold the
+// click up — the page shows its own skeleton for anything still in flight,
+// and its `useQuery` joins that request rather than repeating it.
+// `prefetchQuery` never throws; a failure surfaces through the page's own
+// query exactly as before.
+/** @param {import("@tanstack/react-query").FetchQueryOptions<any, any, any, any>[]} options */
+function prefetch(...options) {
+  for (const option of options) void queryClient.prefetchQuery(option);
 }
 
 // The palette lives here rather than beside <RouterProvider> in main.jsx
@@ -110,19 +147,27 @@ const dashboardRoute = createRoute({
   validateSearch: (search) => ({
     on: typeof search.on === "string" ? search.on : undefined,
   }),
+  loaderDeps: ({ search }) => ({ on: search.on }),
+  loader: ({ deps }) => prefetch(dashboardQueryOptions(deps.on ?? todayIso())),
 });
 
 const accountsRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/accounts",
   component: page(() => import("@/routes/accounts-page.jsx"), "AccountsPage"),
+  loader: () => prefetch(accountsQueryOptions()),
 });
 
-// One page, five tabs (Users/Devices/Sessions/Invites from phase 03, People
-// from phase 04), each with its own route so every sub-screen is directly
-// linkable — see admin-page.jsx. Pay schedules used to be a sixth tab here
-// and now lives on /income, which is what it always described.
-const ADMIN_TAB_PATHS = ["users", "devices", "sessions", "invites", "people"];
+// One page, four tabs (Users/Devices from phase 03, People from phase 04,
+// Backups from the pre-deploy plan), each with its own route so every
+// sub-screen is directly linkable — see admin-page.jsx. Pay schedules used to
+// be a tab here and now live on /income, which is what they always described.
+const ADMIN_TAB_PATHS = ["users", "devices", "people", "backups"];
+
+// Tabs that folded into another when passkeys gave way to device approval: a
+// session is a device now, and invites have no list of their own.
+/** @type {Record<string, string>} */
+const RETIRED_ADMIN_TABS = { sessions: "devices", invites: "devices" };
 const adminRoutes = ADMIN_TAB_PATHS.map((tab) =>
   createRoute({
     getParentRoute: () => appLayoutRoute,
@@ -146,12 +191,26 @@ const adminIndexRoute = createRoute({
 // linkable URL, so a bookmark or a pasted link to one is a real thing that
 // exists. Redirect rather than 404: /settings/pay-schedules has moved to a
 // different page entirely, and the rest have only been renamed.
-const settingsRedirectRoutes = [...ADMIN_TAB_PATHS, "pay-schedules"].map((tab) =>
+const settingsRedirectRoutes = [...ADMIN_TAB_PATHS, ...Object.keys(RETIRED_ADMIN_TABS), "pay-schedules"].map((tab) =>
   createRoute({
     getParentRoute: () => appLayoutRoute,
     path: `/settings/${tab}`,
     beforeLoad: () => {
-      throw redirect({ to: tab === "pay-schedules" ? "/income" : `/admin/${tab}`, replace: true });
+      throw redirect({
+        to: tab === "pay-schedules" ? "/income" : `/admin/${RETIRED_ADMIN_TABS[tab] ?? tab}`,
+        replace: true,
+      });
+    },
+    component: () => null,
+  }),
+);
+
+const retiredAdminTabRoutes = Object.entries(RETIRED_ADMIN_TABS).map(([tab, to]) =>
+  createRoute({
+    getParentRoute: () => appLayoutRoute,
+    path: `/admin/${tab}`,
+    beforeLoad: () => {
+      throw redirect({ to: `/admin/${to}`, replace: true });
     },
     component: () => null,
   }),
@@ -167,18 +226,44 @@ const incomeRoute = createRoute({
   validateSearch: (search) => ({
     variant: typeof search.variant === "string" ? search.variant : undefined,
   }),
+  loader: () =>
+    prefetch(
+      incomeVariantsQueryOptions(),
+      peopleQueryOptions(),
+      variantScheduleQueryOptions(),
+      incomeResolveQueryOptions(todayIso()),
+      paySchedulesQueryOptions(),
+    ),
 });
 
 const fixedCostsRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/costs/fixed",
   component: page(() => import("@/routes/fixed-costs-page.jsx"), "FixedCostsPage"),
+  loader: () =>
+    prefetch(
+      costCategoriesQueryOptions("fixed"),
+      billsQueryOptions(),
+      peopleQueryOptions(),
+      accountsQueryOptions(),
+      paySchedulesQueryOptions(),
+      billsDueSoonQueryOptions(todayIso()),
+    ),
 });
 
 const variableCostsRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/costs/variable",
   component: page(() => import("@/routes/variable-costs-page.jsx"), "VariableCostsPage"),
+  loader: () =>
+    prefetch(
+      costCategoriesQueryOptions("variable"),
+      variableBudgetsQueryOptions(),
+      variableCostsSummaryQueryOptions(todayIso()),
+      paySchedulesQueryOptions(),
+      // 6: the lookback the page opens on.
+      variableCostsCyclesQueryOptions(6, todayIso()),
+    ),
 });
 
 // Not in NAV_ITEMS — reached by tapping a bill on /costs/fixed, not from the
@@ -200,12 +285,21 @@ const allocationRoute = createRoute({
     plan: typeof search.plan === "string" ? search.plan : undefined,
     on: typeof search.on === "string" ? search.on : undefined,
   }),
+  loaderDeps: ({ search }) => ({ on: search.on }),
+  loader: ({ deps }) =>
+    prefetch(
+      allocationPlansQueryOptions(),
+      accountsQueryOptions(),
+      incomeVariantsQueryOptions(),
+      incomeResolveQueryOptions(deps.on ?? todayIso()),
+    ),
 });
 
 const goalsRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/goals",
   component: page(() => import("@/routes/goals-page.jsx"), "GoalsPage"),
+  loader: () => prefetch(goalsQueryOptions(todayIso()), accountsQueryOptions()),
 });
 
 // The second Goals tab (see components/goals-tabs.jsx). Its own chunk, so
@@ -214,12 +308,16 @@ const goalsHouseRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/goals/house",
   component: page(() => import("@/routes/house-page.jsx"), "HousePage"),
+  loader: () => prefetch(houseQueryOptions(todayIso())),
 });
 
 const projectionsRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/projections",
   component: page(() => import("@/routes/projections-page.jsx"), "ProjectionsPage"),
+  // "60": the horizon the page opens on.
+  loader: () =>
+    prefetch(projectionsQueryOptions("60", todayIso()), netWorthQueryOptions(todayIso()), accountsQueryOptions()),
 });
 
 // The one-time spreadsheet migration. Deliberately not in NAV_ITEMS — a tool
@@ -236,6 +334,8 @@ const calendarRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/calendar",
   component: page(() => import("@/routes/calendar-page.jsx"), "CalendarPage"),
+  loader: () =>
+    prefetch(paySchedulesQueryOptions(), billsQueryOptions(), calendarInstancesQueryOptions(new Date().getFullYear())),
 });
 
 // Hidden dev routes — deliberately not in NAV_ITEMS, so they never appear in
@@ -296,7 +396,7 @@ const recoveryRoute = createRoute({
   beforeLoad: async () => {
     const state = await ensureAuthState();
     if (!state.user) throw redirect({ to: "/login" });
-    // A passkey session has no business here — it can just use the app.
+    // An approved device has no business here — it can just use the app.
     if (state.authMethod !== "recovery_password") throw redirect({ to: "/" });
   },
 });
@@ -310,6 +410,7 @@ const inviteRoute = createRoute({
 const routeTree = rootRoute.addChildren([
   appLayoutRoute.addChildren([
     ...adminRoutes,
+    ...retiredAdminTabRoutes,
     adminIndexRoute,
     ...settingsRedirectRoutes,
     dashboardRoute,

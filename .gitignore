@@ -1,4 +1,5 @@
 /.claude/plans
+/infra/backups/
 node_modules
 dist
 .env*

@@ -13,13 +13,13 @@ import { handleValidation } from "../lib/validation.js";
  * It is read-only, and it is the only endpoint this phase adds. Every figure
  * comes from the phase that owns it — see `loadDashboard`.
  *
- * @param {{ db: import("@budget/schema").Db }} deps
+ * @param {{ db: import("@budget/schema").Db, backups?: { dir: string } }} deps
  */
-export function createDashboardRoutes({ db }) {
+export function createDashboardRoutes({ db, backups }) {
   const app = new Hono();
 
   return app.get("/", zValidator("query", dashboardQuerySchema, handleValidation), async (c) => {
     const on = c.req.valid("query").on ?? todayIso();
-    return c.json(await loadDashboard(db, on));
+    return c.json(await loadDashboard(db, on, { backupDir: backups?.dir }));
   });
 }

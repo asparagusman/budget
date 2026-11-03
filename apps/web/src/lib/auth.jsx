@@ -14,7 +14,7 @@ import { readApiError, withUnreachable } from "@/lib/api-error.js";
  *
  * `authMethod` says HOW this browser signed in, and the app has to know
  * before it renders: a session opened with the recovery password reaches
- * only the screens that get a passkey back, so rendering the shell for one
+ * only the screens that get a device approved, so rendering the shell for one
  * would produce a wall of 403s instead of the one sentence that helps
  * (see apps/api/src/middleware/auth.js, and /recovery).
  *
@@ -130,19 +130,6 @@ export function useAuth() {
   const ctx = useContext(AuthContext);
   if (!ctx) throw new Error("useAuth must be used within an AuthProvider.");
   return ctx;
-}
-
-/**
- * What to say once a passkey is gone. Removing one signs out the user's
- * OTHER sessions (the lost device may hold one — apps/api/src/routes/
- * credentials.js), and that is worth saying: the other phone in the house
- * being signed out is otherwise a mystery.
- *
- * @param {number} revokedSessions
- */
-export function passkeyRemovedMessage(revokedSessions) {
-  if (revokedSessions === 0) return "Passkey removed.";
-  return `Passkey removed — signed out ${revokedSessions} other session${revokedSessions === 1 ? "" : "s"}.`;
 }
 
 /**

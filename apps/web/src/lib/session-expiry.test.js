@@ -27,7 +27,7 @@ describe("withSessionExpiry", () => {
   });
 
   it("leaves /auth/* alone, where a 401 is an answer rather than an expiry", async () => {
-    // A failed passkey assertion, a wrong recovery password, the signed-out
+    // A wrong recovery password, a turned-down device, the signed-out
     // probe of /auth/state: none of these mean "your session just ended".
     const onUnauthorized = vi.fn();
     const wrapped = withSessionExpiry({

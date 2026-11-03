@@ -14,7 +14,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog.jsx";
 import { Input } from "@/components/ui/input.jsx";
-import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/components/ui/input-group.jsx";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select.jsx";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet.jsx";
 import { Switch } from "@/components/ui/switch.jsx";
@@ -31,10 +30,11 @@ import {
 } from "@/components/chart.jsx";
 import { QuickBalanceSheet } from "@/components/quick-balance-sheet.jsx";
 import { DataList, DataListRow } from "@/components/data-list.jsx";
-import { ListSkeleton } from "@/components/loading.jsx";
+import { ListSkeleton, StatsSkeleton } from "@/components/loading.jsx";
 import { EmptyState } from "@/components/empty-state.jsx";
 import { ReorderControls } from "@/components/reorder-controls.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
+import { PercentInput } from "@/components/money-input.jsx";
 import { Money } from "@/components/money.jsx";
 import { InlineError } from "@/components/notice.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
@@ -42,6 +42,7 @@ import { QueryError } from "@/components/query-error.jsx";
 import { useConfirm } from "@/components/confirm-dialog.jsx";
 import { Stat, StatGroup } from "@/components/stat-tile.jsx";
 import { api } from "@/lib/api.js";
+import { accountsQueryOptions, goalsQueryOptions } from "@/lib/queries.js";
 import { readApiError } from "@/lib/api-error.js";
 import { registerCommands } from "@/lib/commands.js";
 import { moveWithinGroup } from "@/lib/reorder.js";
@@ -49,6 +50,7 @@ import { ACCOUNT_TYPE_LABELS, ACCOUNT_TYPES, CADENCE_PERIOD_NOUNS } from "@/lib/
 import { daysSinceIso, formatIsoDate, todayIso } from "@/lib/dates.js";
 import { colorFor, entityColors } from "@/lib/entity-colors.js";
 import { formatMoney } from "@/lib/format-money.js";
+import { roundTo } from "@/lib/numeric-text.js";
 import { useSettings } from "@/lib/settings.jsx";
 import { ScrollArea } from "@/components/scroll-area.jsx";
 
@@ -79,7 +81,7 @@ function AccountFormDialog({ open, onOpenChange, account, submitting, onSubmit }
   const [type, setType] = useState(/** @type {(typeof ACCOUNT_TYPES)[number]} */ ("transaction"));
   const [institution, setInstitution] = useState("");
   const [isIncomeLanding, setIsIncomeLanding] = useState(false);
-  const [growthRatePct, setGrowthRatePct] = useState("");
+  const [growthRatePct, setGrowthRatePct] = useState(/** @type {number | null} */ (null));
   const [error, setError] = useState(/** @type {string | null} */ (null));
 
   useEffect(() => {
@@ -88,7 +90,7 @@ function AccountFormDialog({ open, onOpenChange, account, submitting, onSubmit }
     setType(account?.type ?? "transaction");
     setInstitution(account?.institution ?? "");
     setIsIncomeLanding(account?.isIncomeLanding ?? false);
-    setGrowthRatePct(account?.annualGrowthRate != null ? String(account.annualGrowthRate * 100) : "");
+    setGrowthRatePct(account?.annualGrowthRate != null ? roundTo(account.annualGrowthRate * 100, 4) : null);
     setError(null);
   }, [open, account]);
 
@@ -105,7 +107,7 @@ function AccountFormDialog({ open, onOpenChange, account, submitting, onSubmit }
       type,
       institution: institution.trim() || null,
       isIncomeLanding,
-      annualGrowthRate: type === "external" || growthRatePct.trim() === "" ? null : Number(growthRatePct) / 100,
+      annualGrowthRate: type === "external" || growthRatePct === null ? null : roundTo(growthRatePct / 100, 6),
     };
     try {
       await onSubmit(data);
@@ -135,7 +137,7 @@ function AccountFormDialog({ open, onOpenChange, account, submitting, onSubmit }
               value={type}
               onValueChange={(value) => {
                 setType(/** @type {(typeof ACCOUNT_TYPES)[number]} */ (value));
-                if (value === "external") setGrowthRatePct("");
+                if (value === "external") setGrowthRatePct(null);
               }}
             >
               <SelectTrigger id="account-type" className="w-full">
@@ -163,19 +165,7 @@ function AccountFormDialog({ open, onOpenChange, account, submitting, onSubmit }
               htmlFor="account-growth"
               hint="Annual, as a percentage. Leave blank for none — phase 09 uses this for projections."
             >
-              <InputGroup>
-                <InputGroupInput
-                  id="account-growth"
-                  type="number"
-                  step="0.01"
-                  inputMode="decimal"
-                  value={growthRatePct}
-                  onChange={(e) => setGrowthRatePct(e.target.value)}
-                />
-                <InputGroupAddon align="inline-end">
-                  <InputGroupText>% p.a.</InputGroupText>
-                </InputGroupAddon>
-              </InputGroup>
+              <PercentInput id="account-growth" decimals={4} unit="% p.a." value={growthRatePct} onChange={setGrowthRatePct} />
             </FieldRow>
           ) : null}
           <FieldRow
@@ -209,24 +199,16 @@ function AccountGoalsPanel({ accountId }) {
   const navigate = useNavigate();
   const { locale } = useSettings();
   const today = useMemo(todayIso, []);
-  const goalsQuery = useQuery({
-    // The same key /goals uses for the same request, so the two share one
-    // cache entry instead of each downloading every goal's curve
-    // (perf-inp-plan.md, P2 #9).
-    queryKey: ["goals", today],
-    queryFn: async () => {
-      // `on` is the browser's calendar day: the server's own "today" can
-      // still be yesterday in Australia until mid-morning.
-      const res = await api.goals.$get({ query: { on: today } });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return await res.json();
-    },
-  });
+  const goalsQuery = useQuery(
+    // The same query /goals uses, so the two share one cache entry instead
+    // of each downloading every goal's curve (perf-inp-plan.md, P2 #9).
+    goalsQueryOptions(today),
+  );
 
   const own = (goalsQuery.data?.goals ?? []).filter((g) => g.goal.accountId === accountId);
   const payCadence = goalsQuery.data?.summary.payCadence ?? "monthly";
 
-  if (goalsQuery.isLoading) return null;
+  if (goalsQuery.isLoading) return <ListSkeleton rows={2} label="Loading this account's goals" />;
   if (goalsQuery.error) {
     return <QueryError compact error={goalsQuery.error} what="this account's goals" onRetry={() => goalsQuery.refetch()} />;
   }
@@ -635,14 +617,7 @@ export function AccountsPage() {
   const [detailAccountId, setDetailAccountId] = useState(/** @type {string | null} */ (null));
   const [quickUpdate, setQuickUpdate] = useState(/** @type {{ accountId: string | null } | null} */ (null));
 
-  const accountsQuery = useQuery({
-    queryKey: ["accounts"],
-    queryFn: async () => {
-      const res = await api.accounts.$get();
-      if (!res.ok) throw new Error(await readApiError(res));
-      return /** @type {Account[]} */ ((await res.json()).accounts);
-    },
-  });
+  const accountsQuery = useQuery(accountsQueryOptions());
 
   const accounts = accountsQuery.data ?? [];
   // An archived account drops out of the list, which closes its sheet.
@@ -823,6 +798,8 @@ export function AccountsPage() {
           <Stat label="Net worth" value={<Money value={netWorthCents} compact />} />
           <Stat label="Stale balances" value={staleCount} tone={staleCount > 0 ? "attention" : "default"} />
         </StatGroup>
+      ) : accountsQuery.isLoading ? (
+        <StatsSkeleton labels={["Net worth", "Stale balances"]} hints={false} label="Loading the accounts summary" />
       ) : null}
 
       {accountsQuery.isLoading ? (

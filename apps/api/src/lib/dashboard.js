@@ -16,6 +16,7 @@ import {
   resolveActiveAllocation,
   serializeLine,
 } from "./allocation.js";
+import { getBackupStatus } from "./backup.js";
 import { projectActiveBills } from "./bills.js";
 import { todayIso } from "./dates.js";
 import { loadGoals, loadNetWorth } from "./goals.js";
@@ -42,6 +43,45 @@ const NET_WORTH_DAYS = 365;
 // so the dashboard says so (phases/10-dashboard.md "Net worth").
 const STALE_BALANCE_DAYS = 30;
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The warnings strip's one line about backups: a failed attempt first, since
+ * it is the louder problem and says how old the last good one is anyway, then
+ * a weekly backup that is overdue. Measured against the wall clock, not the
+ * dashboard's `on` — stepping to next fortnight doesn't make a backup older.
+ *
+ * @param {import("./backup.js").BackupStatus} status
+ * @param {Date} now
+ * @returns {{ code: string, message: string } | null}
+ */
+function backupWarning(status, now) {
+  const age = status.newestAutomaticAt
+    ? Math.floor((now.getTime() - new Date(status.newestAutomaticAt).getTime()) / DAY_MS)
+    : null;
+  const ageText = age === null ? null : age === 1 ? "1 day" : `${age} days`;
+  if (status.lastAttempt && !status.lastAttempt.ok) {
+    const reason = status.lastAttempt.error ?? "no reason was recorded";
+    return {
+      code: "backup_failed",
+      message:
+        ageText === null
+          ? `The last backup failed (${reason}), and there is no automatic backup yet.`
+          : `The last backup failed (${reason}). The newest automatic one is ${ageText} old.`,
+    };
+  }
+  if (status.overdue) {
+    return {
+      code: "backup_overdue",
+      message:
+        ageText === null
+          ? "There is no automatic backup yet — one should be taken within the hour."
+          : `No backup in ${ageText} — the weekly one should have run by now.`,
+    };
+  }
+  return null;
+}
+
 // Where each warning is FIXED — a warning the operator cannot act on from the
 // dashboard is just noise (phases/10-dashboard.md "Warnings strip"). Codes
 // come from the phases that raise them; anything unmapped links to Settings
@@ -67,6 +107,8 @@ const WARNING_HREFS = {
   orphaned_instances: "/costs/fixed",
   incomplete_seasonal_curve: "/costs/fixed",
   no_budget_set: "/costs/variable",
+  backup_failed: "/admin/backups",
+  backup_overdue: "/admin/backups",
 };
 
 // How a cadence reads inside a sentence the API composes. The web has its own
@@ -186,8 +228,18 @@ async function loadAccountsWithBalances(db) {
  */
 async function loadUpcomingBills(db, on) {
   const window = { from: on, to: addDaysIso(on, UPCOMING_WINDOW_DAYS) };
-  const { bills, allInstances } = await projectActiveBills(db, window);
+  const [{ bills, allInstances }, people] = await Promise.all([
+    projectActiveBills(db, window),
+    db.query.people.findMany({ columns: { id: true, name: true } }),
+  ]);
   const nameById = new Map(bills.map((b) => [b.id, b.name]));
+  // Whose bill it is, for the card to say "Car rego · Grace". Null is Shared.
+  // Archived people stay in the lookup: a bill still belongs to someone who
+  // has since left the household.
+  const personNameById = new Map(people.map((p) => [p.id, p.name]));
+  const ownerById = new Map(
+    bills.map((b) => [b.id, b.ownerPersonId ? (personNameById.get(b.ownerPersonId) ?? null) : null]),
+  );
   // An imported bill's date is a placeholder until set (tables/bills.js), so
   // every "due on" below inherits that doubt — carried per row so the card
   // can say which dates are real.
@@ -208,6 +260,7 @@ async function loadUpcomingBills(db, on) {
     upcoming: ascending.slice(0, UPCOMING_COUNT).map((instance) => ({
       billId: instance.billId,
       billName: nameById.get(instance.billId) ?? "Unnamed bill",
+      ownerName: ownerById.get(instance.billId) ?? null,
       dueDate: instance.dueDate,
       dueDateConfirmed: confirmedById.get(instance.billId) ?? true,
       amountCents: amountOf(instance),
@@ -603,12 +656,15 @@ function appliedDriftWarning({ comparison, live, planName, versionNumber, payCad
  *
  * @param {import("@budget/schema").Db} db
  * @param {IsoDate} on
+ * @param {{ backupDir?: string }} [options] where backups are kept; without
+ *   one the strip says nothing about them (the read-only test app has none).
  */
-export async function loadDashboard(db, on) {
+export async function loadDashboard(db, on, { backupDir } = {}) {
   const context = await loadAllocationContext(db, on);
   const allocation = await resolveActiveAllocation(db, context);
+  const now = new Date();
 
-  const [accounts, billsPayload, netWorthPayload, goalsPayload, setup, draftVersion, activeLines, format] =
+  const [accounts, billsPayload, netWorthPayload, goalsPayload, setup, draftVersion, activeLines, format, backups] =
     await Promise.all([
       loadAccountsWithBalances(db),
       loadUpcomingBills(db, on),
@@ -618,6 +674,7 @@ export async function loadDashboard(db, on) {
       allocation.plan ? findVersionByStatus(db, allocation.plan.id, "draft") : Promise.resolve(null),
       allocation.version ? linesForVersion(db, allocation.version.id) : Promise.resolve([]),
       loadFormatters(db),
+      backupDir ? getBackupStatus(db, now, backupDir) : Promise.resolve(null),
     ]);
 
   // ---- cycle -------------------------------------------------------------
@@ -737,6 +794,12 @@ export async function loadDashboard(db, on) {
           breakdown: buildBreakdown(result, activeLines, context),
           unallocatedPerMonthCents: result.unallocatedPerMonthCents,
           goodLifeFidelityCents: result.goodLifeFidelityCents,
+          // What the plan leaves a month for non-essentials: the target less
+          // the engine's own shortfall against it, which is how the engine
+          // measures the Leftover pool (`goodLifeFidelityCents` is
+          // `nonEssential − pool`). Said here so the card shows a figure
+          // instead of dividing one.
+          nonEssentialPoolPerMonthCents: context.variableNonEssentialPerMonthCents - result.goodLifeFidelityCents,
           // Null when the plan fits inside gross. The engine's own flag, passed
           // through so the hero can say what the warnings strip says.
           overAllocation: result.overAllocation ?? null,
@@ -777,38 +840,8 @@ export async function loadDashboard(db, on) {
     accountsWithoutBalance: unrecordedAccounts.length,
   };
 
-  // ---- mojo --------------------------------------------------------------
-  // The household's expense-cover goal, if it has one. `months_of_expenses` is
-  // the mode that means "emergency fund" — the app never assumes an account
-  // called Mojo exists, only that a goal may be measured in months of cover
-  // (phases/09-goals-projections.md "the Mojo mode").
-  const activeGoals = goalsPayload.goals.filter((g) => g.goal.status === "active");
-  const coverGoal = activeGoals.find((g) => g.goal.targetMode === "months_of_expenses") ?? null;
-  const nextThreshold = coverGoal?.thresholds?.find((t) => !t.covered) ?? null;
-  const mojo = coverGoal
-    ? {
-        goalId: coverGoal.goal.id,
-        name: coverGoal.goal.name,
-        accountName: coverGoal.account.name,
-        balanceCents: coverGoal.currentBalanceCents,
-        monthsCovered: coverGoal.monthsCovered,
-        burnPerMonthCents: goalsPayload.summary.monthlyEssentialBurnCents,
-        nextThresholdMonths: nextThreshold?.months ?? null,
-        // Periods of the household's own pay cadence — fortnights here, but
-        // the field is named for the cadence rather than for this household.
-        // Weeks are what the source spreadsheet said, and they were wrong by
-        // half (phases/09-goals-projections.md "/goals").
-        periodsToNextThreshold: nextThreshold?.periodsToReach ?? null,
-        approxMonthsToNextThreshold: nextThreshold?.approxMonthsToReach ?? null,
-        nextThresholdEta: nextThreshold?.eta ?? null,
-        payCadence: context.payCadence,
-        // False until any essential cost is recorded: months of nothing is no
-        // target at all (see `serializeGoal`).
-        targetComputable: coverGoal.targetComputable,
-      }
-    : null;
-
   // ---- goals -------------------------------------------------------------
+  const activeGoals = goalsPayload.goals.filter((g) => g.goal.status === "active");
   const goals = activeGoals.map((g) => ({
     id: g.goal.id,
     name: g.goal.name,
@@ -890,6 +923,10 @@ export async function loadDashboard(db, on) {
     });
     if (drift) warnings.push(drift);
   }
+  // Next, because it is the one problem here that loses data rather than
+  // misstating it.
+  const backup = backups ? backupWarning(backups, now) : null;
+  if (backup) warnings.push(backup);
   if (allocationPayload?.hasDraft) {
     warnings.push({
       code: "unapplied_draft",
@@ -948,7 +985,6 @@ export async function loadDashboard(db, on) {
     allocation: allocationPayload,
     accounts,
     netWorth,
-    mojo,
     goals,
     setup,
     warnings: deduped.map(withHref),

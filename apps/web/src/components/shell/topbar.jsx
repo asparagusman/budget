@@ -14,13 +14,18 @@ import { MobileNav } from "@/components/shell/mobile-nav.jsx";
  */
 export function TopBar() {
   const slotRef = useRef(/** @type {HTMLDivElement | null} */ (null));
+  const infoSlotRef = useRef(/** @type {HTMLSpanElement | null} */ (null));
   const [menuOpen, setMenuOpen] = useState(false);
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const title = pageTitle(pathname);
 
   useEffect(() => {
-    setTopBarSlotEl(slotRef.current);
-    return () => setTopBarSlotEl(null);
+    setTopBarSlotEl("action", slotRef.current);
+    setTopBarSlotEl("info", infoSlotRef.current);
+    return () => {
+      setTopBarSlotEl("action", null);
+      setTopBarSlotEl("info", null);
+    };
   }, []);
 
   return (
@@ -45,9 +50,13 @@ export function TopBar() {
       {/* Not a heading: every page's own <PageHeader> h1 is still in the
           document on a phone (visually hidden there, because this bar
           already says it), and two h1s would announce the page twice. */}
-      <p aria-hidden="true" className="min-w-0 flex-1 truncate text-base font-semibold text-text">
-        {title}
-      </p>
+      <div className="flex min-w-0 flex-1 items-center gap-1">
+        <p aria-hidden="true" className="min-w-0 truncate text-base font-semibold text-text">
+          {title}
+        </p>
+        {/* The page's (i), from <PageHeader>: what this screen is for. */}
+        <span ref={infoSlotRef} className="flex shrink-0" />
+      </div>
       <div ref={slotRef} className="flex items-center gap-2" />
       <MobileNav open={menuOpen} onOpenChange={setMenuOpen} />
     </header>

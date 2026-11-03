@@ -1,4 +1,4 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider } from "@tanstack/react-router";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
@@ -12,9 +12,8 @@ import { TooltipProvider } from "./components/ui/tooltip.jsx";
 import { Toaster } from "./components/ui/sonner.jsx";
 import { ConfirmProvider } from "./components/confirm-dialog.jsx";
 import { AppErrorBoundary } from "./components/app-error-boundary.jsx";
+import { queryClient } from "./lib/query-client.js";
 import "./styles/app.css";
-
-const queryClient = new QueryClient();
 
 // A session that ended while this tab was open — 30 days up, or revoked from
 // another device — answers every request with a 401. Send the operator to

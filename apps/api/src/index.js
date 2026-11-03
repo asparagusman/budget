@@ -8,21 +8,23 @@ import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { loadEnv } from "./env.js";
 import { describeError, handleAppError } from "./lib/db-errors.js";
+import { startBackupScheduler } from "./lib/backup.js";
 import { readMigrationHealth } from "./lib/health.js";
-import { getRpConfig } from "./lib/webauthn.js";
+import { setSecureCookies } from "./lib/session.js";
 import { requireAuth } from "./middleware/auth.js";
 import { createAccountsRoutes } from "./routes/accounts.js";
 import { createAllocationRoutes } from "./routes/allocation.js";
 import { createAllocationPlansRoutes } from "./routes/allocation-plans.js";
 import { createAllocationVersionsRoutes } from "./routes/allocation-versions.js";
 import { createAuthRoutes } from "./routes/auth.js";
+import { createBackupsRoutes } from "./routes/backups.js";
 import { createBalancesRoutes } from "./routes/balances.js";
 import { createBillInstancesRoutes } from "./routes/bill-instances.js";
 import { createBillStepChangesRoutes } from "./routes/bill-step-changes.js";
 import { createBillsRoutes } from "./routes/bills.js";
 import { createCostCategoriesRoutes } from "./routes/cost-categories.js";
-import { createCredentialsRoutes } from "./routes/credentials.js";
 import { createDashboardRoutes } from "./routes/dashboard.js";
+import { createDeviceRequestsRoutes } from "./routes/device-requests.js";
 import { createFixedCostsRoutes } from "./routes/fixed-costs.js";
 import { createGoalsRoutes } from "./routes/goals.js";
 import { createHouseRoutes } from "./routes/house.js";
@@ -55,12 +57,13 @@ loadDotenv({
 const env = loadEnv();
 const db = createDb(env.DATABASE_URL);
 
-// Every passkey is bound to this RP ID — the hostname in PUBLIC_ORIGIN — for
-// good. Said once at startup, and again on /health, so a mismatch with the
-// address bar shows up in `logs api` rather than only as a passkey prompt
-// that fails without saying why (infra/README.md).
-const rp = getRpConfig(env);
-console.log(`WebAuthn RP ID ${rp.rpID}, origin ${rp.origin}`);
+// Cookies follow the address the household uses: Secure over https, plain
+// over http://budget.local, where a Secure cookie would never come back.
+setSecureCookies(new URL(env.PUBLIC_ORIGIN).protocol === "https:");
+console.log(`Serving ${env.PUBLIC_ORIGIN}`);
+
+// Backups are written here and by whichever build is running.
+const backups = { dir: env.BACKUP_DIR, appVersion: env.APP_VERSION };
 
 const app = new Hono();
 
@@ -72,7 +75,7 @@ const requestLogger = logger();
 app.use((c, next) => (c.req.path === "/health" ? next() : requestLogger(c, next)));
 
 // Web and API share an origin in production (both sit behind the same
-// tailscale serve hostname), so this is a no-op there. In dev they're on
+// budget.local address), so this is a no-op there. In dev they're on
 // different ports, and the session cookie needs to travel with fetches
 // between them — hence `credentials: true` and an explicit origin rather
 // than "*".
@@ -120,8 +123,7 @@ const routes = app
         version: env.APP_VERSION,
         // Reported, not checked: only the browser knows what's in its
         // address bar. Compare by eye; see the startup log line above.
-        rpId: rp.rpID,
-        origin: rp.origin,
+        origin: env.PUBLIC_ORIGIN,
         migrations,
       },
       dbOk && !migrationsBehind ? 200 : 503,
@@ -130,7 +132,7 @@ const routes = app
   .route("/auth", createAuthRoutes({ db, env }))
   .route("/users", createUsersRoutes({ db }))
   .route("/invites", createInvitesRoutes({ db }))
-  .route("/credentials", createCredentialsRoutes({ db }))
+  .route("/device-requests", createDeviceRequestsRoutes({ db }))
   .route("/sessions", createSessionsRoutes({ db }))
   .route("/people", createPeopleRoutes({ db }))
   .route("/accounts", createAccountsRoutes({ db }))
@@ -156,8 +158,9 @@ const routes = app
   .route("/house", createHouseRoutes({ db }))
   .route("/net-worth", createNetWorthRoutes({ db }))
   .route("/projections", createProjectionsRoutes({ db }))
-  .route("/dashboard", createDashboardRoutes({ db }))
-  .route("/import", createImportRoutes({ db }));
+  .route("/dashboard", createDashboardRoutes({ db, backups }))
+  .route("/import", createImportRoutes({ db, backups }))
+  .route("/backups", createBackupsRoutes({ db, backups }));
 
 // Consumed by the Hono RPC client in apps/web. A JSDoc @typedef in a module
 // is reachable cross-package as `import("@budget/api").ApiRoutes`, so web
@@ -177,3 +180,8 @@ const routes = app
 serve({ fetch: app.fetch, port: env.PORT }, (info) => {
   console.log(`API listening on http://localhost:${info.port}`);
 });
+
+// Checked now, so a box that was off for a week catches up on this start, and
+// then hourly (lib/backup.js).
+console.log(`Backups go to ${backups.dir}`);
+startBackupScheduler(db, backups);

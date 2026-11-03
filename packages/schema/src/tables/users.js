@@ -5,13 +5,12 @@ import { boolean, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-or
 // is ever sent to it, and there is no email-based recovery. See
 // phases/03-auth.md for the full flow.
 //
-// Passkeys are still the only way IN to the app. Exactly one user may also
-// hold a RECOVERY password, and it does exactly one job: get someone far
-// enough into the box to mint a `new_device` invite when every passkey is
-// gone. A session opened with it is marked as such and is confined to the
-// recovery surface (see sessions.authMethod and middleware/auth.js), so the
-// password can never be phished into a transfer — which is the objection
-// that kept passwords out of this app in the first place (todo.md #17).
+// A device gets in by being approved from a device that is already in (see
+// device-requests.js). Exactly one user may also hold a RECOVERY password,
+// and it does exactly one job: get someone far enough in to approve a device
+// when every approved device is gone. A session opened with it is marked as
+// such and is confined to the recovery surface (see sessions.authMethod and
+// middleware/auth.js), so it can never be used to read a figure directly.
 export const users = pgTable(
   "users",
   {

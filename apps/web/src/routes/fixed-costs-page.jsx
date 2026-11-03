@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button.jsx";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog.jsx";
 import { Input } from "@/components/ui/input.jsx";
 import { BillDetailSheet } from "@/components/bill-detail-sheet.jsx";
+import { SectionsSkeleton, StatsSkeleton } from "@/components/loading.jsx";
 import { BillsBalanceCurve } from "@/components/bills-balance-curve.jsx";
 import { CategoryGroup } from "@/components/fixed-costs-table.jsx";
 import { DataList, DataListRow } from "@/components/data-list.jsx";
@@ -27,6 +28,14 @@ import { QueryError } from "@/components/query-error.jsx";
 import { Stat, StatGroup } from "@/components/stat-tile.jsx";
 import { useConfirm } from "@/components/confirm-dialog.jsx";
 import { api } from "@/lib/api.js";
+import {
+  accountsQueryOptions,
+  billsDueSoonQueryOptions,
+  billsQueryOptions,
+  costCategoriesQueryOptions,
+  paySchedulesQueryOptions,
+  peopleQueryOptions,
+} from "@/lib/queries.js";
 import { readApiError } from "@/lib/api-error.js";
 import { registerCommands } from "@/lib/commands.js";
 import { CADENCE_LABELS } from "@/lib/constants.js";
@@ -187,50 +196,15 @@ export function FixedCostsPage() {
   const [editing, setEditing] = useState(false);
   const [drafts, setDrafts] = useState(/** @type {DraftBill[]} */ ([]));
 
-  const categoriesQuery = useQuery({
-    queryKey: ["cost-categories", "fixed"],
-    queryFn: async () => {
-      const res = await api["cost-categories"].$get({ query: { kind: "fixed" } });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return /** @type {CostCategory[]} */ ((await res.json()).costCategories);
-    },
-  });
+  const categoriesQuery = useQuery(costCategoriesQueryOptions("fixed"));
 
-  const billsQuery = useQuery({
-    queryKey: ["bills"],
-    queryFn: async () => {
-      const res = await api.bills.$get();
-      if (!res.ok) throw new Error(await readApiError(res));
-      return /** @type {Bill[]} */ ((await res.json()).bills);
-    },
-  });
+  const billsQuery = useQuery(billsQueryOptions());
 
-  const peopleQuery = useQuery({
-    queryKey: ["people"],
-    queryFn: async () => {
-      const res = await api.people.$get();
-      if (!res.ok) throw new Error(await readApiError(res));
-      return /** @type {Person[]} */ ((await res.json()).people);
-    },
-  });
+  const peopleQuery = useQuery(peopleQueryOptions());
 
-  const accountsQuery = useQuery({
-    queryKey: ["accounts"],
-    queryFn: async () => {
-      const res = await api.accounts.$get();
-      if (!res.ok) throw new Error(await readApiError(res));
-      return /** @type {Account[]} */ ((await res.json()).accounts);
-    },
-  });
+  const accountsQuery = useQuery(accountsQueryOptions());
 
-  const payScheduleQuery = useQuery({
-    queryKey: ["pay-schedules"],
-    queryFn: async () => {
-      const res = await api["pay-schedules"].$get();
-      if (!res.ok) throw new Error(await readApiError(res));
-      return (await res.json()).paySchedules;
-    },
-  });
+  const payScheduleQuery = useQuery(paySchedulesQueryOptions());
 
   const summaryQuery = useQuery({
     queryKey: ["fixed-costs-summary", contributionWindow.from, contributionWindow.to],
@@ -241,14 +215,7 @@ export function FixedCostsPage() {
     },
   });
 
-  const dueSoonQuery = useQuery({
-    queryKey: ["bill-instances", "due-soon", today],
-    queryFn: async () => {
-      const res = await api["bill-instances"].$get({ query: { from: today, to: addDaysIso(today, 14) } });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return (await res.json()).instances;
-    },
-  });
+  const dueSoonQuery = useQuery(billsDueSoonQueryOptions(today));
 
   const categories = categoriesQuery.data ?? [];
   const bills = billsQuery.data ?? [];
@@ -636,34 +603,28 @@ export function FixedCostsPage() {
 
   return (
     <>
-      {/* Pinned only while editing, when Save and Cancel have to stay in reach
-          down a long table. Reading, a pinned header is a description and two
-          buttons parked over the top of a phone's screen for no reason. */}
+      {/* Pinned on a phone only while editing, when Save and Cancel have to
+          stay in reach down a long table. Reading, it's two buttons parked
+          over the top of a phone's screen for no reason. (Desktop always pins
+          it.) */}
       <PageHeader
-        sticky={editing}
+        stickyOnMobile={editing}
         title="Fixed Costs"
         description={
-          editing ? (
-            dirty ? (
-              <span className="text-text">
-                {changeCount} unsaved change{changeCount === 1 ? "" : "s"}
-                {invalidRows > 0 ? (
-                  <span className="text-warning-strong">
-                    {" · "}
-                    {invalidRows} row{invalidRows === 1 ? "" : "s"} need attention
-                  </span>
-                ) : null}
-              </span>
-            ) : (
-              "Edit any cell. A bill's history, seasonal factors and step changes are behind its name."
-            )
-          ) : (
-            "Bills that know how they actually behave — seasonal, escalating, rolling-average — not just an amount times a frequency."
-          )
+          editing
+            ? "Edit any cell. A bill's history, seasonal factors and step changes are behind its name."
+            : "Bills that know how they actually behave — seasonal, escalating, rolling-average — not just an amount times a frequency."
         }
         actions={
           editing ? (
             <>
+              {/* Live status, so it stays in view rather than behind the (i).
+                  The change count is already on the Save button. */}
+              {invalidRows > 0 ? (
+                <span className="text-sm text-warning-strong">
+                  {invalidRows} row{invalidRows === 1 ? "" : "s"} need attention
+                </span>
+              ) : null}
               <Button variant="ghost" onClick={handleCancel} disabled={saveAll.isPending}>
                 <XIcon />
                 {dirty ? "Cancel" : "Done"}
@@ -739,6 +700,10 @@ export function FixedCostsPage() {
           <Stat label="Total bills" value={summary.billCount} />
           <Stat label="Due in 14 days" value={dueSoonCount} />
         </StatGroup>
+      ) : summaryQuery.isPending && !loadError ? (
+        // Pending, not loading: the summary waits on the pay schedule for its
+        // window, and while it waits it isn't fetching yet either.
+        <StatsSkeleton lead labels={["Bills contribution", "Total bills", "Due in 14 days"]} label="Loading the bills summary" />
       ) : null}
 
       {/* The rows print the summary's per-bill figures at rest, so without
@@ -756,7 +721,9 @@ export function FixedCostsPage() {
         <NoticeList items={warnings.map((w, i) => ({ key: String(i), content: <p>{w.message}</p> }))} />
       ) : null}
 
-      {loadError ? null : !isLoading && !editing && categories.length > 0 && bills.length === 0 ? (
+      {loadError ? null : isLoading ? (
+        <SectionsSkeleton label="Loading bills" />
+      ) : !editing && categories.length > 0 && bills.length === 0 ? (
         <EmptyState
           icon={ReceiptIcon}
           title="No bills yet"

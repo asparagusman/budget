@@ -2,27 +2,17 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  CheckIcon,
-  CopyIcon,
+  DatabaseBackupIcon,
   FileSpreadsheetIcon,
   LogOutIcon,
   MoreVerticalIcon,
-  ShieldCheckIcon,
   SmartphoneIcon,
-  TicketIcon,
   UsersIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge.jsx";
+import { ListSkeleton } from "@/components/loading.jsx";
 import { Button } from "@/components/ui/button.jsx";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog.jsx";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -31,6 +21,8 @@ import {
 } from "@/components/ui/dropdown-menu.jsx";
 import { Input } from "@/components/ui/input.jsx";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs.jsx";
+import { BackupsPanel } from "@/components/backups-panel.jsx";
+import { WaitingDevicesList } from "@/components/device-approvals.jsx";
 import { DataList, DataListRow } from "@/components/data-list.jsx";
 import { EmptyState } from "@/components/empty-state.jsx";
 import { QueryError } from "@/components/query-error.jsx";
@@ -40,7 +32,7 @@ import { PageHeader } from "@/components/page-header.jsx";
 import { useConfirm } from "@/components/confirm-dialog.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
-import { passkeyRemovedMessage, useAuth, useSignOut } from "@/lib/auth.jsx";
+import { useAuth, useSignOut } from "@/lib/auth.jsx";
 import { registerCommands } from "@/lib/commands.js";
 import { moveInList } from "@/lib/reorder.js";
 import { useSettings } from "@/lib/settings.jsx";
@@ -54,44 +46,7 @@ function formatDateTime(locale, iso) {
   );
 }
 
-/**
- * A raw invite/device link, shown once and copyable — it is never
- * retrievable again after this dialog closes (phases/03-auth.md "Schema").
- *
- * @param {{ open: boolean, onOpenChange: (open: boolean) => void, title: string, description: string, link: string }} props
- */
-function ShareLinkDialog({ open, onOpenChange, title, description, link }) {
-  const [copied, setCopied] = useState(false);
-
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(link);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      toast.error("Couldn't copy — select and copy the link manually.");
-    }
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>{title}</DialogTitle>
-          <DialogDescription>{description}</DialogDescription>
-        </DialogHeader>
-        <div className="flex items-center gap-2">
-          <Input readOnly value={link} onFocus={(e) => e.target.select()} />
-          <Button type="button" size="icon" variant="outline" onClick={copy} aria-label="Copy link">
-            {copied ? <CheckIcon className="text-text-muted" /> : <CopyIcon />}
-          </Button>
-        </div>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-/** @typedef {{ id: string, displayName: string, email: string | null, isActive: boolean, credentialCount: number }} AdminUser */
+/** @typedef {{ id: string, displayName: string, email: string | null, isActive: boolean, deviceCount: number }} AdminUser */
 
 /**
  * What can be done to one member, as menu items for the phone and as the
@@ -102,13 +57,12 @@ function ShareLinkDialog({ open, onOpenChange, title, description, link }) {
  * @param {{ user: AdminUser, isSelf: boolean }} args
  */
 function userActions({ user, isSelf }) {
-  /** @type {{ key: "device" | "deactivate" | "reactivate", label: string }[]} */
+  /** @type {{ key: "deactivate" | "reactivate", label: string }[]} */
   const actions = [];
   if (!user.isActive) {
     actions.push({ key: "reactivate", label: "Reactivate" });
     return actions;
   }
-  actions.push({ key: "device", label: "Add a device" });
   if (!isSelf) actions.push({ key: "deactivate", label: "Deactivate" });
   return actions;
 }
@@ -118,9 +72,6 @@ function UsersPanel() {
   const { state } = useAuth();
   const myId = state?.user?.id ?? null;
   const queryClient = useQueryClient();
-  const [share, setShare] = useState(
-    /** @type {{ title: string, description: string, link: string } | null} */ (null),
-  );
 
   const usersQuery = useQuery({
     queryKey: ["users"],
@@ -145,61 +96,18 @@ function UsersPanel() {
       queryClient.invalidateQueries({ queryKey: ["sessions"] });
       toast.success(
         isActive
-          ? `${user.displayName} can sign in again.`
+          ? `${user.displayName} can be approved on a device again.`
           : `${user.displayName} is deactivated and signed out everywhere.`,
       );
     },
     onError: (err) => toast.error(err.message),
   });
 
-  const inviteMutation = useMutation({
-    mutationFn: async () => {
-      const res = await api.invites.$post({ json: { purpose: "new_user" } });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return (await res.json()).invite;
-    },
-    onSuccess: (invite) => {
-      setShare({
-        title: "Invite a user",
-        description: "Send this link to the person you're inviting. It works once, and expires in 24 hours.",
-        link: `${window.location.origin}/invite/${invite.code}`,
-      });
-      queryClient.invalidateQueries({ queryKey: ["invites"] });
-    },
-    onError: (err) => toast.error(err.message),
-  });
-
-  // A passkey for ANY active member, not just whoever is signed in: the
-  // person who lost their phone is usually not the one holding a working
-  // device. The API refuses a deactivated member (`inactive_user`), and its
-  // message is what the toast says.
-  const deviceInviteMutation = useMutation({
-    mutationFn: async (/** @type {AdminUser} */ user) => {
-      const res = await api.invites.$post({ json: { purpose: "new_device", targetUserId: user.id } });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return (await res.json()).invite;
-    },
-    onSuccess: (invite, user) => {
-      const isSelf = user.id === myId;
-      setShare({
-        title: isSelf ? "Add a device" : `Add a device for ${user.displayName}`,
-        description: `Open this link on ${isSelf ? "the new device" : `${user.displayName}'s new device`} to register a passkey there. It works once, and expires in 24 hours.`,
-        link: `${window.location.origin}/invite/${invite.code}`,
-      });
-      queryClient.invalidateQueries({ queryKey: ["invites"] });
-    },
-    onError: (err) => toast.error(err.message),
-  });
-
   /**
    * @param {AdminUser} user
-   * @param {"device" | "deactivate" | "reactivate"} action
+   * @param {"deactivate" | "reactivate"} action
    */
   async function runAction(user, action) {
-    if (action === "device") {
-      deviceInviteMutation.mutate(user);
-      return;
-    }
     if (action === "reactivate") {
       setActiveMutation.mutate({ user, isActive: true });
       return;
@@ -207,27 +115,32 @@ function UsersPanel() {
     const ok = await confirm({
       title: `Deactivate ${user.displayName}?`,
       description:
-        "They're signed out on every device straight away, and any invite they made — or one waiting for them — is withdrawn. Their passkeys are kept, so reactivating them later restores access.",
+        "They're signed out on every device straight away, and any invite they made — or one waiting for them — is withdrawn. Reactivating them later means approving their devices again.",
       confirmLabel: "Deactivate",
     });
     if (ok) setActiveMutation.mutate({ user, isActive: false });
   }
 
-  const busy = setActiveMutation.isPending || deviceInviteMutation.isPending;
+  const busy = setActiveMutation.isPending;
   const users = usersQuery.data ?? [];
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex justify-end">
-        <Button onClick={() => inviteMutation.mutate()} disabled={inviteMutation.isPending}>
-          Invite a user
-        </Button>
-      </div>
+      {/* There is no "invite" button: a new person joins by asking from their
+          own device, and whoever approves it chooses "someone new". */}
+      <p className="text-sm text-text-muted">
+        To add someone, have them open {window.location.host} on their phone and ask to join, then approve it
+        and choose “Someone new to the household”.
+      </p>
+
+      <WaitingDevicesList />
 
       {usersQuery.isError ? (
         <QueryError error={usersQuery.error} onRetry={() => usersQuery.refetch()} what="the household's users" />
-      ) : usersQuery.isLoading ? null : users.length === 0 ? (
-        <EmptyState icon={UsersIcon} title="No users yet" description="Invite the first user." />
+      ) : usersQuery.isLoading ? (
+        <ListSkeleton rows={2} label="Loading users" />
+      ) : users.length === 0 ? (
+        <EmptyState icon={UsersIcon} title="No users yet" description="Approve the first device to add someone." />
       ) : (
         <>
           <ScrollArea axis="x" className="hidden rounded-(--radius-card) bg-surface shadow-(--shadow-card) md:block">
@@ -237,7 +150,7 @@ function UsersPanel() {
                   <th className="px-4 py-3 font-medium">Name</th>
                   <th className="px-4 py-3 font-medium">Email</th>
                   <th className="px-4 py-3 font-medium">Status</th>
-                  <th className="px-4 py-3 font-medium">Passkeys</th>
+                  <th className="px-4 py-3 font-medium">Devices</th>
                   <th className="px-4 py-3 font-medium">
                     <span className="sr-only">Actions</span>
                   </th>
@@ -256,15 +169,14 @@ function UsersPanel() {
                         {user.isActive ? "Active" : "Inactive"}
                       </Badge>
                     </td>
-                    <td className="px-4 py-3 text-text-muted">{user.credentialCount}</td>
+                    <td className="px-4 py-3 text-text-muted">{user.deviceCount}</td>
                     <td className="px-4 py-3">
                       <div className="flex justify-end gap-1">
                         {userActions({ user, isSelf: user.id === myId }).map((action) => (
                           <Button
                             key={action.key}
                             size="sm"
-                            // Deactivate is grey like every other removal;
-                            // the other two are the row's ordinary actions.
+                            // Deactivate is grey like every other removal.
                             variant={action.key === "deactivate" ? "ghost" : "outline"}
                             className={action.key === "deactivate" ? "text-text-muted hover:text-text" : undefined}
                             disabled={busy}
@@ -281,49 +193,45 @@ function UsersPanel() {
             </table>
           </ScrollArea>
 
-          {/* On a phone the actions sit behind a menu on each row: three
-              buttons beside a name and a badge don't fit 375px, and a row
-              that dropped them would leave Deactivate unreachable there. */}
+          {/* On a phone the actions sit behind a menu on each row, so a row
+              that can't fit a button still keeps Deactivate reachable. */}
           <DataList className="md:hidden">
-            {users.map((user) => (
-              <DataListRow
-                key={user.id}
-                primary={user.id === myId ? `${user.displayName} (you)` : user.displayName}
-                secondary={`${user.isActive ? "Active" : "Inactive"} · ${user.credentialCount} passkey${user.credentialCount === 1 ? "" : "s"}${user.email ? ` · ${user.email}` : ""}`}
-                trailing={
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button
-                        size="icon"
-                        variant="ghost"
-                        disabled={busy}
-                        aria-label={`Actions for ${user.displayName}`}
-                      >
-                        <MoreVerticalIcon />
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                      {userActions({ user, isSelf: user.id === myId }).map((action) => (
-                        <DropdownMenuItem key={action.key} onSelect={() => runAction(user, action.key)}>
-                          {action.label}
-                        </DropdownMenuItem>
-                      ))}
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                }
-              />
-            ))}
+            {users.map((user) => {
+              const actions = userActions({ user, isSelf: user.id === myId });
+              return (
+                <DataListRow
+                  key={user.id}
+                  primary={user.id === myId ? `${user.displayName} (you)` : user.displayName}
+                  secondary={`${user.isActive ? "Active" : "Inactive"} · ${user.deviceCount} device${user.deviceCount === 1 ? "" : "s"}${user.email ? ` · ${user.email}` : ""}`}
+                  trailing={
+                    actions.length === 0 ? null : (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            disabled={busy}
+                            aria-label={`Actions for ${user.displayName}`}
+                          >
+                            <MoreVerticalIcon />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          {actions.map((action) => (
+                            <DropdownMenuItem key={action.key} onSelect={() => runAction(user, action.key)}>
+                              {action.label}
+                            </DropdownMenuItem>
+                          ))}
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    )
+                  }
+                />
+              );
+            })}
           </DataList>
         </>
       )}
-
-      <ShareLinkDialog
-        open={share !== null}
-        onOpenChange={(open) => !open && setShare(null)}
-        title={share?.title ?? ""}
-        description={share?.description ?? ""}
-        link={share?.link ?? ""}
-      />
     </div>
   );
 }
@@ -331,17 +239,16 @@ function UsersPanel() {
 /**
  * The household's one recovery password.
  *
- * Passkeys are the way in, and this is not a second one: a session opened
- * with this password reaches only the screen that mints a new-device invite,
- * so the worst a phished copy of it buys an attacker is the ability to ask
- * the household for a passkey (apps/api/src/middleware/auth.js). That
- * confinement is the whole reason the app has a password at all — see
+ * Approved devices are the way in, and this is not a second one: a session
+ * opened with this password reaches only the recovery screen, which can do
+ * nothing but get a device approved (apps/api/src/middleware/auth.js). See
  * todo.md #17.
  *
- * It lives beside the passkey list because that is the question it answers:
+ * It lives beside the device list because that is the question it answers:
  * what happens when every one of those is gone. The CLI path
- * (`pnpm auth:invite --user X --purpose new_device`) still exists and still
- * works; this is the same recovery without shell access to the box.
+ * (`node dist/scripts/auth-invite.js --user X --purpose new_device`) still
+ * exists and still works; this is the same recovery without shell access to
+ * the box.
  */
 function RecoveryPasswordPanel() {
   const confirm = useConfirm();
@@ -395,8 +302,8 @@ function RecoveryPasswordPanel() {
       <div>
         <h3 className="text-sm font-semibold text-text">Recovery password</h3>
         <p className="text-xs text-text-muted">
-          One password, for the day every passkey is gone. It only lets you register a new passkey — it
-          cannot see or change anything in the app.
+          One password, for the day every signed-in device is gone. It only lets you sign a device back in —
+          it cannot see or change anything in the app.
         </p>
       </div>
 
@@ -460,7 +367,7 @@ function RecoveryPasswordPanel() {
                   const ok = await confirm({
                     title: "Remove the recovery password?",
                     description:
-                      "Getting back in after losing every passkey will need shell access to the server again. Any session it opened is signed out immediately.",
+                      "Getting back in after losing every device will need shell access to the server again. Anything it signed in with is signed out immediately.",
                     confirmLabel: "Remove",
                   });
                   if (ok) removeMutation.mutate();
@@ -476,178 +383,16 @@ function RecoveryPasswordPanel() {
   );
 }
 
+/**
+ * Your signed-in devices. Approving a device is what signs it in, so this
+ * list is the whole of "where am I signed in": rename one, or sign out one
+ * that was lost — it has to ask to join again before it can be used.
+ */
 function DevicesPanel() {
   const confirm = useConfirm();
-  const { state } = useAuth();
   const { locale } = useSettings();
   const queryClient = useQueryClient();
-  const [shareLink, setShareLink] = useState(/** @type {string | null} */ (null));
   const [renaming, setRenaming] = useState(/** @type {{ id: string, deviceName: string } | null} */ (null));
-
-  const credentialsQuery = useQuery({
-    queryKey: ["credentials"],
-    queryFn: async () => {
-      const res = await api.credentials.$get();
-      if (!res.ok) throw new Error(await readApiError(res));
-      return (await res.json()).credentials;
-    },
-  });
-
-  const renameMutation = useMutation({
-    mutationFn: async (/** @type {{ id: string, deviceName: string }} */ { id, deviceName }) => {
-      const res = await api.credentials[":id"].$patch({ param: { id }, json: { deviceName } });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["credentials"] });
-      setRenaming(null);
-    },
-    onError: (err) => toast.error(err.message),
-  });
-
-  const removeMutation = useMutation({
-    mutationFn: async (/** @type {string} */ id) => {
-      const res = await api.credentials[":id"].$delete({ param: { id } });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return res.json();
-    },
-    onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: ["credentials"] });
-      // The API signs out every other session of yours with it — it can't
-      // tell which one the lost device holds — so the Sessions tab changed too.
-      queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      toast.success(passkeyRemovedMessage(result.revokedSessions));
-    },
-    onError: (err) => toast.error(err.message),
-  });
-
-  const myId = state?.user?.id ?? null;
-  const addDeviceMutation = useMutation({
-    mutationFn: async (/** @type {string} */ userId) => {
-      const res = await api.invites.$post({ json: { purpose: "new_device", targetUserId: userId } });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return (await res.json()).invite;
-    },
-    onSuccess: (invite) => {
-      setShareLink(`${window.location.origin}/invite/${invite.code}`);
-      queryClient.invalidateQueries({ queryKey: ["invites"] });
-    },
-    onError: (err) => toast.error(err.message),
-  });
-
-  const credentials = credentialsQuery.data ?? [];
-
-  return (
-    <div className="flex flex-col gap-4">
-      <div className="flex justify-end">
-        <Button
-          onClick={() => myId && addDeviceMutation.mutate(myId)}
-          disabled={addDeviceMutation.isPending || myId === null}
-        >
-          Add another device
-        </Button>
-      </div>
-
-      {credentialsQuery.isError ? (
-        <QueryError
-          error={credentialsQuery.error}
-          onRetry={() => credentialsQuery.refetch()}
-          what="your passkeys"
-        />
-      ) : credentialsQuery.isLoading ? null : credentials.length === 0 ? (
-        <EmptyState icon={SmartphoneIcon} title="No devices" description="This shouldn't happen — you're signed in with one." />
-      ) : (
-        <DataList>
-          {credentials.map((cred) => (
-            <DataListRow
-              key={cred.id}
-              primary={
-                renaming?.id === cred.id ? (
-                  <form
-                    className="flex items-center gap-2"
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      renameMutation.mutate({ id: cred.id, deviceName: renaming.deviceName });
-                    }}
-                  >
-                    <Input
-                      autoFocus
-                      value={renaming.deviceName}
-                      onChange={(e) => setRenaming({ id: cred.id, deviceName: e.target.value })}
-                      className="h-7"
-                    />
-                    <Button type="submit" size="sm" disabled={renameMutation.isPending}>
-                      Save
-                    </Button>
-                    <Button type="button" size="sm" variant="ghost" onClick={() => setRenaming(null)}>
-                      Cancel
-                    </Button>
-                  </form>
-                ) : (
-                  cred.deviceName
-                )
-              }
-              secondary={
-                cred.lastUsedAt
-                  ? `Last used ${formatDateTime(locale, cred.lastUsedAt)}`
-                  : `Added ${formatDateTime(locale, cred.createdAt)}`
-              }
-              trailing={
-                renaming?.id === cred.id ? null : (
-                  <div className="flex items-center gap-1">
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => setRenaming({ id: cred.id, deviceName: cred.deviceName })}
-                    >
-                      Rename
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="text-text-muted hover:text-text"
-                      onClick={async () => {
-                        const ok = await confirm({
-                          title: `Remove ${cred.deviceName ?? "this passkey"}?`,
-                          description:
-                            "That device can no longer sign in, and your other sessions are signed out with it — there's no telling which one a lost device holds. This one stays. Undoing it means registering the device again from an invite.",
-                          confirmLabel: "Remove",
-                        });
-                        if (ok) removeMutation.mutate(cred.id);
-                      }}
-                      disabled={removeMutation.isPending || credentials.length <= 1}
-                      title={
-                        credentials.length <= 1
-                          ? "You can't remove your last passkey — add another device first."
-                          : undefined
-                      }
-                    >
-                      Remove
-                    </Button>
-                  </div>
-                )
-              }
-            />
-          ))}
-        </DataList>
-      )}
-
-      <ShareLinkDialog
-        open={shareLink !== null}
-        onOpenChange={(open) => !open && setShareLink(null)}
-        title="Add another device"
-        description="Open this link on the new device to register its passkey. It works once, and expires in 24 hours."
-        link={shareLink ?? ""}
-      />
-    </div>
-  );
-}
-
-function SessionsPanel() {
-  const confirm = useConfirm();
-  const { locale } = useSettings();
-  const queryClient = useQueryClient();
 
   const sessionsQuery = useQuery({
     queryKey: ["sessions"],
@@ -658,74 +403,134 @@ function SessionsPanel() {
     },
   });
 
-  const revokeMutation = useMutation({
+  const renameMutation = useMutation({
+    mutationFn: async (/** @type {{ id: string, deviceName: string }} */ { id, deviceName }) => {
+      const res = await api.sessions[":id"].$patch({ param: { id }, json: { deviceName } });
+      if (!res.ok) throw new Error(await readApiError(res));
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      setRenaming(null);
+    },
+    onError: (err) => toast.error(err.message),
+  });
+
+  const signOutMutation = useMutation({
     mutationFn: async (/** @type {string} */ id) => {
       const res = await api.sessions[":id"].$delete({ param: { id } });
       if (!res.ok) throw new Error(await readApiError(res));
       return res.json();
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      queryClient.invalidateQueries({ queryKey: ["users"] });
+    },
     onError: (err) => toast.error(err.message),
   });
 
-  const sessions = sessionsQuery.data ?? [];
-  const others = sessions.filter((s) => !s.isCurrent);
+  const devices = (sessionsQuery.data ?? []).filter((s) => s.authMethod === "device");
+  const others = devices.filter((s) => !s.isCurrent);
 
-  async function revokeAllOthers() {
+  async function signOutAllOthers() {
     const ok = await confirm({
-      title: `Revoke ${others.length} other ${others.length === 1 ? "session" : "sessions"}?`,
-      description: "Every other signed-in device is signed out. This one stays.",
-      confirmLabel: "Revoke all",
+      title: `Sign out ${others.length} other ${others.length === 1 ? "device" : "devices"}?`,
+      description: "Each one has to ask to join again before it can be used. This one stays signed in.",
+      confirmLabel: "Sign out all",
     });
     if (!ok) return;
-    await Promise.all(others.map((s) => revokeMutation.mutateAsync(s.id)));
-    toast.success("Other sessions revoked.");
+    await Promise.all(others.map((s) => signOutMutation.mutateAsync(s.id)));
+    toast.success("Other devices signed out.");
   }
 
   return (
     <div className="flex flex-col gap-4">
-      {others.length > 0 ? (
-        <div className="flex justify-end">
-          <Button variant="outline" onClick={revokeAllOthers}>
-            Revoke all other sessions
+      <WaitingDevicesList />
+
+      <div className="flex flex-wrap items-end justify-between gap-2">
+        <p className="text-sm text-text-muted">
+          To add a device, open {window.location.host} on it and ask to join, then approve it here or from the
+          notice at the top of any page.
+        </p>
+        {others.length > 0 ? (
+          <Button variant="outline" onClick={signOutAllOthers}>
+            Sign out all other devices
           </Button>
-        </div>
-      ) : null}
+        ) : null}
+      </div>
 
       {sessionsQuery.isError ? (
-        <QueryError error={sessionsQuery.error} onRetry={() => sessionsQuery.refetch()} what="your sessions" />
-      ) : sessionsQuery.isLoading ? null : sessions.length === 0 ? (
-        <EmptyState icon={ShieldCheckIcon} title="No sessions" description="This shouldn't happen — you're signed in with one." />
+        <QueryError error={sessionsQuery.error} onRetry={() => sessionsQuery.refetch()} what="your devices" />
+      ) : sessionsQuery.isLoading ? (
+        <ListSkeleton rows={2} label="Loading your devices" />
+      ) : devices.length === 0 ? (
+        <EmptyState icon={SmartphoneIcon} title="No devices" description="This shouldn't happen — you're signed in on one." />
       ) : (
         <DataList>
-          {sessions.map((s) => (
+          {devices.map((device) => (
             <DataListRow
-              key={s.id}
+              key={device.id}
               primary={
-                <span className="flex items-center gap-2">
-                  {s.userAgent ?? "Unknown device"}
-                  {s.isCurrent ? <Badge variant="secondary">This device</Badge> : null}
-                </span>
-              }
-              secondary={`Last seen ${formatDateTime(locale, s.lastSeenAt)}`}
-              trailing={
-                s.isCurrent ? null : (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="text-text-muted hover:text-text"
-                    onClick={async () => {
-                      const ok = await confirm({
-                        title: "Revoke this session?",
-                        description: "That device is signed out and has to sign in again.",
-                        confirmLabel: "Revoke",
-                      });
-                      if (ok) revokeMutation.mutate(s.id);
+                renaming?.id === device.id ? (
+                  <form
+                    className="flex items-center gap-2"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      renameMutation.mutate({ id: device.id, deviceName: renaming.deviceName });
                     }}
-                    disabled={revokeMutation.isPending}
                   >
-                    Revoke
-                  </Button>
+                    <Input
+                      autoFocus
+                      value={renaming.deviceName}
+                      onChange={(e) => setRenaming({ id: device.id, deviceName: e.target.value })}
+                      className="h-7"
+                      aria-label="Device name"
+                    />
+                    <Button type="submit" size="sm" disabled={renameMutation.isPending}>
+                      Save
+                    </Button>
+                    <Button type="button" size="sm" variant="ghost" onClick={() => setRenaming(null)}>
+                      Cancel
+                    </Button>
+                  </form>
+                ) : (
+                  <span className="flex items-center gap-2">
+                    {device.deviceName ?? "Unnamed device"}
+                    {device.isCurrent ? <Badge variant="secondary">This device</Badge> : null}
+                  </span>
+                )
+              }
+              secondary={`Last used ${formatDateTime(locale, device.lastSeenAt)}`}
+              trailing={
+                renaming?.id === device.id ? null : (
+                  <div className="flex items-center gap-1">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setRenaming({ id: device.id, deviceName: device.deviceName ?? "" })}
+                    >
+                      Rename
+                    </Button>
+                    {device.isCurrent ? null : (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-text-muted hover:text-text"
+                        disabled={signOutMutation.isPending}
+                        onClick={async () => {
+                          const ok = await confirm({
+                            title: `Sign out ${device.deviceName ?? "this device"}?`,
+                            description:
+                              "It has to ask to join again, and be approved, before it can be used. Do this for a device that's lost or given away.",
+                            confirmLabel: "Sign out",
+                          });
+                          if (ok) signOutMutation.mutate(device.id);
+                        }}
+                      >
+                        Sign out
+                      </Button>
+                    )}
+                  </div>
                 )
               }
             />
@@ -733,74 +538,6 @@ function SessionsPanel() {
         </DataList>
       )}
     </div>
-  );
-}
-
-function InvitesPanel() {
-  const confirm = useConfirm();
-  const { locale } = useSettings();
-  const queryClient = useQueryClient();
-
-  const invitesQuery = useQuery({
-    queryKey: ["invites"],
-    queryFn: async () => {
-      const res = await api.invites.$get();
-      if (!res.ok) throw new Error(await readApiError(res));
-      return (await res.json()).invites;
-    },
-  });
-
-  const revokeMutation = useMutation({
-    mutationFn: async (/** @type {string} */ id) => {
-      const res = await api.invites[":id"].$delete({ param: { id } });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return res.json();
-    },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["invites"] }),
-    onError: (err) => toast.error(err.message),
-  });
-
-  const invites = invitesQuery.data ?? [];
-
-  if (invitesQuery.isError) {
-    return <QueryError error={invitesQuery.error} onRetry={() => invitesQuery.refetch()} what="pending invites" />;
-  }
-  if (invitesQuery.isLoading) return null;
-
-  return invites.length === 0 ? (
-    <EmptyState
-      icon={TicketIcon}
-      title="No pending invites"
-      description="Invites you mint from the Users or My devices tabs show up here until they're used, revoked or expire."
-    />
-  ) : (
-    <DataList>
-      {invites.map((invite) => (
-        <DataListRow
-          key={invite.id}
-          primary={invite.purpose === "new_user" ? "New user" : "New device"}
-          secondary={`Expires ${formatDateTime(locale, invite.expiresAt)}`}
-          trailing={
-            <Button
-              size="sm"
-              variant="ghost"
-              className="text-text-muted hover:text-text"
-              onClick={async () => {
-                const ok = await confirm({
-                  title: "Revoke this invite?",
-                  description: "The link stops working. Issue a new one if it's still needed.",
-                  confirmLabel: "Revoke",
-                });
-                if (ok) revokeMutation.mutate(invite.id);
-              }}
-              disabled={revokeMutation.isPending}
-            >
-              Revoke
-            </Button>
-          }
-        />
-      ))}
-    </DataList>
   );
 }
 
@@ -916,7 +653,9 @@ function PeoplePanel() {
 
       {peopleQuery.isError ? (
         <QueryError error={peopleQuery.error} onRetry={() => peopleQuery.refetch()} what="the people in your household" />
-      ) : peopleQuery.isLoading ? null : people.length === 0 ? (
+      ) : peopleQuery.isLoading ? (
+        <ListSkeleton rows={2} label="Loading people" />
+      ) : people.length === 0 ? (
         <EmptyState
           icon={UsersIcon}
           title="No people yet"
@@ -999,15 +738,16 @@ function PeoplePanel() {
 const ADMIN_TABS = /** @type {const} */ ([
   { value: "users", path: "/admin/users", label: "Users" },
   { value: "devices", path: "/admin/devices", label: "My devices" },
-  { value: "sessions", path: "/admin/sessions", label: "My sessions" },
-  { value: "invites", path: "/admin/invites", label: "Pending invites" },
   { value: "people", path: "/admin/people", label: "People" },
+  { value: "backups", path: "/admin/backups", label: "Backups" },
 ]);
 
 /**
- * One page, five tabs, each with its own route so every sub-screen is
- * directly linkable — People is phase 04's; Users/Devices/Sessions/Invites
- * are phase 03's, moved here unchanged.
+ * One page, four tabs, each with its own route so every sub-screen is
+ * directly linkable — People is phase 04's; Users and My devices are phase
+ * 03's, reworked for device approval (a session is a device now, and invites
+ * are break-glass only, so neither keeps a tab of its own); Backups is the
+ * pre-deploy plan's phase C.
  *
  * This was "/settings" for phases 03–04, which was never what it held: it
  * is user and household administration, and the operator-facing preference
@@ -1023,11 +763,26 @@ export function AdminPage() {
   const signOut = useSignOut();
   const activeTab = ADMIN_TABS.find((t) => t.path === pathname)?.value ?? "users";
 
+  useEffect(
+    () =>
+      registerCommands([
+        {
+          id: "backups:open",
+          group: "Navigation",
+          label: "Backups",
+          keywords: "backup restore download export",
+          icon: DatabaseBackupIcon,
+          run: () => navigate({ to: "/admin/backups" }),
+        },
+      ]),
+    [navigate],
+  );
+
   return (
     <>
       <PageHeader
         title="Admin"
-        description="Users, devices, sessions, invites and the people in your household."
+        description="Users, devices, the people in your household, and backups."
         actions={
           <>
             {/* The importer is a full-page workflow rather than a seventh
@@ -1073,14 +828,11 @@ export function AdminPage() {
             <RecoveryPasswordPanel />
           </div>
         </TabsContent>
-        <TabsContent value="sessions">
-          <SessionsPanel />
-        </TabsContent>
-        <TabsContent value="invites">
-          <InvitesPanel />
-        </TabsContent>
         <TabsContent value="people">
           <PeoplePanel />
+        </TabsContent>
+        <TabsContent value="backups">
+          <BackupsPanel />
         </TabsContent>
       </Tabs>
     </>

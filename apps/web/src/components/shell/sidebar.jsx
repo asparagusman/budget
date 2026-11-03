@@ -5,7 +5,6 @@ import {
   ChevronsRight,
   ChevronsUpDown,
   LogOut,
-  Search,
   Settings as SettingsIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils.js";
@@ -19,7 +18,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu.jsx";
-import { toggleCommandPalette } from "@/lib/commands.js";
 import { useAuth, useSignOut } from "@/lib/auth.jsx";
 import { AccountAvatar } from "@/components/shell/account-avatar.jsx";
 import { ScrollArea } from "@/components/scroll-area.jsx";
@@ -49,28 +47,36 @@ function writeCollapsed(collapsed) {
 // rather than conditionally rendered — a conditional render pops, and it
 // would also strip the accessible name off every collapsed nav link, since
 // the icon is aria-hidden and the text is all a screen reader has.
-const LABEL = "overflow-hidden whitespace-nowrap transition-[opacity,max-width] duration-150";
-/** @param {boolean} collapsed */
-function labelClass(collapsed) {
-  return collapsed ? "max-w-0 opacity-0" : "max-w-48 opacity-100";
+//
+// Rows never switch to `justify-center` when collapsed. That switch lands
+// in one frame while the label is still full width, so the icon was
+// centred together with its label — thrown toward the middle of the
+// row — and then slid back as the label shrank. Instead every row stays
+// left-aligned and its padding puts the icon on the collapsed column's
+// centre line (36px of 4.5rem) in BOTH states, so the icon never moves.
+// The icon-to-label gap is the label's own margin, so it animates out with
+// the label instead of snapping.
+const LABEL = "overflow-hidden whitespace-nowrap transition-[opacity,max-width,margin] duration-150";
+/**
+ * @param {boolean} collapsed
+ * @param {"ml-2" | "ml-3"} [gap] the icon-to-label gap while expanded
+ */
+function labelClass(collapsed, gap = "ml-3") {
+  return collapsed ? "ml-0 max-w-0 opacity-0" : cn(gap, "max-w-48 opacity-100");
 }
 
 // The bottom cluster's three rows (Settings, collapse, account) borrow the
 // nav pill's shape so the whole column reads as one list rather than as a
 // nav plus a footer of loose controls.
-/** @param {boolean} collapsed */
-function rowClass(collapsed) {
-  return cn(
-    "flex items-center rounded-full px-3 py-2 text-sm font-medium text-text-muted transition-colors",
-    "hover:bg-surface-muted hover:text-text",
-    "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent)",
-    collapsed ? "justify-center gap-0" : "gap-3",
-  );
-}
+// px-4 inside the column's p-3: 12 + 16 = 28px to a 16px icon, centred on 36.
+const ROW = cn(
+  "flex items-center rounded-full px-4 py-2 text-sm font-medium text-text-muted transition-colors",
+  "hover:bg-surface-muted hover:text-text",
+  "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent)",
+);
 
 /**
- * Desktop-only (`md:` and up) fixed left sidebar: brand, search/command
- * trigger, nav with the active item as a soft tinted pill, then a bottom
+ * Desktop-only (`md:` and up) fixed left sidebar: brand, nav with the active item as a soft tinted pill, then a bottom
  * cluster of Settings (a menu carrying the theme preference), the collapse
  * toggle, and the account — which is a menu too, and holds Sign out.
  * Collapsible to icon-only, with the labels fading as the width transitions.
@@ -97,35 +103,17 @@ export function Sidebar() {
         collapsed ? "w-[4.5rem]" : "w-64",
       )}
     >
-      {/* gap collapses along with the labels — a surviving gap next to a
-          zero-width label pushes every icon a few pixels off centre. */}
-      <div className={cn("flex h-16 shrink-0 items-center px-4", collapsed ? "justify-center gap-0 px-0" : "gap-2")}>
+      {/* px-5 puts the 32px mark at 20–52px: centred on 36 at both widths. */}
+      <div className="flex h-16 shrink-0 items-center px-5">
         <div className="flex size-8 shrink-0 items-center justify-center rounded-(--radius-control) bg-accent-brand text-sm font-bold text-accent-brand-fg">
           B
         </div>
-        <span className={cn(LABEL, labelClass(collapsed), "text-sm font-semibold text-text")}>
+        <span className={cn(LABEL, labelClass(collapsed, "ml-2"), "text-sm font-semibold text-text")}>
           Budget
         </span>
       </div>
 
-      <button
-        type="button"
-        onClick={toggleCommandPalette}
-        className={cn(
-          "mx-3 flex shrink-0 items-center rounded-(--radius-control) bg-surface-muted px-3 py-2 text-sm text-text-muted transition-colors hover:text-text",
-          collapsed ? "justify-center gap-0" : "gap-2",
-        )}
-      >
-        <Search className="size-4 shrink-0" aria-hidden="true" />
-        <span className={cn(LABEL, labelClass(collapsed), "flex-1 text-left")}>Search…</span>
-        {!collapsed && (
-          <kbd className="rounded bg-surface px-1.5 py-0.5 text-[10px] text-text-subtle [@media(pointer:coarse)]:hidden">
-            ⌘K
-          </kbd>
-        )}
-      </button>
-
-      {/* The column itself never scrolls: brand, search and the bottom
+      {/* The column itself never scrolls: brand and the bottom
           cluster are always in view. Only this list can, and only on a
           window too short to hold all ten — min-h-0 is what lets it give up
           height instead of pushing the account off the bottom. */}
@@ -140,8 +128,7 @@ export function Sidebar() {
                 title={collapsed ? item.label : undefined}
                 aria-current={active ? "page" : undefined}
                 className={cn(
-                  "flex items-center rounded-full px-3 py-2 text-sm font-medium transition-colors",
-                  collapsed ? "justify-center gap-0" : "gap-3",
+                  "flex items-center rounded-full px-4 py-2 text-sm font-medium transition-colors",
                   "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent)",
                   active
                     ? "bg-accent-brand-soft text-accent-brand"
@@ -169,7 +156,7 @@ export function Sidebar() {
             <button
               type="button"
               title={collapsed ? "Settings" : undefined}
-              className={rowClass(collapsed)}
+              className={ROW}
             >
               <SettingsIcon className="size-4 shrink-0" aria-hidden="true" />
               <span className={cn(LABEL, labelClass(collapsed))}>Settings</span>
@@ -189,7 +176,7 @@ export function Sidebar() {
           type="button"
           onClick={() => setCollapsed((value) => !value)}
           title={collapsed ? "Expand sidebar" : undefined}
-          className={rowClass(collapsed)}
+          className={ROW}
         >
           {collapsed ? (
             <ChevronsRight className="size-4 shrink-0" aria-hidden="true" />
@@ -209,16 +196,15 @@ export function Sidebar() {
               type="button"
               title={collapsed ? (user?.displayName ?? "Account") : undefined}
               className={cn(
-                "mt-1 flex items-center rounded-full py-1.5 transition-colors hover:bg-surface-muted",
+                // px-2: the column's inner width is 3rem, so 0.5rem either
+                // side of the 2rem avatar fills it exactly when collapsed —
+                // and the avatar sits at 20–52px, centred on 36, either way.
+                "mt-1 flex items-center rounded-full px-2 py-1.5 transition-colors hover:bg-surface-muted",
                 "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent)",
-                // No horizontal padding when collapsed: the avatar is 2rem
-                // and the column's inner width is 3rem, so padding either
-                // side would not fit.
-                collapsed ? "justify-center gap-0 px-0" : "gap-2 px-2",
               )}
             >
               <AccountAvatar user={user} />
-              <div className={cn(LABEL, labelClass(collapsed), "min-w-0 flex-1 text-left")}>
+              <div className={cn(LABEL, labelClass(collapsed, "ml-2"), "min-w-0 flex-1 text-left")}>
                 <p className="truncate text-sm font-medium text-text">
                   {user?.displayName ?? "Not signed in"}
                 </p>
@@ -227,7 +213,7 @@ export function Sidebar() {
                 </p>
               </div>
               {!collapsed && (
-                <ChevronsUpDown className="size-4 shrink-0 text-text-subtle" aria-hidden="true" />
+                <ChevronsUpDown className="ml-2 size-4 shrink-0 text-text-subtle" aria-hidden="true" />
               )}
             </button>
           </DropdownMenuTrigger>

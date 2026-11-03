@@ -1,11 +1,14 @@
 import { useCallback } from "react";
 
 /**
- * A number field that behaves like a spreadsheet cell instead of like
- * `<input type="number">`.
+ * A number field that behaves like a spreadsheet cell instead of like the
+ * browser's own number-typed input (the one with a spinner).
  *
- * `type="number"` looked like the honest choice and is wrong for every field
- * in a figures grid:
+ * That input looked like the honest choice and is wrong for every field in a
+ * figures grid. It is also banned outright: lib/no-number-input.test.js fails
+ * on it anywhere in src/, so a new field reaches for `MoneyInput`,
+ * `PercentInput` or `IntegerInput` (components/money-input.jsx), which are
+ * this hook with the unit and the number handling attached.
  *
  * - **Its stepper is a 13x8px half-arrow inside the text area.** In the
  *   allocation editor the field is 50px of content box, so a quarter of it is

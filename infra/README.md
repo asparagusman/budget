@@ -1,6 +1,7 @@
 # Deploying budget
 
-One household, two people, one Linux thin client on a Tailscale tailnet. No public ingress, no CI,
+One household, two people, one Linux thin client on the home network, at `http://budget.local`. No
+public ingress, no CI,
 no monitoring stack — see [`../.claude/plans/phases/11-polish-mobile-import.md`](../.claude/plans/phases/11-polish-mobile-import.md)
 "Non-goals" for why each of those is deliberately absent.
 
@@ -8,34 +9,31 @@ Everything below is meant to be followed top to bottom on a machine that has not
 
 ---
 
-## The one thing that will break your deployment
+## How this is reached, and what that means
 
-**`PUBLIC_ORIGIN` must exactly equal the origin you type into the browser — and its hostname is
-permanent.**
+The app is served over **plain http on the home network**, at `http://budget.local`. The name comes
+from the host announcing itself over mDNS (step 1), so there is no domain, no certificate and
+nothing to install on the phones.
 
-The API derives the WebAuthn relying-party ID from it: the hostname, `budget.tail1234.ts.net`. If
-the two disagree — `https://` vs `http://`, `budget.tail1234.ts.net` vs `budget-1.tail1234.ts.net`,
-the tailnet name vs `localhost` — passkey registration **fails silently**: the browser prompts, you
-touch the key, and the request is rejected with a security error that names nothing useful. It is
-by a wide margin the most likely thing to go wrong here, and it looks like a broken app rather than
-a config typo.
+There are no passkeys, and no password to sign in with day to day. A device gets in by **being approved**: it
+opens `http://budget.local`, asks to join, and shows a four-letter code; someone on a device that is
+already signed in approves it (a notice appears on every page of the app) and says whose device it
+is. That device then stays signed in for as long as it keeps being used.
 
-Every passkey is bound to that RP ID for good. Renaming the machine, or the tailnet, changes the
-hostname and **invalidates every passkey registered so far**: everyone re-enrols through the
-recovery path in [Operating notes](#operating-notes). So the machine's final name is chosen in step
-1, before anyone registers anything.
+What that trades away, deliberately:
 
-Set it once, exactly, and never guess at it:
+- **No encryption in the app's own traffic.** Figures cross the Wi-Fi as plain http. The Wi-Fi's own
+  encryption is what protects them, so the router should be on **WPA3** (or WPA2/WPA3 mixed), with
+  guests on the **guest network** and the server **wired** to the router. What's left is someone
+  already on the home network setting out to tamper with traffic.
+- **Home network only.** Away from home the app isn't reachable at all.
+- **Anyone on the network can ask to join.** Asking does nothing until a member approves it, and at
+  most ten devices can be waiting at once. The first visitor to a fresh install becomes its first
+  user, so set up straight after the first start (step 6).
 
-```sh
-tailscale status --json | jq -r '.Self.DNSName'   # -> budget.tail1234.ts.net.
-# PUBLIC_ORIGIN=https://budget.tail1234.ts.net    (no trailing dot)
-```
-
-The API checks the shape at startup — `https://`, nothing after the hostname, no trailing dot — and
-refuses to start otherwise, naming the bad value. It then reports the RP ID it derived: once in its
-log at startup, and as `rpId` and `origin` in `GET /health`. What nothing can check is whether that
-matches your address bar. That comparison is on you.
+**`PUBLIC_ORIGIN` must equal the address you type**, `http://budget.local`. CORS and the
+break-glass invite links are built from it. The API checks its shape at startup and reports it as
+`origin` in `GET /health`.
 
 ---
 
@@ -51,23 +49,34 @@ sudo apt-get update && sudo apt-get install -y git curl jq
 curl -fsSL https://get.docker.com | sh
 sudo usermod -aG docker "$USER"     # log out and back in
 
-# Tailscale. --hostname is the machine's FINAL name: see the top of this page.
-curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up --hostname budget
+# The name the household types. Avahi announces <hostname>.local on the network,
+# so the hostname is "budget".
+sudo hostnamectl set-hostname budget
+sudo apt-get install -y avahi-daemon avahi-utils
+sudo systemctl enable --now avahi-daemon
 
-docker --version && docker compose version && tailscale status
+docker --version && docker compose version && avahi-resolve -n budget.local
 ```
 
-Then, once, in the Tailscale admin console:
+`avahi-resolve` (from `avahi-utils`) should print this machine's address. Then, from a laptop or
+phone on the same Wi-Fi, open `http://budget.local` once the stack is up (step 4) to check the name
+resolves there too. iPhones, Macs and Windows resolve `.local` names; Android does from version 13.
+If an Android phone can't find it, add a DNS entry on the router mapping `budget.local` to this
+machine's address.
 
-- **DNS → enable MagicDNS, and enable HTTPS Certificates.** `tailscale serve --https` needs both:
-  without them there is no `*.ts.net` name to serve on and no certificate to serve it with.
-- **Machines → this machine → Disable key expiry.** Node keys expire after 180 days by default.
-  When this one does, the machine drops off the tailnet and the app is unreachable until someone
-  re-authenticates it from a keyboard on the box.
-- **Settle the names now.** The machine name (above, or Machines → Edit machine name) and the
-  tailnet name (DNS → Tailnet name) together make the hostname every passkey is bound to. Rename
-  either after step 6 and every passkey stops working.
+Two settings on the **router**, once:
+
+- **Reserve this machine's address** (a DHCP reservation), so a router DNS entry, if you need one,
+  keeps pointing at the right place.
+- **Wi-Fi security on WPA3** (or WPA2/WPA3 mixed for older devices), and guests on the guest
+  network. That is what keeps the app's plain-http traffic private — see the top of this page.
+
+If the host runs a firewall (`ufw`), allow port 80 and mDNS from the home network:
+
+```sh
+sudo ufw allow 80/tcp
+sudo ufw allow 5353/udp
+```
 
 **Disk encryption.** If the host's disk is not already encrypted, encrypt it. This machine holds
 every figure about the household's money in a Postgres volume, in plaintext, forever. LUKS on the
@@ -119,7 +128,7 @@ Then edit `.env`:
 | `PORT` | `3001` |
 | `SESSION_SECRET` | the generated secret |
 | `VITE_API_URL` | leave it; the web image is built with `/api` and nginx proxies that to the api container |
-| `PUBLIC_ORIGIN` | **`https://<your-host>.ts.net`** — see the warning above |
+| `PUBLIC_ORIGIN` | **`http://budget.local`**, exactly — see the top of this page |
 | `TZ` | `Australia/Sydney`. The api's "today" — what's due, which pay period you're in — is local time, and containers are UTC unless told otherwise, which leaves today as yesterday until 10–11am. Compose falls back to `Australia/Sydney` if it's unset |
 | `APP_VERSION` | leave it at `dev`. The commands below stamp each build with `APP_VERSION=$(git rev-parse --short HEAD)`, which overrides it, and `GET /health` reports it back. A value written here goes stale on the next pull |
 
@@ -156,8 +165,8 @@ Four services, in this order, enforced by compose rather than by you remembering
    `api` waits for it to exit **successfully**, so the app can never start against a schema older
    than its own code.
 3. **`api`** — Hono on `${PORT}`, published on `127.0.0.1` only.
-4. **`web`** — nginx serving the built SPA on `127.0.0.1:8080`, proxying `/api/` to the api
-   container.
+4. **`web`** — nginx serving the built SPA on port 80 of the host, which is `http://budget.local`,
+   proxying `/api/` to the api container.
 
 Check it:
 
@@ -173,15 +182,14 @@ A healthy response looks like:
   "ok": true,
   "db": true,
   "version": "a1b2c3d",
-  "rpId": "budget.tail1234.ts.net",
-  "origin": "https://budget.tail1234.ts.net",
+  "origin": "http://budget.local",
   "migrations": { "applied": 13, "expected": 13, "latest": "0012_sleepy_shard",
                   "expectedLatest": "0012_sleepy_shard", "pending": 0 }
 }
 ```
 
-`rpId` and `origin` are what passkeys will be registered against. If they aren't the address you
-will type into the browser, stop and fix `PUBLIC_ORIGIN` now, while no passkey depends on it.
+`origin` should be the address you will type into the browser. If it isn't, fix `PUBLIC_ORIGIN`
+and recreate the api (`… up -d api`; a restart alone keeps the old environment).
 
 `ok` is false and the endpoint returns **503** when the database is unreachable *or* when
 `pending > 0` — a running app whose migrations are behind its code fails in ways that are far
@@ -191,72 +199,58 @@ without the `migrate` service; bring the stack up again with the compose file ra
 
 ---
 
-## 5. Expose it on the tailnet
+## 5. Open it from another device
 
-`tailscale serve` terminates HTTPS with a tailnet certificate and forwards to the web container.
-Nothing is published to the public internet; `tailscale funnel` is the command that would do that
-and is deliberately not used here.
+On a phone on the home Wi-Fi, open `http://budget.local`. If it doesn't load, check in this order:
 
-```sh
-sudo tailscale serve --bg --https=443 http://127.0.0.1:8080
-sudo tailscale serve status
-```
-
-That prints the hostname the app now answers on:
-
-```
-https://budget.tail1234.ts.net (tailnet only)
-|-- / proxy http://127.0.0.1:8080
-```
-
-**Now go back and check `PUBLIC_ORIGIN` matches that hostname exactly.** If you had to change it:
-
-```sh
-APP_VERSION=$(git rev-parse --short HEAD) docker compose -f infra/docker-compose.yml up -d api
-curl -s localhost:3001/health | jq '.rpId, .origin'
-```
-
-(Environment changes need the container recreated. A restart alone keeps the old environment.
-`web` needs nothing: nginx re-resolves the api container's address on its own.)
+1. `curl -s localhost/ | head -c 100` on the host returns HTML — the stack is serving.
+2. `avahi-resolve -n budget.local` on the host prints its address — the name is being announced.
+3. The phone is on the same network (not the guest network, not mobile data, no VPN).
+4. On Android older than 13, use the router DNS entry from step 1.
 
 ---
 
-## 6. First run: register the first passkey
+## 6. First run: set up, then approve everyone else
 
-Open `https://<your-host>.ts.net` on the device you want to sign in from — a phone is the usual
-choice, since that is where the app is used most.
+Open `http://budget.local` on the device you want to use first — a phone is the usual choice, since
+that is where the app is used most. **Do this straight after the stack first starts**: until there
+is a user, whoever opens it first sets it up.
 
-The `users` table is empty on a fresh database, so the app shows a **bootstrap** screen instead of
-a login form. Enter a display name, register a passkey, and you are the first user.
+The `users` table is empty on a fresh database, so the app shows a **set-up** screen. Enter your name
+and you are the first user, signed in on that device.
 
-From then on, other people and other devices come from **Admin → Users → Invite a user**, which
-mints a single-use link that expires in 24 hours.
+Every other device — yours or anyone else's — joins the same way:
 
-If the passkey prompt appears and then fails: it is `PUBLIC_ORIGIN`. It is essentially always
-`PUBLIC_ORIGIN`.
+1. On the new device, open `http://budget.local`, name the device ("Grace's phone") and tap **Ask to
+   join**. It shows a four-letter code and waits.
+2. On a signed-in device, a notice appears at the top of every page: "Grace's phone is asking to
+   join". Tap **Review**, check the code matches, choose whose device it is — an existing member, or
+   **Someone new to the household** with their name — and **Approve**.
+3. The new device signs itself in within a couple of seconds.
+
+A request that isn't answered runs out after 15 minutes. **Turn down** removes it straight away.
+Signed-in devices are listed under **Admin → My devices**, where a lost one can be signed out.
 
 ### Then, straight away: set the recovery password
 
-Passkeys are the way in, and there is exactly one password in this app, for when they are all gone.
-Set it now, while you have a passkey session to set it with: **Admin → My devices → Recovery
-password**, at least 16 characters. The household has one, held by one user; setting, replacing or
-removing it needs a passkey sign-in.
+Approved devices are the way in, and there is exactly one password in this app, for when every one
+of them is gone. Set it now: **Admin → My devices → Recovery password**, at least 16 characters.
+The household has one, held by one user; setting, replacing or removing it needs an approved device.
 
-It is deliberately weak as a key. On the sign-in screen it opens a session that lasts an hour and
-reaches one screen: mint a new-device link for someone in the household, remove a lost passkey,
-revoke sessions. It can't see or change a single figure, so a phished copy buys an attacker nothing
-but the ability to ask for a passkey. Keep it somewhere that isn't this app — a password manager, or
+On the sign-in screen it opens a session that lasts an hour and reaches one screen: sign that device
+in as a member of the household, approve a waiting device, sign out lost ones. It can't see or
+change a single figure by itself. Keep it somewhere that isn't this app — a password manager, or
 paper.
 
-Without it, getting back in after losing every passkey needs a shell on this box (see Operating
+Without it, getting back in after losing every device needs a shell on this box (see Operating
 notes).
 
 ---
 
 ## 7. Load the household's data
 
-**Not yet, if this is the real household's data.** Until in-app backups ship there are none at all
-(see [Backups](#backups)), so a dead disk loses everything.
+The app takes a backup every week from the moment it starts (see [Backups](#backups)), but those
+files live on this box's disk until you copy them off. Do that once the data is in.
 
 Either enter it by hand, or use the importer:
 
@@ -316,9 +310,55 @@ main && git pull` (or whichever branch you deploy) and run the update again.
 
 ## Backups
 
-Backups are taken by the app itself (**Admin → Backups**), which arrives in phase C of
-[`../.claude/plans/pre-deploy-plan.md`](../.claude/plans/pre-deploy-plan.md). Until it ships there
-are **no backups at all** — so don't put real data on this box before phase C is deployed.
+The app backs itself up. **Admin → Backups** shows the last one, takes one on demand (**Back up
+now**), and lists them with Download, Restore and Delete.
+
+**What is backed up.** Everything the household entered: people, accounts and balances, pay
+schedules, income, bills and their history, variable costs, allocation plans and versions, goals,
+house scenarios, and settings. **Not** users, devices, invites, the audit log, or `.env` — so
+restoring a backup can't lock anyone out or sign back in a device you signed out.
+
+**When.** The api checks at startup and then hourly; if the newest automatic backup is 7 days old
+(or there isn't one) it takes another. A box that was off for a month takes one on its next start.
+It also takes a **safety backup** before every restore and before every import commit, so either
+can be undone. The newest 3 of each of those, and of the weekly ones, are kept; **Back up now**
+backups are kept until you delete them. If a weekly backup fails — a full disk, say — Admin →
+Backups says so, and the dashboard warns when there has been none for 8 days.
+
+**Where.** One gzipped JSON file each, in `infra/backups/` on the host (`/backups` inside the api
+container; `BACKUP_DIR` sets it). The folder is gitignored, and a name like
+`weekly-20261102T030000000Z.json.gz` says what it is and when. They are plaintext once unzipped:
+the disk's encryption is the only thing protecting them, so don't leave copies somewhere that
+isn't.
+
+**Getting them off the box.** A backup on the same disk doesn't survive that disk. Either download
+one from Admin → Backups, or copy the folder from another machine on the home network:
+
+```sh
+scp -r <user>@budget.local:/path/to/budget/infra/backups ./budget-backups
+```
+
+Do this after anything you'd hate to re-enter, and every few weeks regardless.
+
+### Restoring
+
+**On the same box**: Admin → Backups → **Restore** on the backup you want, and confirm. The current
+state is backed up first (`Before restore`), so a restore that turns out to be the wrong one can be
+undone the same way. Everything entered since the backup is replaced; users and devices aren't
+touched. A restore either completes or changes nothing.
+
+A backup from an older version of the app is attempted, and if it can't be mapped it is refused
+with nothing changed. One from a *newer* version is refused: update the app first.
+
+**On a fresh host** (a dead disk, a new machine):
+
+1. Follow this page through step 6: bring the stack up and set up the first user on the set-up
+   screen. A new host has no users, and backups don't carry any, so this step is what
+   gives you a way in.
+2. Copy the backup file to whatever device you're signed in on.
+3. Admin → Backups → **Restore from file…**, choose it, and confirm.
+
+Skip step 7 — the file already has everything the importer would have loaded.
 
 ---
 
@@ -341,20 +381,20 @@ is proportionate.
 docker compose -f infra/docker-compose.yml exec db psql -U budget -d budget
 ```
 
-**Ports.** Only `web` (8080) and `api` (3001) publish anything, and both only on the host's
-loopback (`127.0.0.1`), so nothing on the LAN can reach either directly. `tailscale serve` is what
-makes 8080 reachable from other devices; nothing makes 3001 reachable off the host — it is published
-only so `curl localhost:3001/health` works here. Postgres publishes nothing at all;
+**Ports.** Only `web` (80) and `api` (3001) publish anything. Port 80 is the app, on every
+interface, which is what makes `http://budget.local` reachable from the home network. 3001 is
+published on the host's loopback (`127.0.0.1`) only, so nothing off the host reaches the api except
+through nginx — it is published only so `curl localhost:3001/health` works here. Postgres publishes nothing at all;
 `docker-compose.dev.yml` exists solely to add a published 5432 for local development and must never
 be merged in on this host.
 
-### Recovering when every passkey is gone
+### Recovering when every device is gone
 
 There are no recovery codes to lose and no email reset. There are two ways back in.
 
-**The recovery password**, if it was set (step 6): on the sign-in screen, sign in with it, and the
-one screen it opens mints a new-device link. Open that link on the device you're recovering with
-and register a passkey there.
+**The recovery password**, if it was set (step 6): on the sign-in screen, tap **Lost every
+device?** and sign in with it. The one screen it opens signs that device in as whichever member of
+the household you choose, and lists your devices so the lost ones can be signed out.
 
 **A shell on this box**, which works whether or not the password was set, or remembered:
 
@@ -362,15 +402,15 @@ and register a passkey there.
 docker compose -f infra/docker-compose.yml exec api node dist/scripts/auth-invite.js --user "Lachlan" --purpose new_device
 ```
 
-`--user` is the display name, exactly. It prints a fresh invite link — open it on whatever device
-you're recovering with — and writes an `audit_log` entry with no actor, so it can be told apart from
-an invite minted by a signed-in user. The invite is single-use and expires after 24 hours, the same
-as one minted from Admin → Users. `--purpose new_user`, with no `--user`, mints an invite for a new
-member of the household instead.
+`--user` is the display name, exactly. It prints a link — open it on whatever device you're
+recovering with, and that device is signed in as that user — and writes an `audit_log` entry with
+no actor, so it can be told apart from anything a signed-in user did. The link is single-use and
+expires after 24 hours. `--purpose new_user`, with no `--user`, makes a link that adds a new member
+of the household instead.
 
 (The image has no pnpm and no source tree, so the dev-only `pnpm auth:invite` doesn't exist there.
 `dist/scripts/auth-invite.js` is the same script, bundled.)
 
 If the `users` table is empty — a fresh volume, say — there is nothing to recover: open the app and
-it shows the bootstrap screen again, no shell needed. Whoever completes it first becomes the first
-user, which is one more reason the app is reachable from the tailnet only.
+it shows the set-up screen again, no shell needed. Whoever completes it first becomes the first
+user, which is one more reason the app is reachable from the home network only.

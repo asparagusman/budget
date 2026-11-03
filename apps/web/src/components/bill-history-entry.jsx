@@ -3,18 +3,17 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { SaveIcon } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button.jsx";
-import { Input } from "@/components/ui/input.jsx";
-import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/components/ui/input-group.jsx";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select.jsx";
 import { EmptyState } from "@/components/empty-state.jsx";
 import { ListSkeleton } from "@/components/loading.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
+import { IntegerInput, MoneyInput } from "@/components/money-input.jsx";
 import { Money } from "@/components/money.jsx";
 import { QueryError } from "@/components/query-error.jsx";
 import { Stat, StatGroup } from "@/components/stat-tile.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
-import { cellText, changedCells, forgetSentEdits, parseCents } from "@/lib/cell-edits.js";
+import { cellText, centsText, changedCells, forgetSentEdits, parseCents } from "@/lib/cell-edits.js";
 import { formatIsoDate } from "@/lib/dates.js";
 import { useSettings } from "@/lib/settings.jsx";
 import { useUnsavedGuard } from "@/lib/use-unsaved-guard.js";
@@ -71,7 +70,7 @@ export function BillHistoryEntry({ billId, autoFocus = false, onSaved, onDirtyCh
   const inputRefs = useRef(/** @type {(HTMLInputElement | null)[]} */ ([]));
 
   const [lookback, setLookback] = useState(/** @type {(typeof LOOKBACK_OPTIONS)[number]} */ ("6"));
-  const [customPeriods, setCustomPeriods] = useState("18");
+  const [customPeriods, setCustomPeriods] = useState(/** @type {number | null} */ (18));
   const [edits, setEdits] = useState(/** @type {CellEdits} */ ({}));
 
   // A different bill is a different set of slots.
@@ -96,11 +95,12 @@ export function BillHistoryEntry({ billId, autoFocus = false, onSaved, onDirtyCh
     if (!Number.isFinite(def)) return;
     appliedDefaultRef.current = true;
     setLookback(/** @type {(typeof LOOKBACK_OPTIONS)[number]} */ ([6, 12, 24].includes(def) ? String(def) : "custom"));
-    setCustomPeriods(String(def));
+    setCustomPeriods(def);
   }, [settingsQuery.data]);
 
-  const periods =
-    lookback === "custom" ? Math.min(MAX_PERIODS, Math.max(1, Math.floor(Number(customPeriods)) || 1)) : Number(lookback);
+  // A blank custom field asks for one period until a figure is typed — this
+  // is a view setting, not something that is saved.
+  const periods = lookback === "custom" ? Math.min(MAX_PERIODS, Math.max(1, customPeriods ?? 1)) : Number(lookback);
 
   const historyQuery = useQuery({
     queryKey: ["bill-history", billId, periods],
@@ -208,14 +208,12 @@ export function BillHistoryEntry({ billId, autoFocus = false, onSaved, onDirtyCh
           </FieldRow>
           {lookback === "custom" ? (
             <FieldRow label="Periods" htmlFor={`history-custom-${billId}`} className="w-28" hint={`Up to ${MAX_PERIODS}.`}>
-              <Input
+              <IntegerInput
                 id={`history-custom-${billId}`}
-                type="number"
-                min="1"
+                min={1}
                 max={MAX_PERIODS}
-                inputMode="numeric"
                 value={customPeriods}
-                onChange={(e) => setCustomPeriods(e.target.value)}
+                onChange={setCustomPeriods}
               />
             </FieldRow>
           ) : null}
@@ -256,27 +254,17 @@ export function BillHistoryEntry({ billId, autoFocus = false, onSaved, onDirtyCh
                 <p className="text-sm font-medium text-text">{slot.label}</p>
                 <p className="text-xs text-text-muted">{formatIsoDate(slot.dueDate, locale)}</p>
               </div>
-              <InputGroup className="h-11 w-40 shrink-0">
-                <InputGroupAddon>
-                  <InputGroupText>$</InputGroupText>
-                </InputGroupAddon>
-                <InputGroupInput
-                  ref={(el) => {
-                    inputRefs.current[i] = el;
-                  }}
-                  autoFocus={autoFocus && i === 0}
-                  type="number"
-                  step="0.01"
-                  inputMode="decimal"
-                  className="text-base"
-                  value={cellText(edits, slot.dueDate, slot.actualCents)}
-                  onChange={(e) => {
-                    const text = e.target.value;
-                    setEdits((prev) => ({ ...prev, [slot.dueDate]: text }));
-                  }}
-                  onKeyDown={(e) => handleKeyDown(e, i)}
-                />
-              </InputGroup>
+              <MoneyInput
+                ref={(el) => {
+                  inputRefs.current[i] = el;
+                }}
+                autoFocus={autoFocus && i === 0}
+                className="h-11 w-40 shrink-0"
+                inputClassName="text-base"
+                value={parseCents(cellText(edits, slot.dueDate, slot.actualCents))}
+                onChange={(cents) => setEdits((prev) => ({ ...prev, [slot.dueDate]: centsText(cents) }))}
+                onKeyDown={(e) => handleKeyDown(e, i)}
+              />
             </div>
           ))}
         </div>

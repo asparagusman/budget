@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { addDaysIso } from "@budget/engine";
 import {
   accounts,
@@ -7,12 +10,16 @@ import {
   balanceSnapshots,
   bills,
   invites,
+  settings,
   users,
   variantSchedule,
 } from "@budget/schema";
 import { eq, inArray } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { Hono } from "hono";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { createDashboardRoutes } from "../routes/dashboard.js";
 import { createReadApp, get } from "../test/app.js";
+import { BACKUP_STATUS_KEY, createBackup } from "./backup.js";
 import { createTestDb } from "../test/db.js";
 import { HOUSEHOLD_IDS, ON, seedHousehold, seedSettings } from "../test/household.js";
 import { summarizeVariableCosts } from "./variable-costs.js";
@@ -128,11 +135,16 @@ describe("loadDashboard, against the endpoints that own each figure", () => {
     expect(dashboard.allocation.resolvedLines).toEqual(computed.result.lines);
     expect(dashboard.allocation.unallocatedPerMonthCents).toBe(computed.result.unallocatedPerMonthCents);
     expect(dashboard.allocation.goodLifeFidelityCents).toBe(computed.result.goodLifeFidelityCents);
+    // The pool is the target less that shortfall, and is what the Leftover
+    // column says is left for non-essentials.
+    expect(dashboard.allocation.nonEssentialPoolPerMonthCents).toBe(
+      dashboard.variable.nonEssentialPerMonthCents - computed.result.goodLifeFidelityCents,
+    );
     expect(dashboard.allocation.overAllocation).toEqual(computed.result.overAllocation);
     expect(dashboard.allocation.overAllocation).toBeNull();
   });
 
-  it("reports the goals and the cover projection /goals computes", async () => {
+  it("reports the goals /goals computes", async () => {
     const goals = await get(app, `/goals?on=${ON}`);
     const active = goals.goals.filter((/** @type {any} */ g) => g.goal.status === "active");
 
@@ -146,13 +158,17 @@ describe("loadDashboard, against the endpoints that own each figure", () => {
       expect(dashboard.goals[i].targetCents).toBe(g.targetCents);
     }
 
-    const cover = active.find((/** @type {any} */ g) => g.goal.targetMode === "months_of_expenses");
-    expect(dashboard.mojo.goalId).toBe(cover.goal.id);
-    expect(dashboard.mojo.monthsCovered).toBe(cover.monthsCovered);
-    expect(dashboard.mojo.balanceCents).toBe(cover.currentBalanceCents);
-    // The burn the card divides by is the household summary's, not a second
-    // essentials total assembled here.
-    expect(dashboard.mojo.burnPerMonthCents).toBe(goals.summary.monthlyEssentialBurnCents);
+    // The emergency-fund card is gone, and its payload with it: the goal is the
+    // first row of the goals list.
+    expect(dashboard).not.toHaveProperty("mojo");
+  });
+
+  it("says whose bill each upcoming one is, and nothing for a shared one", async () => {
+    const owners = Object.fromEntries(
+      dashboard.bills.upcoming.map((/** @type {any} */ b) => [b.billId, b.ownerName]),
+    );
+    expect(owners[HOUSEHOLD_IDS.carInsurance]).toBe("Ada");
+    expect(owners[HOUSEHOLD_IDS.power]).toBeNull();
   });
 
   it("reports the net worth /net-worth computes over its own twelve months", async () => {
@@ -263,7 +279,6 @@ describe("loadDashboard, on a database with nothing in it", () => {
     expect(dashboard.cycle).toBeNull();
     expect(dashboard.variant.id).toBeNull();
     expect(dashboard.allocation).toBeNull();
-    expect(dashboard.mojo).toBeNull();
     expect(dashboard.goals).toEqual([]);
     expect(dashboard.accounts).toEqual([]);
   });
@@ -541,5 +556,72 @@ describe("loadDashboard, when the data itself is the problem", () => {
     expect(warning.message).toContain(`commits ${amount} a month more`);
     expect(warning.message).toContain("1 line goes below zero");
     expect(warning.href).toBe("/allocation");
+  });
+});
+
+describe("loadDashboard, on backups", () => {
+  /** @type {Db} */
+  let db;
+  /** @type {() => Promise<void>} */
+  let close;
+  /** @type {string} */
+  let dir;
+
+  beforeAll(async () => {
+    ({ db, close } = await createTestDb());
+    await seedSettings(db);
+  });
+
+  afterAll(async () => {
+    await close();
+  });
+
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "budget-dashboard-backups-"));
+    await db.delete(settings).where(eq(settings.key, BACKUP_STATUS_KEY));
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  async function backupWarnings() {
+    const app = new Hono().route("/dashboard", createDashboardRoutes({ db, backups: { dir } }));
+    const dashboard = await get(app, `/dashboard?on=${ON}`);
+    return dashboard.warnings.filter((/** @type {any} */ w) => w.code.startsWith("backup_"));
+  }
+
+  it("says when there is no automatic backup at all", async () => {
+    const warnings = await backupWarnings();
+    expect(warnings.map((/** @type {any} */ w) => w.code)).toEqual(["backup_overdue"]);
+    expect(warnings[0].href).toBe("/admin/backups");
+  });
+
+  it("says nothing once this week's backup exists", async () => {
+    await createBackup(db, { dir, appVersion: "test", kind: "weekly" });
+    expect(await backupWarnings()).toEqual([]);
+  });
+
+  it("names the age of the newest backup when it is overdue", async () => {
+    const nineDaysAgo = new Date(Date.now() - 9 * 24 * 60 * 60 * 1000);
+    await createBackup(db, { dir, appVersion: "test", kind: "weekly", now: nineDaysAgo });
+    const [warning] = await backupWarnings();
+    expect(warning.code).toBe("backup_overdue");
+    expect(warning.message).toContain("No backup in 9 days");
+  });
+
+  it("puts a failed attempt ahead of an overdue one, and says it once", async () => {
+    await db.insert(settings).values({
+      key: BACKUP_STATUS_KEY,
+      value: { at: new Date().toISOString(), kind: "weekly", ok: false, error: "ENOSPC: no space left on device" },
+    });
+    const warnings = await backupWarnings();
+    expect(warnings.map((/** @type {any} */ w) => w.code)).toEqual(["backup_failed"]);
+    expect(warnings[0].message).toContain("ENOSPC");
+  });
+
+  it("stays quiet where the app has no backup folder", async () => {
+    const dashboard = await get(createReadApp(db), `/dashboard?on=${ON}`);
+    expect(dashboard.warnings.some((/** @type {any} */ w) => w.code.startsWith("backup_"))).toBe(false);
   });
 });

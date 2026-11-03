@@ -8,7 +8,7 @@ web
 
 ## Users
 
-A single household: one operator who owns and edits the budget, plus one other household member. Both use it on desktop and on phone. Access is passkey-only, by invite. The operator is a person planning their own money, not a professional accountant.
+A single household: one operator who owns and edits the budget, plus one other household member. Both use it on desktop and on phone. Access is by device approval: a new device asks to join and a signed-in member approves it. The app is reached on the home network only, at http://budget.local. The operator is a person planning their own money, not a professional accountant.
 
 ## Product Purpose
 

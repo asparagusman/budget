@@ -14,7 +14,6 @@ import { Input } from "@/components/ui/input.jsx";
 import { readApiError } from "@/lib/api-error.js";
 import { api } from "@/lib/api.js";
 import { useAuth } from "@/lib/auth.jsx";
-import { browserSupportsWebAuthn, startRegistration, toErrorMessage, toJsonBody } from "@/lib/passkey.js";
 
 // Expired, consumed and unknown invites are three different problems for the
 // operator to solve (ask for a new one vs. re-check the link they were
@@ -63,36 +62,24 @@ export function InvitePage() {
   }, [code]);
 
   /** @param {import("react").FormEvent} [e] */
-  async function handleRegister(e) {
+  async function handleRedeem(e) {
     e?.preventDefault();
     setError(null);
-    if (!browserSupportsWebAuthn()) {
-      setError("This browser doesn't support passkeys.");
-      return;
-    }
     if (purpose === "new_user" && !displayName.trim()) {
-      setError("Enter a display name.");
+      setError("Enter your name.");
       return;
     }
     setBusy(true);
     try {
-      const optionsRes = await api.auth.register.options.$post({
-        json:
-          purpose === "new_user"
-            ? { inviteCode: code, displayName }
-            : { inviteCode: code },
+      const res = await api.auth.invite[":code"].redeem.$post({
+        param: { code },
+        json: purpose === "new_user" ? { displayName } : {},
       });
-      if (!optionsRes.ok) throw new Error(await readApiError(optionsRes));
-      const { flowId, options } = await optionsRes.json();
-      const response = await startRegistration({ optionsJSON: options });
-      const verifyRes = await api.auth.register.verify.$post({
-        json: { flowId, response: toJsonBody(response) },
-      });
-      if (!verifyRes.ok) throw new Error(await readApiError(verifyRes));
+      if (!res.ok) throw new Error(await readApiError(res));
       await refresh();
       navigate({ to: "/", replace: true });
     } catch (err) {
-      setError(toErrorMessage(err));
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
@@ -105,7 +92,7 @@ export function InvitePage() {
         <CardDescription>
           {status === "valid"
             ? purpose === "new_device"
-              ? "Add this device to your account."
+              ? "This link signs this device in to your account."
               : "You've been invited."
             : "Invite"}
         </CardDescription>
@@ -114,7 +101,7 @@ export function InvitePage() {
         {status === "loading" ? null : status !== "valid" ? (
           <p className="text-sm text-text-muted">{STATUS_MESSAGES[status]}</p>
         ) : (
-          <form onSubmit={handleRegister} className="flex flex-col gap-4">
+          <form onSubmit={handleRedeem} className="flex flex-col gap-4">
             {purpose === "new_user" ? (
               <FieldRow label="Your name" htmlFor="display-name">
                 <Input
@@ -128,7 +115,7 @@ export function InvitePage() {
             ) : null}
             {error ? <InlineError>{error}</InlineError> : null}
             <Button type="submit" disabled={busy}>
-              {busy ? "Setting up…" : "Create passkey"}
+              {busy ? "Signing in…" : "Sign in on this device"}
             </Button>
           </form>
         )}

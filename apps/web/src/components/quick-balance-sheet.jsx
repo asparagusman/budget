@@ -1,11 +1,10 @@
 import { useEffect, useState } from "react";
-import { toCents } from "@budget/engine";
 import { Button } from "@/components/ui/button.jsx";
-import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/components/ui/input-group.jsx";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select.jsx";
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet.jsx";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog.jsx";
 import { DatePicker } from "@/components/date-picker.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
+import { MoneyInput } from "@/components/money-input.jsx";
 import { InlineError } from "@/components/notice.jsx";
 import { todayIso } from "@/lib/dates.js";
 
@@ -21,6 +20,10 @@ import { todayIso } from "@/lib/dates.js";
  * whose balance is months old reports a progress figure that is quietly wrong
  * (phases/09-goals-projections.md "Palette registers ... Update balance").
  *
+ * A centred dialog like every other one-form editor in the app. It was a
+ * bottom sheet capped at `max-w-sm`, which on a desktop left a narrow, edgeless
+ * strip glued to the bottom of the screen.
+ *
  * @param {{
  *   open: boolean,
  *   onOpenChange: (open: boolean) => void,
@@ -33,7 +36,7 @@ import { todayIso } from "@/lib/dates.js";
 export function QuickBalanceSheet({ open, onOpenChange, accounts, accountId, submitting, onSubmit }) {
   const pickable = accounts.filter((a) => a.type !== "external");
   const [selectedId, setSelectedId] = useState(/** @type {string | null} */ (null));
-  const [amount, setAmount] = useState("");
+  const [amountCents, setAmountCents] = useState(/** @type {number | null} */ (null));
   const [asAt, setAsAt] = useState(todayIso());
   const [error, setError] = useState(/** @type {string | null} */ (null));
 
@@ -42,7 +45,7 @@ export function QuickBalanceSheet({ open, onOpenChange, accounts, accountId, sub
     const initialId = accountId ?? pickable[0]?.id ?? null;
     const initialAccount = pickable.find((a) => a.id === initialId) ?? null;
     setSelectedId(initialId);
-    setAmount(initialAccount?.latestBalance ? String(initialAccount.latestBalance.amountCents / 100) : "");
+    setAmountCents(initialAccount?.latestBalance?.amountCents ?? null);
     setAsAt(todayIso());
     setError(null);
     // Re-running this when `pickable` changes would blow away whatever the
@@ -61,12 +64,12 @@ export function QuickBalanceSheet({ open, onOpenChange, accounts, accountId, sub
       setError("Choose an account.");
       return;
     }
-    if (amount.trim() === "") {
+    if (amountCents === null) {
       setError("Enter a balance.");
       return;
     }
     try {
-      await onSubmit(selectedId, { asAt, amountCents: toCents(Number(amount)) });
+      await onSubmit(selectedId, { asAt, amountCents });
       onOpenChange(false);
     } catch (err) {
       setError(/** @type {Error} */ (err).message);
@@ -74,15 +77,15 @@ export function QuickBalanceSheet({ open, onOpenChange, accounts, accountId, sub
   }
 
   return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent side="bottom" className="mx-auto w-full sm:max-w-sm">
-        <SheetHeader>
-          <SheetTitle>Update balance</SheetTitle>
-          <SheetDescription>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Update balance</DialogTitle>
+          <DialogDescription>
             {selected ? selected.name : "Pick an account, then enter its current balance."}
-          </SheetDescription>
-        </SheetHeader>
-        <form onSubmit={handleSubmit} className="flex flex-col gap-4 px-4 pb-6">
+          </DialogDescription>
+        </DialogHeader>
+        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
           {!accountId ? (
             <FieldRow label="Account" htmlFor="balance-account">
               <Select
@@ -90,7 +93,7 @@ export function QuickBalanceSheet({ open, onOpenChange, accounts, accountId, sub
                 onValueChange={(value) => {
                   setSelectedId(value);
                   const acc = pickable.find((a) => a.id === value);
-                  setAmount(acc?.latestBalance ? String(acc.latestBalance.amountCents / 100) : "");
+                  setAmountCents(acc?.latestBalance?.amountCents ?? null);
                 }}
               >
                 <SelectTrigger id="balance-account" className="w-full">
@@ -107,20 +110,7 @@ export function QuickBalanceSheet({ open, onOpenChange, accounts, accountId, sub
             </FieldRow>
           ) : null}
           <FieldRow label="Balance" htmlFor="balance-amount" required>
-            <InputGroup>
-              <InputGroupAddon>
-                <InputGroupText>$</InputGroupText>
-              </InputGroupAddon>
-              <InputGroupInput
-                id="balance-amount"
-                type="number"
-                step="0.01"
-                inputMode="decimal"
-                autoFocus
-                value={amount}
-                onChange={(e) => setAmount(e.target.value)}
-              />
-            </InputGroup>
+            <MoneyInput id="balance-amount" allowNegative autoFocus value={amountCents} onChange={setAmountCents} />
           </FieldRow>
           <FieldRow label="As at" htmlFor="balance-as-at">
             <DatePicker id="balance-as-at" value={asAt} onChange={setAsAt} />
@@ -130,7 +120,7 @@ export function QuickBalanceSheet({ open, onOpenChange, accounts, accountId, sub
             {submitting ? "Saving…" : "Update balance"}
           </Button>
         </form>
-      </SheetContent>
-    </Sheet>
+      </DialogContent>
+    </Dialog>
   );
 }

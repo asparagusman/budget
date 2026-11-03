@@ -20,8 +20,6 @@ import { ListSkeleton } from "@/components/loading.jsx";
 import { Money } from "@/components/money.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
 import { QueryError } from "@/components/query-error.jsx";
-import { api } from "@/lib/api.js";
-import { readApiError } from "@/lib/api-error.js";
 import { registerCommands } from "@/lib/commands.js";
 import { MONTH_LABELS } from "@/lib/constants.js";
 import { formatMoney } from "@/lib/format-money.js";
@@ -29,6 +27,7 @@ import { useSettings } from "@/lib/settings.jsx";
 import { getDateFormat, todayIso } from "@/lib/dates.js";
 import { LG, useMediaQuery } from "@/lib/use-media-query.js";
 import { cn } from "@/lib/utils.js";
+import { billsQueryOptions, calendarInstancesQueryOptions, paySchedulesQueryOptions } from "@/lib/queries.js";
 
 /** @import { Cents } from "@budget/engine" */
 /** @typedef {{ billId: string, dueDate: string, expectedCents: Cents, actualCents: Cents | null, isOverride: boolean, isOrphan: boolean }} MergedInstance */
@@ -171,32 +170,11 @@ export function CalendarPage() {
 
   const yearWindow = useMemo(() => ({ from: `${year}-01-01`, to: `${year + 1}-01-01` }), [year]);
 
-  const paySchedulesQuery = useQuery({
-    queryKey: ["pay-schedules"],
-    queryFn: async () => {
-      const res = await api["pay-schedules"].$get();
-      if (!res.ok) throw new Error(await readApiError(res));
-      return (await res.json()).paySchedules;
-    },
-  });
+  const paySchedulesQuery = useQuery(paySchedulesQueryOptions());
 
-  const billsQuery = useQuery({
-    queryKey: ["bills"],
-    queryFn: async () => {
-      const res = await api.bills.$get();
-      if (!res.ok) throw new Error(await readApiError(res));
-      return /** @type {BillRef[]} */ ((await res.json()).bills);
-    },
-  });
+  const billsQuery = useQuery(billsQueryOptions());
 
-  const instancesQuery = useQuery({
-    queryKey: ["bill-instances", "calendar", year],
-    queryFn: async () => {
-      const res = await api["bill-instances"].$get({ query: yearWindow });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return /** @type {MergedInstance[]} */ ((await res.json()).instances);
-    },
-  });
+  const instancesQuery = useQuery(calendarInstancesQueryOptions(year));
 
   const billsById = useMemo(() => new Map((billsQuery.data ?? []).map((b) => [b.id, b])), [billsQuery.data]);
   const instancesByDate = useMemo(() => {

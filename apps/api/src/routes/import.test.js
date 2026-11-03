@@ -1,7 +1,11 @@
 import { bills, importCommitFormSchema, importPreviewFormSchema, MAX_IMPORT_UPLOAD_BYTES, people } from "@budget/schema";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { listBackups } from "../lib/backup.js";
 import { makeFixtureWorkbook } from "../lib/import/__fixtures__/make-workbook.js";
 import { createTestDb } from "../test/db.js";
 import { seedSettings } from "../test/household.js";
@@ -33,6 +37,8 @@ let db;
 let close;
 /** @type {import("hono").Hono} */
 let app;
+/** @type {string} */
+let backupDir;
 
 beforeAll(async () => {
   workbook = await makeFixtureWorkbook();
@@ -41,11 +47,13 @@ beforeAll(async () => {
 beforeEach(async () => {
   ({ db, close } = await createTestDb());
   await seedSettings(db);
-  app = new Hono().route("/import", createImportRoutes({ db }));
+  backupDir = await mkdtemp(path.join(tmpdir(), "budget-import-"));
+  app = new Hono().route("/import", createImportRoutes({ db, backups: { dir: backupDir, appVersion: "test" } }));
 });
 
 afterEach(async () => {
   await close();
+  await rm(backupDir, { recursive: true, force: true });
 });
 
 const XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
@@ -198,6 +206,15 @@ describe("POST /import/commit", () => {
     // say — it holds no pay schedule at all.
     expect(body.hasPrimaryPaySchedule).toBe(false);
     expect(body.nextSteps.length).toBeGreaterThan(0);
+  });
+
+  it("takes a before-import backup first, and not for a commit it refuses", async () => {
+    await commit({ anchorDate: "yesterday" });
+    expect(await listBackups(backupDir)).toEqual([]);
+
+    await commit({ anchorDate: "2026-03-13", selected: allSelected(), destinations: allDestinations(), planVariants: {} });
+    const backups = await listBackups(backupDir);
+    expect(backups.map((b) => b.kind)).toEqual(["before-import"]);
   });
 
   it("creates only the accounts it was asked to, by name", async () => {

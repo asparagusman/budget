@@ -2,8 +2,8 @@
 //
 // Auth state is fetched once and cached for the life of the page (see
 // auth.jsx), and nothing re-asks it while the operator works. A session that
-// hard-expires after 30 days, or is revoked from another device — removing a
-// passkey or deactivating a user now ends sessions server-side — used to leave
+// runs out, or is revoked from another device — signing a device out or
+// deactivating a user ends sessions server-side — used to leave
 // every screen rendering its error or empty state instead of the sign-in
 // screen, with nothing on it saying why. One handler, at the transport, turns
 // any 401 into "you're signed out" exactly once, however many queries were in
@@ -53,8 +53,7 @@ function apiRelativePath(input, apiBase, origin) {
  * `fetch`, reporting a 401 from anything outside `/auth/*`.
  *
  * `/auth/*` is excluded because a 401 there is an answer, not an expiry: a
- * failed passkey assertion, a wrong recovery password, the signed-out probe of
- * `/auth/state` itself. The response is always returned untouched — the
+ * wrong recovery password, the signed-out probe of `/auth/state` itself. The response is always returned untouched — the
  * caller still sees its own failure — so this only adds the redirect, never
  * changes what a request resolves to.
  *

@@ -1,18 +1,18 @@
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
-
-// http:// is fine here and nowhere else: browsers treat these as secure
-// contexts for WebAuthn, and local dev runs on http://localhost:5173.
-const LOCAL_HOSTNAMES = new Set(["localhost", "127.0.0.1"]);
 
 /**
  * Why `value` can't be PUBLIC_ORIGIN, or null if it can.
  *
- * Every passkey is bound to this origin's hostname (the WebAuthn RP ID —
- * see lib/webauthn.js), and a near-miss doesn't fail at startup on its own:
- * it fails at the passkey prompt, with a browser error that names nothing.
- * These are the near-misses that actually happen. A trailing slash or an
- * explicit default port isn't one of them — the value is normalised to the
- * bare origin below, which is what the browser compares against anyway.
+ * It is the address the household types — `http://budget.local` — and CORS
+ * and the invite CLI's links are built from it, so a near-miss shows up as
+ * requests the browser refuses or links that go nowhere. These are the
+ * near-misses that actually happen. A trailing slash or an explicit default
+ * port isn't one of them — the value is normalised to the bare origin below,
+ * which is what the browser compares against anyway.
+ *
+ * Plain http:// is allowed anywhere: the app is reached only on the home
+ * network, and its cookies follow the scheme (lib/session.js).
  *
  * @param {string} value
  */
@@ -24,8 +24,8 @@ export function publicOriginProblem(value) {
   } catch {
     return "is not a URL";
   }
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && LOCAL_HOSTNAMES.has(url.hostname))) {
-    return "must be https:// (http:// only for localhost or 127.0.0.1)";
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    return "must start with http:// or https://";
   }
   if (url.pathname !== "/" || url.search !== "" || url.hash !== "") {
     return "must be an origin only, with no path, query or #fragment";
@@ -34,7 +34,7 @@ export function publicOriginProblem(value) {
     return "must not contain a username or password";
   }
   if (url.hostname.endsWith(".")) {
-    return "must not end in a dot (tailscale's DNSName does; drop it)";
+    return "must not end in a dot";
   }
   return null;
 }
@@ -64,6 +64,15 @@ export const envSchema = z.object({
   // a `pnpm dev` API has no build to name, and refusing to start over a
   // missing version string would be absurd.
   APP_VERSION: z.string().min(1).default("dev"),
+  // Where backups are written (lib/backup.js). The api container sets this to
+  // /backups, bind-mounted from infra/backups/. The default is that same
+  // folder, so `pnpm dev` keeps its backups beside the compose ones; it is
+  // resolved from this file's location, which only means anything when running
+  // from source — a built image always has the variable set.
+  BACKUP_DIR: z
+    .string()
+    .min(1)
+    .default(() => fileURLToPath(new URL("../../../infra/backups", import.meta.url))),
 });
 
 /** @typedef {z.infer<typeof envSchema>} Env */

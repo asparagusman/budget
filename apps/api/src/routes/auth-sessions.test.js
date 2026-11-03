@@ -1,38 +1,27 @@
 import { mustAt } from "@budget/engine";
-import { auditLog, credentials, invites, sessions, users } from "@budget/schema";
-import { verifyAuthenticationResponse, verifyRegistrationResponse } from "@simplewebauthn/server";
+import { auditLog, deviceRequests, invites, sessions, users } from "@budget/schema";
 import { and, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createSession, SESSION_COOKIE } from "../lib/session.js";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { DEVICE_REQUEST_COOKIE, MAX_PENDING_DEVICE_REQUESTS } from "../lib/device-request.js";
+import { createSession, SESSION_COOKIE, setSecureCookies } from "../lib/session.js";
 import { requireAuth } from "../middleware/auth.js";
 import { createTestDb } from "../test/db.js";
 import { createAuthRoutes } from "./auth.js";
-import { createCredentialsRoutes } from "./credentials.js";
+import { createDeviceRequestsRoutes } from "./device-requests.js";
 import { createInvitesRoutes } from "./invites.js";
 import { createSessionsRoutes } from "./sessions.js";
 import { createUsersRoutes } from "./users.js";
 
 /** @import { Db } from "@budget/schema" */
 
-// Who can still get in after the household changes its mind: a deactivated
-// user, a removed passkey, a registration that half-happened, an invite
-// opened twice. Each of these was a way to stay signed in, or to be locked
-// out, that the screens said could not happen.
-//
-// The WebAuthn verify calls are mocked. What they check (signatures,
-// attestation) is the library's job and needs a real authenticator; what
-// these tests check is what the routes DO with a verified ceremony, and what
-// they ask the library to require. Options generation stays real.
+// Who can get in, and who can still get in after the household changes its
+// mind: the first device, a device someone approved, a link opened twice, a
+// deactivated user, a device that was signed out. Each of these was a way to
+// stay signed in, or to be locked out, that the screens say cannot happen.
 
-vi.mock(import("@simplewebauthn/server"), async (importOriginal) => ({
-  ...(await importOriginal()),
-  verifyRegistrationResponse: vi.fn(),
-  verifyAuthenticationResponse: vi.fn(),
-}));
-
-// A test file fires far more ceremonies a minute than any person could, and
-// the limiter is not what is under test here.
+// A test file asks to join far more often a minute than any person could,
+// and the limiter is not what is under test here.
 vi.mock(import("../lib/rate-limit.js"), async (importOriginal) => {
   /** @type {import("hono").MiddlewareHandler} */
   const passThrough = async (_c, next) => {
@@ -54,10 +43,10 @@ function createApp() {
   const guarded = new Hono();
   guarded.use("*", requireAuth(db));
   return guarded
-    .route("/auth", createAuthRoutes({ db, env: /** @type {any} */ ({ PUBLIC_ORIGIN: "https://budget.test" }) }))
+    .route("/auth", createAuthRoutes({ db, env: /** @type {any} */ ({ PUBLIC_ORIGIN: "http://budget.local" }) }))
     .route("/users", createUsersRoutes({ db }))
     .route("/invites", createInvitesRoutes({ db }))
-    .route("/credentials", createCredentialsRoutes({ db }))
+    .route("/device-requests", createDeviceRequestsRoutes({ db }))
     .route("/sessions", createSessionsRoutes({ db }))
     .get("/dashboard", (c) => c.json({ ok: true }));
 }
@@ -74,20 +63,27 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await db.execute(sql`truncate table users, sessions, credentials, invites, audit_log cascade`);
-  vi.mocked(verifyRegistrationResponse).mockReset();
-  vi.mocked(verifyAuthenticationResponse).mockReset();
+  await db.execute(sql`truncate table users, sessions, device_requests, invites, audit_log cascade`);
+});
+
+afterEach(() => {
+  setSecureCookies(true);
 });
 
 /**
  * @param {string} path
- * @param {{ method?: string, token?: string, json?: unknown }} [options]
+ * @param {{ method?: string, token?: string, requestToken?: string, json?: unknown }} [options]
  */
-function request(path, { method = "GET", token, json } = {}) {
+function request(path, { method = "GET", token, requestToken, json } = {}) {
+  const cookies = [
+    ...(token ? [`${SESSION_COOKIE}=${token}`] : []),
+    ...(requestToken ? [`${DEVICE_REQUEST_COOKIE}=${requestToken}`] : []),
+  ];
   return app.request(path, {
     method,
     headers: {
-      ...(token ? { cookie: `${SESSION_COOKIE}=${token}` } : {}),
+      "user-agent": "Mozilla/5.0 (iPhone)",
+      ...(cookies.length > 0 ? { cookie: cookies.join("; ") } : {}),
       ...(json === undefined ? {} : { "content-type": "application/json" }),
     },
     body: json === undefined ? undefined : JSON.stringify(json),
@@ -97,9 +93,20 @@ function request(path, { method = "GET", token, json } = {}) {
 /** @param {Response} res @returns {Promise<any>} */
 const body = (res) => res.json();
 
+/**
+ * The value a response set for `name`, or null when it set none (or cleared it).
+ *
+ * @param {Response} res
+ * @param {string} name
+ */
+function cookieValue(res, name) {
+  const value = new RegExp(`${name}=([^;]*)`).exec(res.headers.get("set-cookie") ?? "")?.[1];
+  return value ? value : null;
+}
+
 /** @param {Response} res */
-function cookieToken(res) {
-  const token = new RegExp(`${SESSION_COOKIE}=([^;]+)`).exec(res.headers.get("set-cookie") ?? "")?.[1];
+function sessionToken(res) {
+  const token = cookieValue(res, SESSION_COOKIE);
   if (!token) throw new Error("No session cookie was set.");
   return token;
 }
@@ -109,62 +116,46 @@ async function addUser(displayName, { isActive = true } = {}) {
   return mustAt(await db.insert(users).values({ displayName, isActive }).returning(), 0, "user");
 }
 
-/** @param {string} userId @param {string} credentialId */
-async function addCredential(userId, credentialId) {
-  const rows = await db
-    .insert(credentials)
-    .values({ userId, credentialId, publicKey: Buffer.from([1, 2, 3]), deviceName: "Phone" })
-    .returning();
-  return mustAt(rows, 0, "credential");
-}
-
 /**
  * @param {string} userId
- * @param {"passkey" | "recovery_password"} [authMethod]
+ * @param {"device" | "recovery_password"} [authMethod]
  */
-async function signIn(userId, authMethod = "passkey") {
-  const { token, session } = await createSession(db, { userId, userAgent: "test", authMethod });
+async function signIn(userId, authMethod = "device") {
+  const { token, session } = await createSession(db, {
+    userId,
+    userAgent: "test",
+    deviceName: "Laptop",
+    authMethod,
+  });
   return { token, sessionId: session.id };
 }
 
 /** @param {string} token */
 const canReachApp = async (token) => (await request("/dashboard", { token })).status === 200;
 
-/** @param {Record<string, unknown>} json */
-async function registerOptions(json) {
-  const res = await request("/auth/register/options", { method: "POST", json });
+/**
+ * A signed-out device asking to join. Returns its request cookie and what it
+ * was shown.
+ *
+ * @param {string} [deviceName]
+ */
+async function askToJoin(deviceName = "Ben's phone") {
+  const res = await request("/auth/device-requests", { method: "POST", json: { deviceName } });
   expect(res.status).toBe(200);
-  return body(res);
+  const requestToken = cookieValue(res, DEVICE_REQUEST_COOKIE);
+  if (!requestToken) throw new Error("No device request cookie was set.");
+  return { requestToken, request: (await body(res)).request };
 }
+
+/** @param {string} requestToken */
+const poll = (requestToken) => request("/auth/device-requests/current", { requestToken });
 
 /**
- * Finishes a registration ceremony as though the authenticator produced
- * `credentialId`. `counter` exists to break the credential insert on purpose.
- *
- * @param {string} flowId
- * @param {string} credentialId
- * @param {number} [counter]
+ * @param {string} token
+ * @param {string} id
+ * @param {{ userId: string } | { newUserDisplayName: string }} json
  */
-function registerVerify(flowId, credentialId, counter = 0) {
-  vi.mocked(verifyRegistrationResponse).mockResolvedValueOnce(
-    /** @type {any} */ ({
-      verified: true,
-      registrationInfo: {
-        credential: { id: credentialId, publicKey: new Uint8Array([1, 2, 3]), counter, transports: ["internal"] },
-      },
-    }),
-  );
-  return request("/auth/register/verify", { method: "POST", json: { flowId, response: { id: credentialId } } });
-}
-
-/** @param {string} credentialId */
-async function login(credentialId) {
-  const { flowId } = await body(await request("/auth/login/options", { method: "POST" }));
-  vi.mocked(verifyAuthenticationResponse).mockResolvedValueOnce(
-    /** @type {any} */ ({ verified: true, authenticationInfo: { newCounter: 1 } }),
-  );
-  return request("/auth/login/verify", { method: "POST", json: { flowId, response: { id: credentialId } } });
-}
+const approve = (token, id, json) => request(`/device-requests/${id}/approve`, { method: "POST", token, json });
 
 /**
  * @param {string} token
@@ -174,100 +165,250 @@ function mintInvite(token, json) {
   return request("/invites", { method: "POST", token, json });
 }
 
+/**
+ * @param {string} code
+ * @param {{ displayName?: string, deviceName?: string }} [json]
+ */
+const redeem = (code, json = {}) => request(`/auth/invite/${code}/redeem`, { method: "POST", json });
+
 /** @param {string} userId */
 const sessionsOf = (userId) => db.select().from(sessions).where(eq(sessions.userId, userId));
 
-describe("user verification", () => {
-  it("is asked for as required, and verified as required, at registration and sign-in", async () => {
-    // Asking for "preferred" while the library verifies "required" is how a
-    // security key with no PIN got as far as /verify and then failed with
-    // nothing more useful than "could not verify".
-    const { flowId, options } = await registerOptions({ displayName: "Ada" });
-    expect(options.authenticatorSelection.userVerification).toBe("required");
-    expect((await registerVerify(flowId, "cred-ada")).status).toBe(200);
-    expect(verifyRegistrationResponse).toHaveBeenCalledWith(
-      expect.objectContaining({ requireUserVerification: true }),
-    );
-
-    const loginOptions = await body(await request("/auth/login/options", { method: "POST" }));
-    expect(loginOptions.options.userVerification).toBe("required");
-    expect((await login("cred-ada")).status).toBe(200);
-    expect(verifyAuthenticationResponse).toHaveBeenCalledWith(
-      expect.objectContaining({ requireUserVerification: true }),
-    );
-  });
-});
-
 describe("bootstrap", () => {
-  it("leaves the household set-up-able when the passkey fails to save", async () => {
-    const { flowId } = await registerOptions({ displayName: "Ada" });
-    // A counter that is not an integer is refused by the bigint column, so
-    // the credential insert fails after the user insert has run.
-    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
-    expect((await registerVerify(flowId, "cred-ada", 1.5)).status).toBe(500);
-    quiet.mockRestore();
+  it("signs the first user in on this device, and closes for good", async () => {
+    const res = await request("/auth/bootstrap", { method: "POST", json: { displayName: "Ada" } });
+    expect(res.status).toBe(200);
+    expect(await canReachApp(sessionToken(res))).toBe(true);
 
-    // Before: a user with no passkey, which closed bootstrap and let nobody
-    // in. Now the user row went with the credential.
-    expect(await db.$count(users)).toBe(0);
-    expect(await db.$count(sessions)).toBe(0);
-    expect((await body(await request("/auth/state"))).needsBootstrap).toBe(true);
+    const [session] = await db.select().from(sessions);
+    expect(session).toMatchObject({ authMethod: "device", deviceName: "iPhone" });
+    expect((await body(await request("/auth/state"))).needsBootstrap).toBe(false);
 
-    const retry = await registerOptions({ displayName: "Ada" });
-    expect((await registerVerify(retry.flowId, "cred-ada")).status).toBe(200);
-    expect(await db.$count(users)).toBe(1);
-    expect(await db.$count(credentials)).toBe(1);
-  });
-
-  it("lets only the first of two bootstrap ceremonies finish", async () => {
-    const first = await registerOptions({ displayName: "Ada" });
-    const second = await registerOptions({ displayName: "Mallory" });
-
-    expect((await registerVerify(first.flowId, "cred-ada")).status).toBe(200);
-    const late = await registerVerify(second.flowId, "cred-mallory");
+    const late = await request("/auth/bootstrap", { method: "POST", json: { displayName: "Mallory" } });
     expect(late.status).toBe(400);
     expect((await body(late)).error.code).toBe("bootstrap_closed");
     expect(late.headers.get("set-cookie")).toBeNull();
-
     expect((await db.select().from(users)).map((u) => u.displayName)).toEqual(["Ada"]);
-    expect(await db.$count(credentials)).toBe(1);
+  });
+
+  it("lets only one of two simultaneous first visitors become the first user", async () => {
+    const results = await Promise.all([
+      request("/auth/bootstrap", { method: "POST", json: { displayName: "Ada" } }),
+      request("/auth/bootstrap", { method: "POST", json: { displayName: "Mallory" } }),
+    ]);
+    expect(results.map((r) => r.status).sort()).toEqual([200, 400]);
+    expect(await db.$count(users)).toBe(1);
+    expect(await db.$count(sessions)).toBe(1);
+  });
+
+  it("uses plain cookies when the household's address is plain http", async () => {
+    setSecureCookies(false);
+    const res = await request("/auth/bootstrap", { method: "POST", json: { displayName: "Ada" } });
+    expect(res.headers.get("set-cookie")).not.toMatch(/Secure/i);
+    expect(res.headers.get("set-cookie")).toMatch(/HttpOnly/i);
+  });
+});
+
+describe("asking to join", () => {
+  it("has no one to ask before the household is set up", async () => {
+    const res = await request("/auth/device-requests", { method: "POST", json: { deviceName: "Phone" } });
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("needs_bootstrap");
+  });
+
+  it("waits, shows its code to members, and signs in as whoever an approver chose", async () => {
+    const ada = await addUser("Ada");
+    const ben = await addUser("Ben");
+    const admin = await signIn(ada.id);
+    const { requestToken, request: shown } = await askToJoin("Ben's phone");
+    expect(shown.code).toMatch(/^[A-Z2-9]{4}$/);
+
+    // Waiting: nothing yet, and nothing for anyone signed out to see.
+    expect(await body(await poll(requestToken))).toMatchObject({ status: "pending", request: { code: shown.code } });
+    expect((await request("/device-requests")).status).toBe(401);
+    const listed = await body(await request("/device-requests", { token: admin.token }));
+    expect(listed.requests).toEqual([expect.objectContaining({ id: shown.id, code: shown.code, deviceName: "Ben's phone" })]);
+
+    expect((await approve(admin.token, shown.id, { userId: ben.id })).status).toBe(200);
+    expect((await body(await request("/device-requests", { token: admin.token }))).requests).toEqual([]);
+
+    const collected = await poll(requestToken);
+    expect(await body(collected)).toEqual({
+      status: "approved",
+      user: { id: ben.id, displayName: "Ben", email: null },
+    });
+    const token = sessionToken(collected);
+    expect((await body(await request("/auth/state", { token }))).user.id).toBe(ben.id);
+    expect(await sessionsOf(ben.id)).toEqual([expect.objectContaining({ deviceName: "Ben's phone", authMethod: "device" })]);
+
+    // Collected once: the request is gone, and so is its cookie.
+    expect(await db.$count(deviceRequests)).toBe(0);
+    expect(cookieValue(collected, DEVICE_REQUEST_COOKIE)).toBeNull();
+    expect(await body(await poll(requestToken))).toEqual({ status: "none" });
+    expect(await sessionsOf(ben.id)).toHaveLength(1);
+
+    const [entry] = await db.select().from(auditLog).where(eq(auditLog.action, "device_request.approve"));
+    expect(entry).toMatchObject({ actorId: ada.id, metadata: { userId: ben.id, deviceName: "Ben's phone" } });
+  });
+
+  it("can bring someone new into the household", async () => {
+    const ada = await addUser("Ada");
+    const admin = await signIn(ada.id);
+    const { requestToken, request: shown } = await askToJoin("Grace's phone");
+
+    expect((await approve(admin.token, shown.id, { newUserDisplayName: "Grace" })).status).toBe(200);
+    const collected = await body(await poll(requestToken));
+    expect(collected.user.displayName).toBe("Grace");
+    expect((await db.select().from(users)).map((u) => u.displayName).sort()).toEqual(["Ada", "Grace"]);
+  });
+
+  it("is told so when it is turned down", async () => {
+    const ada = await addUser("Ada");
+    const admin = await signIn(ada.id);
+    const { requestToken, request: shown } = await askToJoin();
+
+    expect((await request(`/device-requests/${shown.id}`, { method: "DELETE", token: admin.token })).status).toBe(200);
+    expect(await body(await poll(requestToken))).toEqual({ status: "none" });
+    expect(await db.$count(sessions)).toBe(1);
+    // And a refused request can't be approved after the fact.
+    expect((await approve(admin.token, shown.id, { userId: ada.id })).status).toBe(404);
+  });
+
+  it("cannot be approved twice, or once it has run out", async () => {
+    const ada = await addUser("Ada");
+    const admin = await signIn(ada.id);
+    const first = await askToJoin();
+    expect((await approve(admin.token, first.request.id, { userId: ada.id })).status).toBe(200);
+    expect((await approve(admin.token, first.request.id, { newUserDisplayName: "Eve" })).status).toBe(404);
+    // The second approval's new user was rolled back with it.
+    expect(await db.$count(users)).toBe(1);
+
+    const stale = await askToJoin("Old tablet");
+    await db
+      .update(deviceRequests)
+      .set({ expiresAt: new Date(Date.now() - 1000) })
+      .where(eq(deviceRequests.id, stale.request.id));
+    expect((await approve(admin.token, stale.request.id, { userId: ada.id })).status).toBe(404);
+    expect(await body(await poll(stale.requestToken))).toEqual({ status: "none" });
+  });
+
+  it("replaces this browser's earlier request when it asks again", async () => {
+    await addUser("Ada");
+    const first = await askToJoin("Phone");
+    const res = await request("/auth/device-requests", {
+      method: "POST",
+      requestToken: first.requestToken,
+      json: { deviceName: "Ben's phone" },
+    });
+    expect(res.status).toBe(200);
+    expect((await db.select().from(deviceRequests)).map((r) => r.deviceName)).toEqual(["Ben's phone"]);
+  });
+
+  it("caps how many devices can wait at once", async () => {
+    await addUser("Ada");
+    for (let i = 0; i < MAX_PENDING_DEVICE_REQUESTS; i += 1) await askToJoin(`Device ${i}`);
+    const res = await request("/auth/device-requests", { method: "POST", json: { deviceName: "One more" } });
+    expect(res.status).toBe(429);
+    expect((await body(res)).error.code).toBe("too_many_requests");
+  });
+
+  it("will not sign a device in for a deactivated member", async () => {
+    const ada = await addUser("Ada");
+    const ben = await addUser("Ben");
+    const admin = await signIn(ada.id);
+
+    const early = await askToJoin();
+    await db.update(users).set({ isActive: false }).where(eq(users.id, ben.id));
+    const refused = await approve(admin.token, early.request.id, { userId: ben.id });
+    expect(refused.status).toBe(400);
+    expect((await body(refused)).error.code).toBe("inactive_user");
+
+    // Approved first, deactivated before the device collected it.
+    await db.update(users).set({ isActive: true }).where(eq(users.id, ben.id));
+    await approve(admin.token, early.request.id, { userId: ben.id });
+    await request(`/users/${ben.id}`, { method: "PATCH", token: admin.token, json: { isActive: false } });
+    const collected = await poll(early.requestToken);
+    expect(await body(collected)).toEqual({ status: "none" });
+    expect(collected.headers.get("set-cookie") ?? "").not.toContain(`${SESSION_COOKIE}=`);
+    expect(await sessionsOf(ben.id)).toHaveLength(0);
+  });
+
+  it("can be answered from a recovery session", async () => {
+    const ada = await addUser("Ada");
+    const recovery = await signIn(ada.id, "recovery_password");
+    const { requestToken, request: shown } = await askToJoin("New phone");
+
+    expect((await approve(recovery.token, shown.id, { userId: ada.id })).status).toBe(200);
+    const token = sessionToken(await poll(requestToken));
+    expect(await canReachApp(token)).toBe(true);
   });
 });
 
 describe("redeeming an invite", () => {
-  it("registers once, however many times the link was opened", async () => {
+  it("signs in once, however many times the link was opened", async () => {
     const ada = await addUser("Ada");
-    const { token } = await signIn(ada.id);
+    const { token } = await signIn(ada.id, "recovery_password");
     const { invite } = await body(await mintInvite(token, { purpose: "new_user" }));
 
-    // Both ceremonies start while the invite is still good.
-    const first = await registerOptions({ inviteCode: invite.code, displayName: "Ben" });
-    const second = await registerOptions({ inviteCode: invite.code, displayName: "Eve" });
+    const first = await redeem(invite.code, { displayName: "Ben" });
+    expect(first.status).toBe(200);
+    expect(await canReachApp(sessionToken(first))).toBe(true);
 
-    expect((await registerVerify(first.flowId, "cred-ben")).status).toBe(200);
-    const late = await registerVerify(second.flowId, "cred-eve");
+    const late = await redeem(invite.code, { displayName: "Eve" });
     expect(late.status).toBe(400);
     expect((await body(late)).error).toEqual({
       code: "invalid_invite",
       message: "This invite is invalid, expired or already used.",
     });
-
     expect((await db.select().from(users)).map((u) => u.displayName).sort()).toEqual(["Ada", "Ben"]);
-    expect(await db.$count(credentials)).toBe(1);
   });
 
-  it("refuses one that expired mid-ceremony, and writes nothing", async () => {
+  it("refuses one that has expired, and writes nothing", async () => {
     const ada = await addUser("Ada");
     const { token } = await signIn(ada.id);
     const { invite } = await body(await mintInvite(token, { purpose: "new_user" }));
-    const { flowId } = await registerOptions({ inviteCode: invite.code, displayName: "Ben" });
-
     await db.update(invites).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(invites.id, invite.id));
 
-    expect((await registerVerify(flowId, "cred-ben")).status).toBe(400);
+    expect((await redeem(invite.code, { displayName: "Ben" })).status).toBe(400);
     expect(await db.$count(users)).toBe(1);
-    expect(await db.$count(credentials)).toBe(0);
     expect(await db.$count(sessions)).toBe(1);
+  });
+
+  it("signs a new_device link in as the member it names", async () => {
+    const ada = await addUser("Ada");
+    const ben = await addUser("Ben");
+    const { token } = await signIn(ada.id);
+    const { invite } = await body(await mintInvite(token, { purpose: "new_device", targetUserId: ben.id }));
+
+    const res = await redeem(invite.code, { deviceName: "Ben's tablet" });
+    expect(res.status).toBe(200);
+    expect((await body(res)).user.id).toBe(ben.id);
+    expect(await sessionsOf(ben.id)).toEqual([expect.objectContaining({ deviceName: "Ben's tablet" })]);
+  });
+
+  it("signs nobody in for a deactivated member, and does not burn the link", async () => {
+    const ada = await addUser("Ada");
+    const ben = await addUser("Ben");
+    const admin = await signIn(ada.id);
+    const { invite } = await body(await mintInvite(admin.token, { purpose: "new_device", targetUserId: ben.id }));
+    // Deactivated by a path that leaves the invite standing — so it is the
+    // user check that has to say no.
+    await db.update(users).set({ isActive: false }).where(eq(users.id, ben.id));
+
+    const res = await redeem(invite.code);
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("invalid_invite");
+    expect(res.headers.get("set-cookie")).toBeNull();
+    expect(await sessionsOf(ben.id)).toHaveLength(0);
+    const [row] = await db.select().from(invites).where(eq(invites.id, invite.id));
+    expect(row?.consumedAt).toBeNull();
+
+    const mint = await mintInvite(admin.token, { purpose: "new_device", targetUserId: ben.id });
+    expect(mint.status).toBe(400);
+    expect((await body(mint)).error).toEqual({
+      code: "inactive_user",
+      message: "Ben is deactivated. Reactivate them before adding a device.",
+    });
   });
 });
 
@@ -284,7 +425,7 @@ describe("deactivating a user", () => {
     expect(res.status).toBe(200);
     expect((await body(res)).user.isActive).toBe(false);
 
-    // The confirm dialog promises "every session of theirs is ended".
+    // The confirm dialog promises "signed out on every device".
     expect((await sessionsOf(ben.id)).every((s) => s.revokedAt !== null)).toBe(true);
     expect((await request("/dashboard", { token: benPhone.token })).status).toBe(401);
     expect((await request("/invites", { token: benRecovery.token })).status).toBe(401);
@@ -342,56 +483,21 @@ describe("deactivating a user", () => {
     expect((await db.select().from(invites)).map((i) => i.id)).toEqual([unrelated.id]);
   });
 
-  it("registers no device for them, even from a link minted beforehand", async () => {
-    const ada = await addUser("Ada");
-    const ben = await addUser("Ben");
-    const admin = await signIn(ada.id);
-    const { invite } = await body(await mintInvite(admin.token, { purpose: "new_device", targetUserId: ben.id }));
-    const { flowId } = await registerOptions({ inviteCode: invite.code });
-
-    // Deactivated between /options and /verify, by a path that leaves the
-    // invite standing — so it is the user check that has to say no.
-    await db.update(users).set({ isActive: false }).where(eq(users.id, ben.id));
-
-    const res = await registerVerify(flowId, "cred-ben");
-    expect(res.status).toBe(400);
-    expect((await body(res)).error.code).toBe("invalid_invite");
-    expect(res.headers.get("set-cookie")).toBeNull();
-    expect(await sessionsOf(ben.id)).toHaveLength(0);
-    expect(await db.$count(credentials, eq(credentials.userId, ben.id))).toBe(0);
-    // Rolled back with everything else, not burnt.
-    const [row] = await db.select().from(invites).where(eq(invites.id, invite.id));
-    expect(row?.consumedAt).toBeNull();
-
-    // And neither end of the link will start a new ceremony for them.
-    const again = await request("/auth/register/options", { method: "POST", json: { inviteCode: invite.code } });
-    expect(again.status).toBe(400);
-    const mint = await mintInvite(admin.token, { purpose: "new_device", targetUserId: ben.id });
-    expect(mint.status).toBe(400);
-    expect((await body(mint)).error).toEqual({
-      code: "inactive_user",
-      message: "Ben is deactivated. Reactivate them before adding a device.",
-    });
-  });
-
   it("can be undone, and the undoing is logged the same way", async () => {
     const ada = await addUser("Ada");
     const ben = await addUser("Ben");
-    await addCredential(ben.id, "cred-ben");
     const admin = await signIn(ada.id);
     const benOld = await signIn(ben.id);
 
     await request(`/users/${ben.id}`, { method: "PATCH", token: admin.token, json: { isActive: false } });
-    expect((await login("cred-ben")).status).toBe(400);
-
     const res = await request(`/users/${ben.id}`, { method: "PATCH", token: admin.token, json: { isActive: true } });
     expect(res.status).toBe(200);
     expect((await body(res)).user.isActive).toBe(true);
 
-    // Back in with his passkey; the sessions deactivation ended stay ended.
-    const signedIn = await login("cred-ben");
-    expect(signedIn.status).toBe(200);
-    expect(await canReachApp(cookieToken(signedIn))).toBe(true);
+    // Back in on a newly approved device; the sessions deactivation ended stay ended.
+    const { requestToken, request: shown } = await askToJoin();
+    await approve(admin.token, shown.id, { userId: ben.id });
+    expect(await canReachApp(sessionToken(await poll(requestToken)))).toBe(true);
     expect(await canReachApp(benOld.token)).toBe(false);
 
     const entries = await db
@@ -406,73 +512,69 @@ describe("deactivating a user", () => {
   });
 });
 
-describe("removing a passkey", () => {
-  it("signs out the user's other sessions, but not the one doing the removing", async () => {
+describe("my devices", () => {
+  it("lists only your own signed-in devices, and counts them on the users list", async () => {
     const ada = await addUser("Ada");
     const ben = await addUser("Ben");
-    await addCredential(ada.id, "cred-laptop");
-    const lost = await addCredential(ada.id, "cred-lost-phone");
+    const laptop = await signIn(ada.id);
+    await signIn(ada.id, "recovery_password");
+    await signIn(ben.id);
+
+    const { sessions: listed } = await body(await request("/sessions", { token: laptop.token }));
+    expect(listed).toHaveLength(2);
+    expect(listed.find((/** @type {any} */ s) => s.isCurrent)).toMatchObject({ deviceName: "Laptop" });
+
+    const { users: listedUsers } = await body(await request("/users", { token: laptop.token }));
+    expect(listedUsers.map((/** @type {any} */ u) => [u.displayName, u.deviceCount])).toEqual([
+      ["Ada", 1],
+      ["Ben", 1],
+    ]);
+  });
+
+  it("renames a device, and signs out one that was lost", async () => {
+    const ada = await addUser("Ada");
     const laptop = await signIn(ada.id);
     const lostPhone = await signIn(ada.id);
-    const otherBrowser = await signIn(ada.id, "recovery_password");
-    const benSession = await signIn(ben.id);
 
-    const res = await request(`/credentials/${lost.id}`, { method: "DELETE", token: laptop.token });
-    expect(res.status).toBe(200);
-    expect(await body(res)).toEqual({ ok: true, revokedSessions: 2 });
+    const renamed = await request(`/sessions/${laptop.sessionId}`, {
+      method: "PATCH",
+      token: laptop.token,
+      json: { deviceName: "Ada's laptop" },
+    });
+    expect((await body(renamed)).session.deviceName).toBe("Ada's laptop");
 
-    // A session doesn't record which passkey opened it, so every other one
-    // goes — that's the only way to be sure the lost phone's does.
+    expect((await request(`/sessions/${lostPhone.sessionId}`, { method: "DELETE", token: laptop.token })).status).toBe(200);
     expect(await canReachApp(lostPhone.token)).toBe(false);
-    expect((await request("/sessions", { token: otherBrowser.token })).status).toBe(401);
     expect(await canReachApp(laptop.token)).toBe(true);
-    expect(await canReachApp(benSession.token)).toBe(true);
-
-    const [entry] = await db.select().from(auditLog).where(eq(auditLog.entityId, lost.id));
-    expect(entry).toMatchObject({ action: "credential.remove", metadata: { revokedSessions: 2 } });
   });
 
-  it("keeps a recovery session that removes the lost passkey", async () => {
-    const ada = await addUser("Ada");
-    await addCredential(ada.id, "cred-new-phone");
-    const lost = await addCredential(ada.id, "cred-lost-phone");
-    const lostPhone = await signIn(ada.id);
-    const recovery = await signIn(ada.id, "recovery_password");
-
-    const res = await request(`/credentials/${lost.id}`, { method: "DELETE", token: recovery.token });
-    expect(res.status).toBe(200);
-    expect(await canReachApp(lostPhone.token)).toBe(false);
-    expect((await request("/credentials", { token: recovery.token })).status).toBe(200);
-  });
-});
-
-describe("a device link for another member", () => {
-  it("can be minted by either member, and registers the passkey to the member it names", async () => {
+  it("cannot sign out or rename someone else's device", async () => {
     const ada = await addUser("Ada");
     const ben = await addUser("Ben");
-    await addCredential(ben.id, "cred-ben-old");
-    const { token } = await signIn(ada.id);
+    const mine = await signIn(ada.id);
+    const his = await signIn(ben.id);
 
-    const minted = await mintInvite(token, { purpose: "new_device", targetUserId: ben.id });
-    expect(minted.status).toBe(200);
-    const { invite } = await body(minted);
-    expect(invite).toMatchObject({ purpose: "new_device", code: expect.any(String) });
-
-    const { flowId, options } = await registerOptions({ inviteCode: invite.code });
-    expect(options.user.name).toBe("Ben");
-    const res = await registerVerify(flowId, "cred-ben-new");
-    expect(res.status).toBe(200);
-    expect((await body(res)).user.id).toBe(ben.id);
-    expect(await db.$count(credentials, eq(credentials.userId, ben.id))).toBe(2);
-    expect((await body(await request("/auth/state", { token: cookieToken(res) }))).user.id).toBe(ben.id);
+    expect((await request(`/sessions/${his.sessionId}`, { method: "DELETE", token: mine.token })).status).toBe(404);
+    expect(
+      (await request(`/sessions/${his.sessionId}`, { method: "PATCH", token: mine.token, json: { deviceName: "x" } }))
+        .status,
+    ).toBe(404);
+    expect(await canReachApp(his.token)).toBe(true);
   });
 
-  it("can be minted for another member from a recovery session, as before", async () => {
-    // The recovery screen is "pick a user" by design: the one household
-    // password may be the way back for whichever member lost their passkeys.
+  it("stays signed in while it keeps being used", async () => {
     const ada = await addUser("Ada");
-    const ben = await addUser("Ben");
-    const { token } = await signIn(ada.id, "recovery_password");
-    expect((await mintInvite(token, { purpose: "new_device", targetUserId: ben.id })).status).toBe(200);
+    const { token, sessionId } = await signIn(ada.id);
+    const soon = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    await db
+      .update(sessions)
+      .set({ lastSeenAt: new Date(Date.now() - 2 * 60 * 60 * 1000), expiresAt: soon })
+      .where(eq(sessions.id, sessionId));
+
+    const res = await request("/dashboard", { token });
+    expect(res.status).toBe(200);
+    expect(cookieValue(res, SESSION_COOKIE)).toBe(token);
+    const [row] = await db.select().from(sessions).where(eq(sessions.id, sessionId));
+    expect(row?.expiresAt.getTime()).toBeGreaterThan(Date.now() + 300 * 24 * 60 * 60 * 1000);
   });
 });

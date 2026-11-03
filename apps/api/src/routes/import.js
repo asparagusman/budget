@@ -4,6 +4,7 @@ import { Hono } from "hono";
 import { getUserId } from "../lib/app-env.js";
 import { writeAuditLog } from "../lib/audit.js";
 import { loadAllocationContext } from "../lib/allocation.js";
+import { createBackup, exclusively } from "../lib/backup.js";
 import { loadSetup } from "../lib/dashboard.js";
 import { todayIso } from "../lib/dates.js";
 import {
@@ -73,9 +74,11 @@ function resolveLandingAccountId(flagged, plan, accountIdByDestination) {
 }
 
 /**
- * @param {{ db: import("@budget/schema").Db }} deps
+ * `backups` is where the safety backup before a commit goes (lib/backup.js).
+ *
+ * @param {{ db: import("@budget/schema").Db, backups: { dir: string, appVersion: string } }} deps
  */
-export function createImportRoutes({ db }) {
+export function createImportRoutes({ db, backups }) {
   const app = new Hono();
 
   /** @param {import("@budget/schema").Db} database */
@@ -159,6 +162,13 @@ export function createImportRoutes({ db }) {
         console.error("Import commit parse failed:", err);
         return c.json(UNREADABLE, 400);
       }
+
+      // Taken after the file and the selection have been accepted and before
+      // anything is written, so a commit that turns out to be a mistake can be
+      // undone with Restore. If it can't be taken, the import doesn't go ahead.
+      await exclusively(() =>
+        createBackup(db, { dir: backups.dir, appVersion: backups.appVersion, kind: "before-import" }),
+      );
 
       let applied;
       try {

@@ -9,7 +9,7 @@ import { useTopBarSlotEl } from "@/lib/topbar-slot.js";
  * @param {{ children: import("react").ReactNode }} props
  */
 export function TopBarAction({ children }) {
-  const el = useTopBarSlotEl();
+  const el = useTopBarSlotEl("action");
   if (!el) return null;
   return createPortal(children, el);
 }

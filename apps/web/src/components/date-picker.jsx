@@ -65,11 +65,11 @@ export function DatePicker({
             disabled={disabled}
             data-empty={selected === null ? "" : undefined}
             className={cn(
-              // Sized and bordered as an Input, not as a button: it sits in
-              // the same FieldRow column as the text fields beside it and a
-              // control that is a different height is the drift this
-              // component exists to remove.
-              "h-8 w-full justify-start px-2.5 font-normal data-empty:text-muted-foreground",
+              // Sized and underlined as an Input, not as a button: it sits
+              // in the same FieldRow column as the text fields beside it and
+              // a control that looks different is the drift this component
+              // exists to remove.
+              "h-8 w-full justify-start rounded-none border-0 border-b border-input bg-transparent px-0.5 font-normal hover:border-text-subtle hover:bg-transparent focus-visible:border-ring focus-visible:shadow-[0_1px_0_0_var(--color-ring)] focus-visible:ring-0 aria-expanded:border-ring aria-expanded:bg-transparent data-empty:text-muted-foreground dark:border-input dark:bg-transparent dark:hover:bg-transparent",
               clearable && selected !== null && "pr-8",
             )}
           >

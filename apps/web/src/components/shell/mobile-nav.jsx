@@ -1,9 +1,6 @@
-import { useRef } from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
-import { Search } from "lucide-react";
 import { cn } from "@/lib/utils.js";
 import { NAV_ITEMS, activeNavItem } from "@/lib/nav.js";
-import { setCommandPaletteOpen } from "@/lib/commands.js";
 import { useAuth, useSignOut } from "@/lib/auth.jsx";
 import { ThemeToggle } from "@/components/theme-toggle.jsx";
 import { ScrollArea } from "@/components/scroll-area.jsx";
@@ -25,8 +22,8 @@ const ROW =
 /**
  * The phone's navigation: a drawer from the left, opened by the top bar's
  * menu button. It is the desktop sidebar folded away — every NAV_ITEMS
- * entry in the same order with the same active pill, then search, theme and
- * the account — so the menu someone learned on one screen size is the menu
+ * entry in the same order with the same active pill, then theme and the
+ * account — so the menu someone learned on one screen size is the menu
  * on the other. The bottom bar it replaced pinned four of ten destinations
  * and hid the rest behind "More", which made where a page lived depend on
  * the width of the screen.
@@ -43,26 +40,12 @@ export function MobileNav({ open, onOpenChange }) {
   const { state: authState } = useAuth();
   const user = authState?.user ?? null;
   const signOut = useSignOut();
-  // Search hands off to the command palette, which is its own modal. Opening
-  // it while this one is still closing lets the drawer's focus-return land
-  // on the menu button after the palette has taken focus, so the palette
-  // opens only once the drawer has finished closing.
-  const searchNext = useRef(false);
 
   const close = () => onOpenChange(false);
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent
-        side="left"
-        className="gap-0 overflow-hidden"
-        onCloseAutoFocus={(event) => {
-          if (!searchNext.current) return;
-          searchNext.current = false;
-          event.preventDefault();
-          setCommandPaletteOpen(true);
-        }}
-      >
+      <SheetContent side="left" className="gap-0 overflow-hidden">
         <SheetHeader className="h-14 shrink-0 flex-row items-center gap-2 px-4 py-0">
           <div className="flex size-8 shrink-0 items-center justify-center rounded-(--radius-control) bg-accent-brand text-sm font-bold text-accent-brand-fg">
             B
@@ -70,19 +53,6 @@ export function MobileNav({ open, onOpenChange }) {
           <SheetTitle className="text-sm font-semibold text-text">Budget</SheetTitle>
           <SheetDescription className="sr-only">Go to another page</SheetDescription>
         </SheetHeader>
-
-        <button
-          type="button"
-          data-touch-target
-          onClick={() => {
-            searchNext.current = true;
-            close();
-          }}
-          className="mx-3 flex shrink-0 items-center gap-2 rounded-(--radius-control) bg-surface-muted px-3 py-2 text-sm text-text-muted transition-colors hover:text-text"
-        >
-          <Search className="size-4 shrink-0" aria-hidden="true" />
-          Search…
-        </button>
 
         <ScrollArea as="nav" className="mt-2 min-h-0 flex-1">
           <div className="flex flex-col gap-0.5 px-3 py-2">

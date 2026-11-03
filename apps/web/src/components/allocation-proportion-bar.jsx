@@ -6,10 +6,9 @@ import { colorFor, entityColors } from "@/lib/entity-colors.js";
 
 /** @typedef {{ id: string, name: string }} FlowAccount */
 
-// Split out of allocation-flow.jsx so /allocation can show the bar without
-// importing the pie — and through it Recharts, the app's largest chunk, on a
-// page that draws no chart at all (.claude/plans/perf-inp-plan.md, P2 #15).
-// allocation-flow.jsx re-exports both, so the dashboard is unchanged.
+// Kept free of any chart import so /allocation can show the bar without
+// pulling in Recharts, the app's largest chunk, on a page that draws no chart
+// at all (.claude/plans/perf-inp-plan.md, P2 #15).
 
 /**
  * @param {FlowAccount[]} accounts

@@ -14,8 +14,8 @@ const buckets = new Map();
  * The client address a request is counted against.
  *
  * In the deployed stack nothing off the host reaches this process except
- * through nginx (both published ports are bound to 127.0.0.1), and nginx
- * SETS X-Real-IP and X-Forwarded-For to the client address it resolved —
+ * through nginx (the api's port is bound to 127.0.0.1), and nginx SETS
+ * X-Real-IP and X-Forwarded-For to the address the client connected from —
  * overwriting whatever the client sent, never appending to it (see
  * apps/web/nginx.conf). So X-Real-IP comes first. The LAST X-Forwarded-For
  * hop is the fallback because, if a proxy ever appends instead, the last hop

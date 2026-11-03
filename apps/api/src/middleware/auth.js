@@ -10,20 +10,17 @@ const PUBLIC_PREFIXES = ["/health", "/auth"];
 // else — every screen with a figure on it, and every write to one — answers
 // 403 to it.
 //
-// The list is exactly the path back to a passkey: see who the household's
-// users are, mint a `new_device` invite, remove the passkey that was lost,
-// and revoke sessions. That confinement is the whole reason a password
-// exists here at all. Passwords are phishable and passkeys are not, so the
-// answer to "we need a way in when the passkeys are gone" is a credential
-// that can only ever produce another passkey — never a transfer, never an
-// allocation, never a balance (todo.md #17).
+// The list is exactly the path back to an approved device: see who the
+// household's users are, approve a waiting device or mint a `new_device`
+// link, and sign out the devices that were lost. The password itself never
+// reaches a figure — it can only ever produce another device (todo.md #17).
 //
-// GET-only on /users: a recovery session picks a target for the invite, it
-// does not deactivate anyone.
+// GET-only on /users: a recovery session picks whose device it is, it does
+// not deactivate anyone.
 /** @type {{ prefix: string, methods?: string[] }[]} */
 const RECOVERY_ALLOWED = [
   { prefix: "/invites" },
-  { prefix: "/credentials" },
+  { prefix: "/device-requests" },
   { prefix: "/sessions" },
   { prefix: "/users", methods: ["GET"] },
 ];
@@ -74,7 +71,7 @@ export function requireAuth(db) {
         {
           error: {
             code: "recovery_session_limited",
-            message: "You are signed in with the recovery password. Add a passkey to use the app.",
+            message: "You are signed in with the recovery password. Approve a device to use the app.",
           },
         },
         403,

@@ -6,10 +6,10 @@ import { loadEnv } from "../env.js";
 import { writeAuditLog } from "../lib/audit.js";
 import { generateInviteCode, hashInviteCode } from "../lib/invite.js";
 
-// Recovery path for losing every passkey: the operator has shell access to
+// Recovery path for losing every approved device: the operator has shell access to
 // the box, so recovery is this CLI command rather than recovery codes to
 // lose. See phases/03-auth.md "Recovery" and infra/README.md "Recovering
-// when every passkey is gone".
+// when every device is gone".
 //
 // The production image has no pnpm and no src/ — tsup bundles this file as
 // its own entry, so on the box it is:

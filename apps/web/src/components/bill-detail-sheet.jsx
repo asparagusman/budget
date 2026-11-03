@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { toCents } from "@budget/engine";
 import { CheckIcon, PlusIcon, Trash2Icon } from "lucide-react";
 import { toast } from "sonner";
 import { BarChart, Bar, CartesianGrid, XAxis } from "recharts";
@@ -15,7 +14,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog.jsx";
 import { Input } from "@/components/ui/input.jsx";
-import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/components/ui/input-group.jsx";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet.jsx";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs.jsx";
 import { AXIS, Chart, ChartTooltip, ChartTooltipContent, TOTAL, useChartMotion } from "@/components/chart.jsx";
@@ -23,6 +21,7 @@ import { BillHistoryEntry } from "@/components/bill-history-entry.jsx";
 import { DataList, DataListRow } from "@/components/data-list.jsx";
 import { DatePicker } from "@/components/date-picker.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
+import { MoneyInput, NumberInput } from "@/components/money-input.jsx";
 import { Money } from "@/components/money.jsx";
 import { InlineError, Notice } from "@/components/notice.jsx";
 import { useConfirm } from "@/components/confirm-dialog.jsx";
@@ -46,14 +45,14 @@ import { useSettings } from "@/lib/settings.jsx";
  */
 function StepChangeFormDialog({ open, onOpenChange, stepChange, submitting, onSubmit, onDelete }) {
   const [effectiveFrom, setEffectiveFrom] = useState(todayIso());
-  const [amount, setAmount] = useState("");
+  const [amountCents, setAmountCents] = useState(/** @type {Cents | null} */ (null));
   const [note, setNote] = useState("");
   const [error, setError] = useState(/** @type {string | null} */ (null));
 
   useEffect(() => {
     if (!open) return;
     setEffectiveFrom(stepChange?.effectiveFrom ?? todayIso());
-    setAmount(stepChange ? String(stepChange.newAmountCents / 100) : "");
+    setAmountCents(stepChange?.newAmountCents ?? null);
     setNote(stepChange?.note ?? "");
     setError(null);
   }, [open, stepChange]);
@@ -62,12 +61,12 @@ function StepChangeFormDialog({ open, onOpenChange, stepChange, submitting, onSu
   async function handleSubmit(e) {
     e.preventDefault();
     setError(null);
-    if (amount.trim() === "") {
+    if (amountCents === null) {
       setError("Enter the new amount.");
       return;
     }
     try {
-      await onSubmit({ effectiveFrom, newAmountCents: toCents(Number(amount)), note: note.trim() || null });
+      await onSubmit({ effectiveFrom, newAmountCents: amountCents, note: note.trim() || null });
       onOpenChange(false);
     } catch (err) {
       setError(/** @type {Error} */ (err).message);
@@ -86,12 +85,7 @@ function StepChangeFormDialog({ open, onOpenChange, stepChange, submitting, onSu
             <DatePicker id="step-from" value={effectiveFrom} onChange={setEffectiveFrom} />
           </FieldRow>
           <FieldRow label="New amount" htmlFor="step-amount" required>
-            <InputGroup>
-              <InputGroupAddon>
-                <InputGroupText>$</InputGroupText>
-              </InputGroupAddon>
-              <InputGroupInput id="step-amount" type="number" step="0.01" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} />
-            </InputGroup>
+            <MoneyInput id="step-amount" value={amountCents} onChange={setAmountCents} />
           </FieldRow>
           <FieldRow label="Note" htmlFor="step-note" hint="Optional.">
             <Input id="step-note" value={note} onChange={(e) => setNote(e.target.value)} />
@@ -223,20 +217,22 @@ function StepChangesPanel({ bill }) {
 function SeasonalFactorEditor({ bill }) {
   const queryClient = useQueryClient();
   const motion = useChartMotion();
-  const [factors, setFactors] = useState(() => MONTH_LABELS.map((_, i) => String(bill.seasonalFactors?.[i + 1] ?? 1)));
+  // A blank month is `null`, not 1 and not 0: Save refuses it rather than
+  // choosing a multiplier for the operator.
+  const [factors, setFactors] = useState(() => MONTH_LABELS.map((_, i) => /** @type {number | null} */ (bill.seasonalFactors?.[i + 1] ?? 1)));
   const [deriving, setDeriving] = useState(false);
   const [error, setError] = useState(/** @type {string | null} */ (null));
 
   const factorRows = MONTH_LABELS.map((label, i) => ({
     label: label.slice(0, 3),
-    factor: Number(factors[i]) || 0,
+    factor: factors[i] ?? 0,
   }));
 
   const saveMutation = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (/** @type {number[]} */ complete) => {
       const res = await api.bills[":id"]["seasonal-factors"].$put({
         param: { id: bill.id },
-        json: { factors: factors.map((f) => Number(f) || 0) },
+        json: { factors: complete },
       });
       if (!res.ok) throw new Error(await readApiError(res));
       return res.json();
@@ -279,13 +275,23 @@ function SeasonalFactorEditor({ bill }) {
         return;
       }
       const overallMean = withData.reduce((a, b) => a + b, 0) / withData.length;
-      setFactors(means.map((m) => (m === null ? "1" : (m / overallMean).toFixed(4))));
+      setFactors(means.map((m) => (m === null ? 1 : Number((m / overallMean).toFixed(4)))));
       toast.success("Factors derived from history — review, then save.");
     } catch (err) {
       setError(/** @type {Error} */ (err).message);
     } finally {
       setDeriving(false);
     }
+  }
+
+  function save() {
+    const complete = factors.filter((f) => f !== null);
+    if (complete.length < factors.length) {
+      setError("Every month needs a factor — a blank one is not treated as zero.");
+      return;
+    }
+    setError(null);
+    saveMutation.mutate(complete);
   }
 
   return (
@@ -319,19 +325,18 @@ function SeasonalFactorEditor({ bill }) {
       <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
         {MONTH_LABELS.map((label, i) => (
           <FieldRow key={label} label={label.slice(0, 3)} htmlFor={`bill-${bill.id}-factor-${i}`}>
-            <Input
+            <NumberInput
               id={`bill-${bill.id}-factor-${i}`}
-              type="number"
-              step="0.01"
-              inputMode="decimal"
-              value={factors[i]}
-              onChange={(e) => setFactors((prev) => prev.map((v, idx) => (idx === i ? e.target.value : v)))}
+              decimals={4}
+              step={0.01}
+              value={factors[i] ?? null}
+              onChange={(next) => setFactors((prev) => prev.map((v, idx) => (idx === i ? next : v)))}
             />
           </FieldRow>
         ))}
       </div>
       {error ? <InlineError>{error}</InlineError> : null}
-      <Button size="sm" className="self-start" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>
+      <Button size="sm" className="self-start" onClick={save} disabled={saveMutation.isPending}>
         {saveMutation.isPending ? "Saving…" : "Save factors"}
       </Button>
     </div>

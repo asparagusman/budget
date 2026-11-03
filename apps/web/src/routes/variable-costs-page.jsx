@@ -21,7 +21,6 @@ import { Badge } from "@/components/ui/badge.jsx";
 import { Button } from "@/components/ui/button.jsx";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog.jsx";
 import { Input } from "@/components/ui/input.jsx";
-import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/components/ui/input-group.jsx";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select.jsx";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet.jsx";
 import { Switch } from "@/components/ui/switch.jsx";
@@ -43,8 +42,9 @@ import { DataList, DataListRow } from "@/components/data-list.jsx";
 import { DatePicker } from "@/components/date-picker.jsx";
 import { Delta } from "@/components/delta.jsx";
 import { EmptyState } from "@/components/empty-state.jsx";
-import { PanelSkeleton } from "@/components/loading.jsx";
+import { PanelSkeleton, SectionsSkeleton, StatsSkeleton } from "@/components/loading.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
+import { IntegerInput, MoneyInput } from "@/components/money-input.jsx";
 import { Money } from "@/components/money.jsx";
 import { InlineError, Notice, NoticeList } from "@/components/notice.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
@@ -54,7 +54,7 @@ import { Stat, StatGroup } from "@/components/stat-tile.jsx";
 import { useConfirm } from "@/components/confirm-dialog.jsx";
 import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
-import { cellText, changedCells, forgetSentEdits } from "@/lib/cell-edits.js";
+import { cellText, centsText, changedCells, forgetSentEdits, parseCents } from "@/lib/cell-edits.js";
 import { registerCommands } from "@/lib/commands.js";
 import { CADENCES, CADENCE_LABELS } from "@/lib/constants.js";
 import { formatIsoDate, todayIso } from "@/lib/dates.js";
@@ -63,6 +63,13 @@ import { formatMoney } from "@/lib/format-money.js";
 import { useSettings } from "@/lib/settings.jsx";
 import { useUnsavedGuard } from "@/lib/use-unsaved-guard.js";
 import { ScrollArea } from "@/components/scroll-area.jsx";
+import {
+  costCategoriesQueryOptions,
+  paySchedulesQueryOptions,
+  variableBudgetsQueryOptions,
+  variableCostsCyclesQueryOptions,
+  variableCostsSummaryQueryOptions,
+} from "@/lib/queries.js";
 
 /** @import { Cadence, Cents } from "@budget/engine" */
 /** @import { CellEdits } from "@/lib/cell-edits.js" */
@@ -210,7 +217,7 @@ function CategoryManagerDialog({ open, onOpenChange, categories, submitting, onC
  * }} props
  */
 function NewBudgetForm({ categoryId, currentCadence, submitting, prefillAmountCents, onSubmit }) {
-  const [amount, setAmount] = useState("");
+  const [amountCents, setAmountCents] = useState(/** @type {Cents | null} */ (null));
   const [cadence, setCadence] = useState(currentCadence);
   const [effectiveFrom, setEffectiveFrom] = useState(todayIso());
   const [note, setNote] = useState("");
@@ -220,13 +227,13 @@ function NewBudgetForm({ categoryId, currentCadence, submitting, prefillAmountCe
   async function handleSubmit(e) {
     e.preventDefault();
     setError(null);
-    if (amount.trim() === "") {
+    if (amountCents === null) {
       setError("Enter an amount.");
       return;
     }
     try {
-      await onSubmit({ categoryId, amountCents: toCents(Number(amount)), cadence, effectiveFrom, note: note.trim() || null });
-      setAmount("");
+      await onSubmit({ categoryId, amountCents, cadence, effectiveFrom, note: note.trim() || null });
+      setAmountCents(null);
       setNote("");
     } catch (err) {
       setError(/** @type {Error} */ (err).message);
@@ -242,7 +249,7 @@ function NewBudgetForm({ categoryId, currentCadence, submitting, prefillAmountCe
             type="button"
             size="sm"
             variant="outline"
-            onClick={() => setAmount(String(equivalent(prefillAmountCents, "monthly", cadence) / 100))}
+            onClick={() => setAmountCents(Math.round(equivalent(prefillAmountCents, "monthly", cadence)))}
           >
             <SparklesIcon />
             Use average as budget
@@ -251,19 +258,7 @@ function NewBudgetForm({ categoryId, currentCadence, submitting, prefillAmountCe
       </div>
       <div className="grid grid-cols-2 gap-3">
         <FieldRow label="Amount" htmlFor="variable-budget-amount" required>
-          <InputGroup>
-            <InputGroupAddon>
-              <InputGroupText>$</InputGroupText>
-            </InputGroupAddon>
-            <InputGroupInput
-              id="variable-budget-amount"
-              type="number"
-              step="0.01"
-              inputMode="decimal"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-            />
-          </InputGroup>
+          <MoneyInput id="variable-budget-amount" value={amountCents} onChange={setAmountCents} />
         </FieldRow>
         <FieldRow label="Cadence" htmlFor="variable-budget-cadence">
           <Select value={cadence} onValueChange={(v) => setCadence(/** @type {Cadence} */ (v))}>
@@ -314,7 +309,7 @@ function NewBudgetForm({ categoryId, currentCadence, submitting, prefillAmountCe
  * }} props
  */
 function BudgetRowEditor({ budget, submitting, onCancel, onSave }) {
-  const [amount, setAmount] = useState(String(budget.amountCents / 100));
+  const [amountCents, setAmountCents] = useState(/** @type {Cents | null} */ (budget.amountCents));
   const [cadence, setCadence] = useState(budget.cadence);
   const [effectiveFrom, setEffectiveFrom] = useState(budget.effectiveFrom);
   const [note, setNote] = useState(budget.note ?? "");
@@ -324,12 +319,12 @@ function BudgetRowEditor({ budget, submitting, onCancel, onSave }) {
   async function handleSubmit(e) {
     e.preventDefault();
     setError(null);
-    if (amount.trim() === "") {
+    if (amountCents === null) {
       setError("Enter an amount.");
       return;
     }
     try {
-      await onSave({ amountCents: toCents(Number(amount)), cadence, effectiveFrom, note: note.trim() || null });
+      await onSave({ amountCents, cadence, effectiveFrom, note: note.trim() || null });
     } catch (err) {
       // Kept on the row rather than in a toast: the message that matters
       // here is "this category already has a budget from that date", and it
@@ -343,20 +338,7 @@ function BudgetRowEditor({ budget, submitting, onCancel, onSave }) {
       <form onSubmit={handleSubmit} className="flex flex-col gap-3 bg-surface-muted px-4 py-3">
         <div className="grid grid-cols-2 gap-3">
           <FieldRow label="Amount" htmlFor={`budget-edit-amount-${budget.id}`} required>
-            <InputGroup>
-              <InputGroupAddon>
-                <InputGroupText>$</InputGroupText>
-              </InputGroupAddon>
-              <InputGroupInput
-                id={`budget-edit-amount-${budget.id}`}
-                type="number"
-                step="0.01"
-                inputMode="decimal"
-                autoFocus
-                value={amount}
-                onChange={(e) => setAmount(e.target.value)}
-              />
-            </InputGroup>
+            <MoneyInput id={`budget-edit-amount-${budget.id}`} autoFocus value={amountCents} onChange={setAmountCents} />
           </FieldRow>
           <FieldRow label="Cadence" htmlFor={`budget-edit-cadence-${budget.id}`}>
             <Select value={cadence} onValueChange={(v) => setCadence(/** @type {Cadence} */ (v))}>
@@ -707,28 +689,22 @@ function ActualsGridDesktop({ cycles, gridCategories, values, onChange, inputRef
               </td>
               {gridCategories.map((cat) => (
                 <td key={cat.id} className="px-2 py-2">
-                  <InputGroup className="h-9 w-28">
-                    <InputGroupAddon>
-                      <InputGroupText className="text-xs">$</InputGroupText>
-                    </InputGroupAddon>
-                    <InputGroupInput
-                      // The column heading and the row heading are both
-                      // visible, but neither is associated with the cell —
-                      // a screen reader in a 7x4 grid of bare number fields
-                      // hears "edit, blank" and nothing else.
-                      aria-label={`${cat.name}, cycle starting ${formatIsoDate(cycle.cycleStart, "en-AU")}`}
-                      ref={(el) => {
-                        if (el) inputRefs.current.set(`${cycleIndex}:${cat.id}`, el);
-                        else inputRefs.current.delete(`${cycleIndex}:${cat.id}`);
-                      }}
-                      type="number"
-                      step="0.01"
-                      inputMode="decimal"
-                      value={values[cycleIndex]?.[cat.id] ?? ""}
-                      onChange={(e) => onChange(cycleIndex, cat.id, e.target.value)}
-                      onKeyDown={(e) => handleKeyDown(e, cycleIndex, cat.id)}
-                    />
-                  </InputGroup>
+                  <MoneyInput
+                    density="cell"
+                    className="h-9 w-28"
+                    // The column heading and the row heading are both
+                    // visible, but neither is associated with the cell —
+                    // a screen reader in a 7x4 grid of bare number fields
+                    // hears "edit, blank" and nothing else.
+                    aria-label={`${cat.name}, cycle starting ${formatIsoDate(cycle.cycleStart, "en-AU")}`}
+                    ref={(el) => {
+                      if (el) inputRefs.current.set(`${cycleIndex}:${cat.id}`, el);
+                      else inputRefs.current.delete(`${cycleIndex}:${cat.id}`);
+                    }}
+                    value={parseCents(values[cycleIndex]?.[cat.id] ?? "")}
+                    onChange={(cents) => onChange(cycleIndex, cat.id, centsText(cents))}
+                    onKeyDown={(e) => handleKeyDown(e, cycleIndex, cat.id)}
+                  />
                 </td>
               ))}
               <td className="px-3 py-2 font-medium text-text">
@@ -822,24 +798,17 @@ function ActualsGridMobile({ cycles, gridCategories, values, cycleIndex, onCycle
               {cat.name}
               <Badge variant={cat.isEssential ? "default" : "secondary"}>{cat.isEssential ? "Essential" : "Target"}</Badge>
             </span>
-            <InputGroup className="h-11 w-32 shrink-0">
-              <InputGroupAddon>
-                <InputGroupText>$</InputGroupText>
-              </InputGroupAddon>
-              <InputGroupInput
-                aria-label={`${cat.name} spend this cycle`}
-                ref={(el) => {
-                  mobileRefs.current[i] = el;
-                }}
-                type="number"
-                step="0.01"
-                inputMode="decimal"
-                className="text-base"
-                value={values[cycleIndex]?.[cat.id] ?? ""}
-                onChange={(e) => onChange(cycleIndex, cat.id, e.target.value)}
-                onKeyDown={(e) => handleKeyDown(e, i)}
-              />
-            </InputGroup>
+            <MoneyInput
+              aria-label={`${cat.name} spend this cycle`}
+              ref={(el) => {
+                mobileRefs.current[i] = el;
+              }}
+              className="h-11 w-32 shrink-0"
+              inputClassName="text-base"
+              value={parseCents(values[cycleIndex]?.[cat.id] ?? "")}
+              onChange={(cents) => onChange(cycleIndex, cat.id, centsText(cents))}
+              onKeyDown={(e) => handleKeyDown(e, i)}
+            />
           </div>
         ))}
       <p className="flex items-baseline justify-between gap-3 bg-surface-muted/60 px-4 py-3 text-sm">
@@ -944,63 +913,31 @@ export function VariableCostsPage() {
   const [categoryManagerOpen, setCategoryManagerOpen] = useState(false);
   const [budgetSheetCategoryId, setBudgetSheetCategoryId] = useState(/** @type {string | null} */ (null));
   const [lookback, setLookback] = useState(/** @type {(typeof LOOKBACK_OPTIONS)[number]} */ ("6"));
-  const [customPeriods, setCustomPeriods] = useState("18");
+  const [customPeriods, setCustomPeriods] = useState(/** @type {number | null} */ (18));
   // Only what has been typed into the actuals grid, by cycle and category —
   // see lib/cell-edits.js for why it is not a copy of the server's figures.
   const [edits, setEdits] = useState(/** @type {CellEdits} */ ({}));
   const [mobileCycleIndex, setMobileCycleIndex] = useState(0);
 
-  const periods =
-    lookback === "custom" ? Math.min(MAX_PERIODS, Math.max(1, Math.floor(Number(customPeriods)) || 1)) : Number(lookback);
+  // A blank custom field asks for one cycle until a figure is typed — this is
+  // a view setting, not something that is saved.
+  const periods = lookback === "custom" ? Math.min(MAX_PERIODS, Math.max(1, customPeriods ?? 1)) : Number(lookback);
 
-  const categoriesQuery = useQuery({
-    queryKey: ["cost-categories", "variable"],
-    queryFn: async () => {
-      const res = await api["cost-categories"].$get({ query: { kind: "variable" } });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return /** @type {CostCategory[]} */ ((await res.json()).costCategories);
-    },
-  });
+  const categoriesQuery = useQuery(costCategoriesQueryOptions("variable"));
 
-  const budgetsQuery = useQuery({
-    queryKey: ["variable-budgets"],
-    queryFn: async () => {
-      const res = await api["variable-budgets"].$get();
-      if (!res.ok) throw new Error(await readApiError(res));
-      return /** @type {VariableBudget[]} */ ((await res.json()).variableBudgets);
-    },
-  });
+  const budgetsQuery = useQuery(variableBudgetsQueryOptions());
 
   // `on` is the browser's own calendar day. The server's "today" is UTC
   // unless TZ is set, and from midnight until mid-morning in Australia that
   // is still yesterday — near a payday, a different cycle.
-  const summaryQuery = useQuery({
-    queryKey: ["variable-costs-summary", today],
-    queryFn: async () => {
-      const res = await api["variable-costs"].summary.$get({ query: { on: today } });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return /** @type {VariableCostsSummary} */ (await res.json());
-    },
-  });
+  const summaryQuery = useQuery(variableCostsSummaryQueryOptions(today));
 
-  const payScheduleQuery = useQuery({
-    queryKey: ["pay-schedules"],
-    queryFn: async () => {
-      const res = await api["pay-schedules"].$get();
-      if (!res.ok) throw new Error(await readApiError(res));
-      return (await res.json()).paySchedules;
-    },
-  });
+  const payScheduleQuery = useQuery(paySchedulesQueryOptions());
 
   const primary = (payScheduleQuery.data ?? []).find((s) => s.isPrimary) ?? null;
 
   const cyclesQuery = useQuery({
-    queryKey: ["variable-costs-cycles", periods, today],
-    queryFn: async () => {
-      const res = await api["variable-costs"].cycles.$get({ query: { periods: String(periods), on: today } });
-      if (!res.ok) throw new Error(await readApiError(res));
-      return /** @type {{ cycles: Cycle[] }} */ (await res.json());
-    },
+    ...variableCostsCyclesQueryOptions(periods, today),
     enabled: primary !== null,
     // A lookback change keeps the grid on screen until the new cycles land,
     // instead of blanking it under the operator's hands.
@@ -1379,6 +1316,12 @@ export function VariableCostsPage() {
           />
           <Stat label="Cycles recorded" value={cyclesRecorded} />
         </StatGroup>
+      ) : isLoading ? (
+        <StatsSkeleton
+          lead
+          labels={["Essential", "Non-essential", "Trailing average vs budget", "Cycles recorded"]}
+          label="Loading the variable costs summary"
+        />
       ) : null}
 
       {warnings.length > 0 ? (
@@ -1426,6 +1369,9 @@ export function VariableCostsPage() {
             />
           </div>
         </div>
+      ) : isLoading ? (
+        // Essentials, then non-essentials.
+        <SectionsSkeleton sections={[4, 3]} label="Loading budgets" />
       ) : null}
 
       {payScheduleQuery.isLoading ? (
@@ -1471,17 +1417,15 @@ export function VariableCostsPage() {
                     </SelectContent>
                   </Select>
                   {lookback === "custom" ? (
-                    <Input
+                    <IntegerInput
                       id="variable-custom"
                       aria-label={`Cycles, up to ${MAX_PERIODS}`}
                       title={`Up to ${MAX_PERIODS} cycles`}
                       className="w-20"
-                      type="number"
-                      min="1"
+                      min={1}
                       max={MAX_PERIODS}
-                      inputMode="numeric"
                       value={customPeriods}
-                      onChange={(e) => setCustomPeriods(e.target.value)}
+                      onChange={setCustomPeriods}
                     />
                   ) : null}
                 </div>

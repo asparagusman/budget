@@ -1,14 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation, useNavigate, useSearch } from "@tanstack/react-router";
-import { addDaysIso, projectPaydays, toCents } from "@budget/engine";
+import { addDaysIso, projectPaydays } from "@budget/engine";
 import {
   AlertTriangleIcon,
   CalendarClockIcon,
   CalendarRangeIcon,
   CopyIcon,
   GitCompareIcon,
-  PencilIcon,
   PlusIcon,
   Trash2Icon,
   WalletIcon,
@@ -25,7 +24,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog.jsx";
 import { Input } from "@/components/ui/input.jsx";
-import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/components/ui/input-group.jsx";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select.jsx";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet.jsx";
 import { Switch } from "@/components/ui/switch.jsx";
@@ -35,7 +33,10 @@ import { DatePicker } from "@/components/date-picker.jsx";
 import { Delta } from "@/components/delta.jsx";
 import { EmptyState } from "@/components/empty-state.jsx";
 import { CardsSkeleton, ListSkeleton, PanelSkeleton } from "@/components/loading.jsx";
+import { Skeleton } from "@/components/ui/skeleton.jsx";
 import { FieldRow } from "@/components/field-row.jsx";
+import { EDITABLE_GROUP, InlineMoney, InlineSelect, InlineText } from "@/components/inline-edit.jsx";
+import { MoneyInput } from "@/components/money-input.jsx";
 import { Money } from "@/components/money.jsx";
 import { InlineError, Notice } from "@/components/notice.jsx";
 import { PageHeader } from "@/components/page-header.jsx";
@@ -46,10 +47,17 @@ import { api } from "@/lib/api.js";
 import { readApiError } from "@/lib/api-error.js";
 import { registerCommands } from "@/lib/commands.js";
 import { CADENCES, CADENCE_LABELS } from "@/lib/constants.js";
-import { formatIsoDate, getDateFormat, todayIso } from "@/lib/dates.js";
+import { formatIsoDate, todayIso } from "@/lib/dates.js";
 import { colorFor, entityColors } from "@/lib/entity-colors.js";
 import { useSettings } from "@/lib/settings.jsx";
 import { cn } from "@/lib/utils.js";
+import {
+  incomeResolveQueryOptions,
+  incomeVariantsQueryOptions,
+  paySchedulesQueryOptions,
+  peopleQueryOptions,
+  variantScheduleQueryOptions,
+} from "@/lib/queries.js";
 
 /** @import { Cadence, Cents } from "@budget/engine" */
 /** @typedef {{ id: string, name: string }} Person */
@@ -96,10 +104,9 @@ function variantName(variants, variantId) {
 // not a business calculation, so plain `Date` math is fine here the same way
 // lib/dates.js already uses it (packages/engine never calls `new Date()`
 // itself; every engine caller passes `today` in).
-/** @param {string} iso @param {number} months */
-function addMonthsIso(iso, months) {
-  const [y, m, d] = iso.split("-").map(Number);
-  const date = new Date(/** @type {number} */ (y), /** @type {number} */ (m) - 1 + months, /** @type {number} */ (d));
+/** @param {number} ms */
+function msToIso(ms) {
+  const date = new Date(ms);
   const yy = date.getFullYear();
   const mm = String(date.getMonth() + 1).padStart(2, "0");
   const dd = String(date.getDate()).padStart(2, "0");
@@ -216,7 +223,19 @@ function TotalsRow({ totals, payCadenceLabel }) {
  */
 function ActiveVariantBanner({ resolution, isLoading, variants, payCadenceLabel, override, onClearOverride }) {
   if (isLoading) {
-    return <div className="h-24 animate-pulse rounded-(--radius-card) bg-surface shadow-(--shadow-card)" />;
+    // The card itself stays still and only its lines pulse, the same as every
+    // other placeholder: a whole white card pulsing on a near-white page read
+    // as an empty card rather than one on its way.
+    return (
+      <div
+        aria-busy="true"
+        className="flex h-24 flex-col justify-center gap-2 rounded-(--radius-card) bg-surface p-4 shadow-(--shadow-card) md:p-5"
+      >
+        <span className="sr-only">Loading today&apos;s income</span>
+        <Skeleton className="h-3 w-40" />
+        <Skeleton className="h-6 w-64 max-w-full" />
+      </div>
+    );
   }
 
   const diagnostic = resolution?.diagnostics[0] ?? null;
@@ -288,25 +307,26 @@ function ActiveVariantBanner({ resolution, isLoading, variants, payCadenceLabel,
 }
 
 /**
+ * Adding only — an existing variant's name and notes are edited on its card.
+ *
  * @param {{
  *   open: boolean,
  *   onOpenChange: (open: boolean) => void,
- *   variant: IncomeVariant | null,
  *   submitting: boolean,
  *   onSubmit: (data: VariantFormData) => Promise<void>,
  * }} props
  */
-function VariantFormDialog({ open, onOpenChange, variant, submitting, onSubmit }) {
+function VariantFormDialog({ open, onOpenChange, submitting, onSubmit }) {
   const [name, setName] = useState("");
   const [notes, setNotes] = useState("");
   const [error, setError] = useState(/** @type {string | null} */ (null));
 
   useEffect(() => {
     if (!open) return;
-    setName(variant?.name ?? "");
-    setNotes(variant?.notes ?? "");
+    setName("");
+    setNotes("");
     setError(null);
-  }, [open, variant]);
+  }, [open]);
 
   /** @param {import("react").FormEvent} e */
   async function handleSubmit(e) {
@@ -328,7 +348,7 @@ function VariantFormDialog({ open, onOpenChange, variant, submitting, onSubmit }
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{variant ? "Edit income variant" : "Add income variant"}</DialogTitle>
+          <DialogTitle>Add income variant</DialogTitle>
           <DialogDescription>
             A named income scenario — "Usual", "PL Gov (High)" — with its own set of lines.
           </DialogDescription>
@@ -353,32 +373,33 @@ function VariantFormDialog({ open, onOpenChange, variant, submitting, onSubmit }
 }
 
 /**
+ * Adding only — an existing line is edited where it sits on its card.
+ *
  * @param {{
  *   open: boolean,
  *   onOpenChange: (open: boolean) => void,
- *   line: IncomeLine | null,
  *   people: Person[],
  *   submitting: boolean,
  *   onSubmit: (data: IncomeLineFormData) => Promise<void>,
  * }} props
  */
-function IncomeLineFormDialog({ open, onOpenChange, line, people, submitting, onSubmit }) {
+function IncomeLineFormDialog({ open, onOpenChange, people, submitting, onSubmit }) {
   const [personId, setPersonId] = useState("");
   const [label, setLabel] = useState("");
-  const [amount, setAmount] = useState("");
+  const [amountCents, setAmountCents] = useState(/** @type {number | null} */ (null));
   const [cadence, setCadence] = useState(/** @type {Cadence} */ ("fortnightly"));
   const [notes, setNotes] = useState("");
   const [error, setError] = useState(/** @type {string | null} */ (null));
 
   useEffect(() => {
     if (!open) return;
-    setPersonId(line?.personId ?? people[0]?.id ?? "");
-    setLabel(line?.label ?? "");
-    setAmount(line ? String(line.amountCents / 100) : "");
-    setCadence(line?.cadence ?? "fortnightly");
-    setNotes(line?.notes ?? "");
+    setPersonId(people[0]?.id ?? "");
+    setLabel("");
+    setAmountCents(null);
+    setCadence("fortnightly");
+    setNotes("");
     setError(null);
-  }, [open, line, people]);
+  }, [open, people]);
 
   /** @param {import("react").FormEvent} e */
   async function handleSubmit(e) {
@@ -388,7 +409,7 @@ function IncomeLineFormDialog({ open, onOpenChange, line, people, submitting, on
       setError("Choose a person.");
       return;
     }
-    if (amount.trim() === "") {
+    if (amountCents === null) {
       setError("Enter an amount.");
       return;
     }
@@ -396,7 +417,7 @@ function IncomeLineFormDialog({ open, onOpenChange, line, people, submitting, on
       await onSubmit({
         personId,
         label: label.trim() || null,
-        amountCents: toCents(Number(amount)),
+        amountCents,
         cadence,
         notes: notes.trim() || null,
       });
@@ -410,7 +431,7 @@ function IncomeLineFormDialog({ open, onOpenChange, line, people, submitting, on
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{line ? "Edit income line" : "Add income line"}</DialogTitle>
+          <DialogTitle>Add income line</DialogTitle>
           <DialogDescription>One person's income within this variant.</DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
@@ -433,19 +454,7 @@ function IncomeLineFormDialog({ open, onOpenChange, line, people, submitting, on
             <Input id="line-label" value={label} onChange={(e) => setLabel(e.target.value)} />
           </FieldRow>
           <FieldRow label="Amount" htmlFor="line-amount" required hint="After tax.">
-            <InputGroup>
-              <InputGroupAddon>
-                <InputGroupText>$</InputGroupText>
-              </InputGroupAddon>
-              <InputGroupInput
-                id="line-amount"
-                type="number"
-                step="0.01"
-                inputMode="decimal"
-                value={amount}
-                onChange={(e) => setAmount(e.target.value)}
-              />
-            </InputGroup>
+            <MoneyInput id="line-amount" value={amountCents} onChange={setAmountCents} />
           </FieldRow>
           <FieldRow label="Cadence" htmlFor="line-cadence">
             <Select value={cadence} onValueChange={(value) => setCadence(/** @type {Cadence} */ (value))}>
@@ -606,63 +615,117 @@ function ScheduleEntryFormDialog({ open, onOpenChange, entry, variants, submitti
   );
 }
 
+// Fixed three-letter names rather than Intl: en-AU's "short" month is
+// "June", "July", "Sept", which won't sit in a column of "Jan", "Feb", "Mar".
+const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
 /**
- * Quarter starts inside the window, for the axis. Calendar quarters rather than
- * "every N days from the left edge", so the labels land on dates a person
- * would name.
+ * One column per calendar month inside the window, for the axis and grid.
  *
- * @param {string} windowFrom
  * @param {number} windowStartMs
  * @param {number} windowEndMs
  */
-function quarterTicks(windowFrom, windowStartMs, windowEndMs) {
-  const [y0, m0] = windowFrom.split("-").map(Number);
-  const fmt = getDateFormat("en-AU", { month: "short", year: "numeric" });
-  /** @type {{ ms: number, label: string }[]} */
-  const ticks = [];
-  let y = /** @type {number} */ (y0);
-  let m = /** @type {number} */ (m0) - 1;
-  m -= m % 3;
-  for (let i = 0; i < 12; i++) {
-    const date = new Date(y, m, 1);
-    const ms = date.getTime();
-    if (ms > windowEndMs) break;
-    if (ms >= windowStartMs) ticks.push({ ms, label: fmt.format(date) });
-    m += 3;
+function monthColumns(windowStartMs, windowEndMs) {
+  const first = new Date(windowStartMs);
+  /** @type {{ startMs: number, endMs: number, year: number, label: string }[]} */
+  const columns = [];
+  let y = first.getFullYear();
+  let m = first.getMonth();
+  while (new Date(y, m, 1).getTime() < windowEndMs) {
+    columns.push({
+      startMs: new Date(y, m, 1).getTime(),
+      endMs: new Date(y, m + 1, 1).getTime(),
+      year: y,
+      label: /** @type {string} */ (MONTH_ABBR[m]),
+    });
+    m += 1;
     if (m > 11) {
-      m -= 12;
+      m = 0;
       y += 1;
     }
   }
-  return ticks;
+  return columns;
 }
 
 /**
- * One band per scheduled entry, coloured by variant, on a quarterly axis with
- * today marked. Overlaps ring amber; stretches no entry covers are hatched and
- * named — the operator should see a bad schedule, not read about it
- * (phases/05-income.md "Schedule timeline").
+ * Greedy interval packing: an entry joins the first lane whose last entry has
+ * already ended, so a clean hand-over schedule reads as one continuous row and
+ * only genuine overlaps push an entry down to a second lane.
+ *
+ * @param {ScheduleEntry[]} sorted entries ordered by `startsOn`
+ */
+function packLanes(sorted) {
+  /** @type {number[]} */
+  const laneEnds = [];
+  /** @type {ScheduleEntry[][]} */
+  const lanes = [];
+  for (const entry of sorted) {
+    const start = isoToMs(entry.startsOn);
+    const end = entry.endsOn ? isoToMs(entry.endsOn) : Number.POSITIVE_INFINITY;
+    let lane = laneEnds.findIndex((laneEnd) => laneEnd <= start);
+    if (lane === -1) {
+      lane = laneEnds.length;
+      lanes.push([]);
+    }
+    laneEnds[lane] = end;
+    /** @type {ScheduleEntry[]} */ (lanes[lane]).push(entry);
+  }
+  return lanes;
+}
+
+/** @param {ScheduleEntry} entry */
+function entryRangeLabel(entry) {
+  return entry.endsOn
+    ? `${formatIsoDate(entry.startsOn, "en-AU")} – ${formatIsoDate(entry.endsOn, "en-AU")}`
+    : `From ${formatIsoDate(entry.startsOn, "en-AU")}, open-ended`;
+}
+
+/**
+ * Month-by-month roadmap of the schedule: entries packed into as few lanes as
+ * possible and coloured by variant, the past faded behind a full-height Today
+ * line. Overlaps ring amber; stretches from today on that no entry covers are
+ * hatched and named — the operator should see a bad schedule, not read about
+ * it (phases/05-income.md "Schedule timeline"). Gaps before today aren't
+ * flagged: nothing projects from them, so they'd be noise to act on.
  *
  * @param {{ entries: ScheduleEntry[], variants: IncomeVariant[], onEditEntry: (entry: ScheduleEntry) => void }} props
  */
 function ScheduleTimelineDesktop({ entries, variants, onEditEntry }) {
-  const { windowFrom, windowTo } = useMemo(() => {
-    const today = todayIso();
-    return { windowFrom: addMonthsIso(today, -3), windowTo: addMonthsIso(today, 18) };
+  const { today, windowStartMs, windowEndMs } = useMemo(() => {
+    const now = new Date();
+    return {
+      today: todayIso(),
+      windowStartMs: new Date(now.getFullYear(), now.getMonth() - 2, 1).getTime(),
+      windowEndMs: new Date(now.getFullYear(), now.getMonth() + 16, 1).getTime(),
+    };
   }, []);
-  const windowStartMs = isoToMs(windowFrom);
-  const windowEndMs = isoToMs(windowTo);
   const span = windowEndMs - windowStartMs;
+  const todayMs = isoToMs(today);
 
   /** @param {number} ms */
-  const pct = (ms) => (Math.min(Math.max(ms, windowStartMs), windowEndMs) - windowStartMs) / span * 100;
+  const pct = (ms) => ((Math.min(Math.max(ms, windowStartMs), windowEndMs) - windowStartMs) / span) * 100;
+  const todayPct = pct(todayMs);
 
+  const columns = useMemo(() => monthColumns(windowStartMs, windowEndMs), [windowStartMs, windowEndMs]);
+  const years = useMemo(() => {
+    /** @type {{ year: number, startMs: number, endMs: number }[]} */
+    const out = [];
+    for (const col of columns) {
+      const last = out[out.length - 1];
+      if (last && last.year === col.year) last.endMs = col.endMs;
+      else out.push({ year: col.year, startMs: col.startMs, endMs: col.endMs });
+    }
+    return out;
+  }, [columns]);
   const overlapping = useMemo(() => computeOverlappingIds(entries), [entries]);
-  const gaps = useMemo(() => computeGaps(entries, windowStartMs, windowEndMs), [entries, windowStartMs, windowEndMs]);
-  const ticks = useMemo(() => quarterTicks(windowFrom, windowStartMs, windowEndMs), [windowFrom, windowStartMs, windowEndMs]);
+  const gaps = useMemo(() => computeGaps(entries, todayMs, windowEndMs), [entries, todayMs, windowEndMs]);
   const variantColors = useMemo(() => entityColors(variants.map((v) => v.id)), [variants]);
-  const sorted = [...entries].sort((a, b) => a.startsOn.localeCompare(b.startsOn));
-  const todayPct = pct(isoToMs(todayIso()));
+  const lanes = useMemo(() => {
+    const visible = entries
+      .filter((e) => isoToMs(e.startsOn) < windowEndMs && (!e.endsOn || isoToMs(e.endsOn) > windowStartMs))
+      .sort((a, b) => a.startsOn.localeCompare(b.startsOn));
+    return packLanes(visible);
+  }, [entries, windowStartMs, windowEndMs]);
 
   return (
     <div
@@ -670,93 +733,147 @@ function ScheduleTimelineDesktop({ entries, variants, onEditEntry }) {
       aria-label="Variant schedule timeline"
       className="rounded-(--radius-card) bg-surface p-5 shadow-(--shadow-card)"
     >
-      <div className="relative h-5 text-xs text-text-muted">
-        {ticks
-          // A tick label under the Today pill or jammed against an edge
-          // would overprint, so those few drop out.
-          .filter((tick) => Math.abs(pct(tick.ms) - todayPct) > 7 && pct(tick.ms) > 4 && pct(tick.ms) < 96)
-          .map((tick) => (
-            <span
-              key={tick.ms}
-              className="absolute top-0 -translate-x-1/2 whitespace-nowrap"
-              style={{ left: `${pct(tick.ms)}%` }}
-            >
-              {tick.label}
-            </span>
-          ))}
-        <span
-          className="absolute top-0 -translate-x-1/2 rounded-full bg-accent-brand px-2 text-[0.6875rem] leading-5 font-medium text-accent-brand-fg"
-          style={{ left: `${todayPct}%` }}
-        >
-          Today
-        </span>
+      <div aria-hidden="true" className="relative h-5 text-xs font-medium text-text">
+        {years.map((y) => (
+          <span
+            key={y.year}
+            className="absolute top-0 overflow-hidden pl-1.5 whitespace-nowrap"
+            style={{ left: `${pct(y.startMs)}%`, width: `${pct(y.endMs) - pct(y.startMs)}%` }}
+          >
+            {y.year}
+          </span>
+        ))}
       </div>
 
-      <div className="relative mt-1">
-        {ticks.map((tick) => (
+      <div className="relative">
+        {/* Month grid behind everything; year boundaries a step stronger. */}
+        {columns.slice(1).map((col) => (
           <div
-            key={tick.ms}
+            key={col.startMs}
             aria-hidden="true"
-            className="absolute inset-y-0 w-px bg-border"
-            style={{ left: `${pct(tick.ms)}%` }}
+            className={cn("absolute inset-y-0 w-px", new Date(col.startMs).getMonth() === 0 ? "bg-border-strong" : "bg-border/60")}
+            style={{ left: `${pct(col.startMs)}%` }}
           />
         ))}
-        {gaps.map(([gStart, gEnd], i) => {
-          const width = Math.max(pct(gEnd) - pct(gStart), 0.4);
-          return (
-            <div
-              key={i}
-              className="absolute inset-y-0 overflow-hidden rounded-md border border-dashed border-warning-strong/50 px-2 py-1 text-xs font-medium whitespace-nowrap text-warning-strong"
-              style={{
-                left: `${pct(gStart)}%`,
-                width: `${width}%`,
-                backgroundImage:
-                  "repeating-linear-gradient(135deg, var(--warning-soft) 0 6px, transparent 6px 12px)",
-              }}
+
+        <div aria-hidden="true" className="relative h-6 border-b border-border text-[0.6875rem] text-text-subtle">
+          {columns.map((col) => (
+            <span
+              key={col.startMs}
+              className={cn(
+                "absolute inset-y-0 flex items-center justify-center",
+                todayMs >= col.startMs && todayMs < col.endMs && "font-semibold text-accent-brand",
+              )}
+              style={{ left: `${pct(col.startMs)}%`, width: `${pct(col.endMs) - pct(col.startMs)}%` }}
             >
-              {width >= 12 ? "No variant in effect" : null}
-            </div>
-          );
-        })}
-        <div
-          aria-hidden="true"
-          className="absolute inset-y-0 z-0 w-px bg-accent-brand"
-          style={{ left: `${todayPct}%` }}
-        />
-        <div className="relative z-10 flex flex-col gap-2 py-2">
-          {sorted.map((entry) => {
-            const left = pct(isoToMs(entry.startsOn));
-            const right = pct(entry.endsOn ? isoToMs(entry.endsOn) : windowEndMs);
-            const color = colorFor(variantColors, entry.variantId);
+              {col.label}
+            </span>
+          ))}
+        </div>
+
+        <div className="relative py-3">
+          {gaps.map(([gStart, gEnd], i) => {
+            const width = pct(gEnd) - pct(gStart);
             return (
-              <button
-                key={entry.id}
-                type="button"
-                onClick={() => onEditEntry(entry)}
-                className={cn(
-                  "flex h-9 items-center gap-2 overflow-hidden rounded-md px-2.5 text-left text-xs text-text transition-colors hover:brightness-95",
-                  overlapping.has(entry.id) && "ring-2 ring-warning-strong ring-offset-1 ring-offset-surface",
-                )}
+              <div
+                key={i}
+                className="absolute inset-y-1.5 overflow-hidden rounded-md border border-dashed border-warning-strong/50 px-2 pt-1 text-xs font-medium whitespace-nowrap text-warning-strong"
                 style={{
-                  marginLeft: `${left}%`,
-                  width: `${Math.max(right - left, 1.5)}%`,
-                  // Mixed into the surface rather than transparent, so the
-                  // Today line passes behind the band instead of through its
-                  // label. A tint keeps both themes legible without a
-                  // hardcoded text colour fighting the fill.
-                  backgroundColor: `color-mix(in oklch, ${color} 20%, var(--surface))`,
+                  left: `${pct(gStart)}%`,
+                  width: `${Math.max(width, 0.4)}%`,
+                  backgroundImage:
+                    "repeating-linear-gradient(135deg, var(--warning-soft) 0 6px, transparent 6px 12px)",
                 }}
-                title={`${variantName(variants, entry.variantId)} · ${formatIsoDate(entry.startsOn, "en-AU")} – ${entry.endsOn ? formatIsoDate(entry.endsOn, "en-AU") : "open-ended"}`}
+                title={`No variant in effect from ${formatIsoDate(msToIso(gStart), "en-AU")}${gEnd >= windowEndMs ? " onwards" : ` to ${formatIsoDate(msToIso(gEnd), "en-AU")}`}`}
               >
-                <span aria-hidden="true" className="size-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
-                <span className="max-w-[70%] shrink-0 truncate font-medium">{variantName(variants, entry.variantId)}</span>
-                <span className="min-w-0 truncate text-text-muted">
-                  {formatIsoDate(entry.startsOn, "en-AU")} – {entry.endsOn ? formatIsoDate(entry.endsOn, "en-AU") : "open-ended"}
-                </span>
-              </button>
+                {width >= 10 ? "No variant in effect" : null}
+              </div>
             );
           })}
+
+          <div className="relative flex flex-col gap-1.5">
+            {(lanes.length ? lanes : [[]]).map((lane, laneIndex) => (
+              <div key={laneIndex} className="relative h-10">
+                {lane.map((entry) => {
+                  const startMs = isoToMs(entry.startsOn);
+                  const endMs = entry.endsOn ? isoToMs(entry.endsOn) : Number.POSITIVE_INFINITY;
+                  const left = pct(startMs);
+                  const right = pct(endMs);
+                  const width = Math.max(right - left, 1.2);
+                  const runsOffLeft = startMs < windowStartMs;
+                  const runsOffRight = endMs > windowEndMs;
+                  // A bar that spans today starts its label just past the
+                  // Today line: that's where the eye is, and the line would
+                  // otherwise strike through the text.
+                  const labelAfterToday = startMs < todayMs && endMs > todayMs && right - todayPct >= 15;
+                  const color = colorFor(variantColors, entry.variantId);
+                  const name = variantName(variants, entry.variantId);
+                  const fades = [
+                    runsOffLeft ? "transparent 0, black 3rem" : "black 0",
+                    runsOffRight ? "black calc(100% - 4rem), transparent 100%" : "black 100%",
+                  ].join(", ");
+                  return (
+                    <button
+                      key={entry.id}
+                      type="button"
+                      onClick={() => onEditEntry(entry)}
+                      className={cn(
+                        "absolute inset-y-0 flex items-center gap-2 overflow-hidden rounded-md border border-(--bar-edge) bg-(--bar-fill) text-left text-xs text-text transition-colors hover:bg-(--bar-hover) focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
+                        runsOffLeft && "rounded-l-none border-l-0",
+                        runsOffRight && "rounded-r-none border-r-0",
+                        overlapping.has(entry.id) && "ring-2 ring-warning-strong ring-offset-1 ring-offset-surface",
+                      )}
+                      style={/** @type {import("react").CSSProperties} */ ({
+                        left: `${left}%`,
+                        width: `${width}%`,
+                        paddingLeft: labelAfterToday ? `calc(${((todayPct - left) / width) * 100}% + 0.625rem)` : "0.625rem",
+                        paddingRight: "0.625rem",
+                        // Mixed into the surface rather than transparent, so
+                        // the grid passes behind the band instead of through
+                        // its label, and both themes stay legible without a
+                        // hardcoded text colour fighting the fill.
+                        "--bar-fill": `color-mix(in oklch, ${color} 18%, var(--surface))`,
+                        "--bar-hover": `color-mix(in oklch, ${color} 28%, var(--surface))`,
+                        "--bar-edge": `color-mix(in oklch, ${color} 45%, var(--surface))`,
+                        maskImage: runsOffLeft || runsOffRight ? `linear-gradient(to right, ${fades})` : undefined,
+                      })}
+                      title={`${name} · ${entryRangeLabel(entry)}`}
+                    >
+                      <span aria-hidden="true" className="size-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
+                      <span className="max-w-[70%] shrink-0 truncate font-medium">{name}</span>
+                      {overlapping.has(entry.id) ? (
+                        <AlertTriangleIcon className="size-3.5 shrink-0 text-warning-strong" aria-label="Overlaps another entry" />
+                      ) : null}
+                      <span className="min-w-0 truncate text-text-muted">{entryRangeLabel(entry)}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
         </div>
+
+        {/* The past, faded: a wash over bars and grid alike, so history reads
+            as settled and the eye lands on today onwards. */}
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-y-0 left-0 z-10 bg-surface/50"
+          style={{ width: `${todayPct}%` }}
+        />
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute top-6 bottom-0 z-20 w-0.5 -translate-x-1/2 rounded-full bg-accent-brand"
+          style={{ left: `${todayPct}%` }}
+        />
+      </div>
+
+      <div className="relative h-5">
+        <span
+          className="absolute top-0 -translate-x-1/2 rounded-full bg-accent-brand px-2 text-[0.6875rem] leading-5 font-medium whitespace-nowrap text-accent-brand-fg"
+          style={{ left: `${todayPct}%` }}
+        >
+          Today · {formatIsoDate(today, "en-AU")}
+        </span>
       </div>
     </div>
   );
@@ -889,8 +1006,9 @@ function ComparisonPanel({ variants, people, payCadenceLabel }) {
 }
 
 /**
- * Full card: lines, totals, duplicate/edit/archive — the active variant gets
- * a tinted ring (phases/05-income.md "Variants").
+ * Full card: lines, totals, duplicate/archive — the active variant gets a
+ * tinted ring (phases/05-income.md "Variants"). The name, the notes and
+ * every part of a line are edited where they sit; there is no edit dialog.
  *
  * @param {{
  *   variant: IncomeVariant,
@@ -898,16 +1016,17 @@ function ComparisonPanel({ variants, people, payCadenceLabel }) {
  *   people: Person[],
  *   payCadenceLabel: string | null,
  *   duplicating: boolean,
- *   onEdit: () => void,
+ *   onUpdate: (patch: Partial<VariantFormData>) => Promise<unknown>,
  *   onDuplicate: () => void,
  *   onArchive: () => void,
  *   onAddLine: () => void,
- *   onEditLine: (line: IncomeLine) => void,
+ *   onUpdateLine: (id: string, patch: Partial<IncomeLineFormData>) => Promise<unknown>,
  *   onDeleteLine: (id: string) => void,
  * }} props `duplicating` disables Duplicate while a copy is being made — a
  *   double click used to make two.
  */
-function VariantCard({ variant, isActive, people, payCadenceLabel, duplicating, onEdit, onDuplicate, onArchive, onAddLine, onEditLine, onDeleteLine }) {
+function VariantCard({ variant, isActive, people, payCadenceLabel, duplicating, onUpdate, onDuplicate, onArchive, onAddLine, onUpdateLine, onDeleteLine }) {
+  const cadenceOptions = CADENCES.map((c) => ({ value: c, label: CADENCE_LABELS[c] }));
   return (
     <div
       className={cn(
@@ -915,20 +1034,27 @@ function VariantCard({ variant, isActive, people, payCadenceLabel, duplicating, 
         isActive && "ring-2 ring-(--accent)",
       )}
     >
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <h3 className="font-semibold text-text">{variant.name}</h3>
+      <div className={cn(EDITABLE_GROUP, "flex items-start justify-between gap-2")}>
+        <div className="flex min-w-0 flex-col items-start">
+          <div className="flex max-w-full flex-wrap items-center gap-2">
+            <h3 className="min-w-0 font-semibold text-text">
+              <InlineText value={variant.name} label="Variant name" required maxLength={160} onSave={(name) => onUpdate({ name: name ?? variant.name })} />
+            </h3>
             {isActive ? <Badge variant="secondary">Active today</Badge> : null}
           </div>
-          {variant.notes ? <p className="mt-1 text-xs text-text-muted">{variant.notes}</p> : null}
+          <InlineText
+            value={variant.notes}
+            label="Variant notes"
+            placeholder="Add a note"
+            multiline
+            maxLength={2000}
+            className="mt-1 text-xs text-text-muted"
+            onSave={(notes) => onUpdate({ notes })}
+          />
         </div>
         <div className="flex shrink-0 items-center gap-1">
           <Button size="icon-sm" variant="ghost" aria-label="Duplicate variant" onClick={onDuplicate} disabled={duplicating}>
             <CopyIcon />
-          </Button>
-          <Button size="icon-sm" variant="ghost" aria-label="Edit variant" onClick={onEdit}>
-            <PencilIcon />
           </Button>
           <Button size="icon-sm" variant="ghost" className="text-text-muted hover:text-text" aria-label="Archive variant" onClick={onArchive}>
             <Trash2Icon />
@@ -937,32 +1063,71 @@ function VariantCard({ variant, isActive, people, payCadenceLabel, duplicating, 
       </div>
 
       <div className="flex flex-col divide-y divide-border text-sm">
-        {variant.lines.map((line) => (
-          <div key={line.id} className="flex flex-col gap-1 py-2 first:pt-0 last:pb-0">
-            <div className="truncate text-text">
-              {personName(people, line.personId)}
-              {line.label ? <span className="text-text-muted"> · {line.label}</span> : null}
-            </div>
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-xs text-text-subtle">{CADENCE_LABELS[line.cadence]}</span>
-              <div className="flex shrink-0 items-center gap-1">
-                <Money value={line.amountCents} className="font-medium text-text" />
-                <Button size="icon-xs" variant="ghost" aria-label="Edit line" onClick={() => onEditLine(line)}>
-                  <PencilIcon />
-                </Button>
-                <Button
-                  size="icon-xs"
-                  variant="ghost"
-                  className="text-text-muted hover:text-text"
-                  aria-label="Delete line"
-                  onClick={() => onDeleteLine(line.id)}
-                >
-                  <Trash2Icon />
-                </Button>
+        {variant.lines.map((line) => {
+          // A line whose person has since gone keeps its own name in the
+          // list, so the select still says who it was.
+          const personOptions = people.map((p) => ({ value: p.id, label: p.name }));
+          if (!people.some((p) => p.id === line.personId)) {
+            personOptions.push({ value: line.personId, label: personName(people, line.personId) });
+          }
+          return (
+            <div key={line.id} className={cn(EDITABLE_GROUP, "flex flex-col gap-1 py-2 first:pt-0 last:pb-0")}>
+              <div className="flex min-w-0 items-baseline gap-1 text-text">
+                <InlineSelect
+                  value={line.personId}
+                  options={personOptions}
+                  label="Person"
+                  onSave={(personId) => onUpdateLine(line.id, { personId })}
+                />
+                {line.label ? <span className="text-text-muted">·</span> : null}
+                <InlineText
+                  value={line.label}
+                  label="Line label"
+                  placeholder="Add a label"
+                  maxLength={160}
+                  className={cn("min-w-0 text-text-muted", !line.label && "ml-1")}
+                  onSave={(label) => onUpdateLine(line.id, { label })}
+                />
               </div>
+              <div className="flex items-center justify-between gap-2">
+                <InlineSelect
+                  value={line.cadence}
+                  options={cadenceOptions}
+                  label="Cadence"
+                  className="text-xs text-text-subtle"
+                  onSave={(cadence) => onUpdateLine(line.id, { cadence })}
+                />
+                <div className="flex shrink-0 items-center gap-1">
+                  <InlineMoney
+                    value={line.amountCents}
+                    label="Amount"
+                    className="font-medium text-text"
+                    onSave={(amountCents) => onUpdateLine(line.id, { amountCents })}
+                  />
+                  <Button
+                    size="icon-xs"
+                    variant="ghost"
+                    className="text-text-muted hover:text-text"
+                    aria-label="Delete line"
+                    onClick={() => onDeleteLine(line.id)}
+                  >
+                    <Trash2Icon />
+                  </Button>
+                </div>
+              </div>
+              {line.notes ? (
+                <InlineText
+                  value={line.notes}
+                  label="Line notes"
+                  multiline
+                  maxLength={2000}
+                  className="text-xs text-text-muted"
+                  onSave={(notes) => onUpdateLine(line.id, { notes })}
+                />
+              ) : null}
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
       <Button size="sm" variant="outline" className="self-start" onClick={onAddLine}>
         <PlusIcon />
@@ -985,11 +1150,11 @@ function VariantCard({ variant, isActive, people, payCadenceLabel, duplicating, 
  *   payCadenceLabel: string | null,
  *   duplicating: boolean,
  *   onOpenChange: (open: boolean) => void,
- *   onEdit: () => void,
+ *   onUpdate: (patch: Partial<VariantFormData>) => Promise<unknown>,
  *   onDuplicate: () => void,
  *   onArchive: () => void,
  *   onAddLine: () => void,
- *   onEditLine: (line: IncomeLine) => void,
+ *   onUpdateLine: (id: string, patch: Partial<IncomeLineFormData>) => Promise<unknown>,
  *   onDeleteLine: (id: string) => void,
  * }} props
  */
@@ -1411,66 +1576,26 @@ export function IncomePage() {
   const queryClient = useQueryClient();
 
   const [variantFormOpen, setVariantFormOpen] = useState(false);
-  const [editingVariant, setEditingVariant] = useState(/** @type {IncomeVariant | null} */ (null));
   // The id, not the variant: the phone's detail sheet is where lines are
   // added, edited and deleted, and a stored copy of the variant never saw
   // any of it — the sheet kept showing the lines as they were when it
   // opened, which invited adding the "missing" line a second time.
   const [detailVariantId, setDetailVariantId] = useState(/** @type {string | null} */ (null));
-  const [lineForm, setLineForm] = useState(
-    /** @type {{ variantId: string, line: IncomeLine | null } | null} */ (null),
-  );
+  // The variant a line is being added to; editing one happens on its card.
+  const [lineFormVariantId, setLineFormVariantId] = useState(/** @type {string | null} */ (null));
   const [scheduleForm, setScheduleForm] = useState(
     /** @type {{ entry: ScheduleEntry | null } | null} */ (null),
   );
 
-  const variantsQuery = useQuery({
-    queryKey: ["income-variants"],
-    queryFn: async () => {
-      const res = await api["income-variants"].$get();
-      if (!res.ok) throw new Error(await readApiError(res));
-      return /** @type {{ variants: IncomeVariant[], hasPrimaryPaySchedule: boolean }} */ (await res.json());
-    },
-  });
+  const variantsQuery = useQuery(incomeVariantsQueryOptions());
 
-  const peopleQuery = useQuery({
-    queryKey: ["people"],
-    queryFn: async () => {
-      const res = await api.people.$get();
-      if (!res.ok) throw new Error(await readApiError(res));
-      return /** @type {Person[]} */ ((await res.json()).people);
-    },
-  });
+  const peopleQuery = useQuery(peopleQueryOptions());
 
-  const scheduleQuery = useQuery({
-    queryKey: ["variant-schedule"],
-    queryFn: async () => {
-      const res = await api["variant-schedule"].$get();
-      if (!res.ok) throw new Error(await readApiError(res));
-      return /** @type {ScheduleEntry[]} */ ((await res.json()).variantSchedule);
-    },
-  });
+  const scheduleQuery = useQuery(variantScheduleQueryOptions());
 
-  const resolveQuery = useQuery({
-    queryKey: ["income-resolve", todayIso()],
-    queryFn: async () => {
-      const res = await api.income.resolve.$get({ query: { on: todayIso() } });
-      if (!res.ok) throw new Error(await readApiError(res));
-      // Cast at the RPC boundary (phases/README.md "API"): Hono's `c.json()`
-      // widens the engine's `VariantDiagnostic` discriminated union's `kind`
-      // to plain `string` when it infers the route's response type.
-      return /** @type {ResolveResult} */ (await res.json());
-    },
-  });
+  const resolveQuery = useQuery(incomeResolveQueryOptions(todayIso()));
 
-  const payScheduleQuery = useQuery({
-    queryKey: ["pay-schedules"],
-    queryFn: async () => {
-      const res = await api["pay-schedules"].$get();
-      if (!res.ok) throw new Error(await readApiError(res));
-      return /** @type {PaySchedule[]} */ ((await res.json()).paySchedules);
-    },
-  });
+  const payScheduleQuery = useQuery(paySchedulesQueryOptions());
 
   const variants = variantsQuery.data?.variants ?? [];
   // Looked up afresh each render, so the sheet shows the variant as it is
@@ -1484,9 +1609,14 @@ export function IncomePage() {
   const payCadenceLabel = primarySchedule ? CADENCE_LABELS[primarySchedule.cadence] : null;
   const overrideVariant = search.variant ? (variants.find((v) => v.id === search.variant) ?? null) : null;
 
+  // Returned, not just fired: a mutation whose `onSuccess` hands back this
+  // promise doesn't settle until the fresh data is in, which is what lets an
+  // inline field hold the typed value until the card can show the saved one.
   function invalidateIncome() {
-    queryClient.invalidateQueries({ queryKey: ["income-variants"] });
-    queryClient.invalidateQueries({ queryKey: ["income-resolve"] });
+    return Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["income-variants"] }),
+      queryClient.invalidateQueries({ queryKey: ["income-resolve"] }),
+    ]);
   }
 
   const createVariant = useMutation({
@@ -1501,16 +1631,15 @@ export function IncomePage() {
     },
   });
 
+  // One field at a time, from the card. No toast: the field itself shows the
+  // change, and a toast per keystroke-and-Enter would be noise.
   const updateVariant = useMutation({
-    mutationFn: async (/** @type {{ id: string, data: VariantFormData }} */ { id, data }) => {
+    mutationFn: async (/** @type {{ id: string, data: Partial<VariantFormData> }} */ { id, data }) => {
       const res = await api["income-variants"][":id"].$patch({ param: { id }, json: data });
       if (!res.ok) throw new Error(await readApiError(res));
       return res.json();
     },
-    onSuccess: () => {
-      invalidateIncome();
-      toast.success("Income variant updated.");
-    },
+    onSuccess: invalidateIncome,
   });
 
   const duplicateVariant = useMutation({
@@ -1549,7 +1678,7 @@ export function IncomePage() {
   });
 
   const updateLine = useMutation({
-    mutationFn: async (/** @type {{ id: string, data: IncomeLineFormData }} */ { id, data }) => {
+    mutationFn: async (/** @type {{ id: string, data: Partial<IncomeLineFormData> }} */ { id, data }) => {
       const res = await api["income-lines"][":id"].$patch({ param: { id }, json: data });
       if (!res.ok) throw new Error(await readApiError(res));
       return res.json();
@@ -1632,10 +1761,7 @@ export function IncomePage() {
           group: "Actions",
           label: "Add income variant",
           icon: PlusIcon,
-          run: () => {
-            setEditingVariant(null);
-            setVariantFormOpen(true);
-          },
+          run: () => setVariantFormOpen(true),
         },
         {
           id: "income:edit-schedule",
@@ -1687,12 +1813,7 @@ export function IncomePage() {
               <PlusIcon />
               Add schedule entry
             </Button>
-            <Button
-              onClick={() => {
-                setEditingVariant(null);
-                setVariantFormOpen(true);
-              }}
-            >
+            <Button onClick={() => setVariantFormOpen(true)}>
               <PlusIcon />
               Add variant
             </Button>
@@ -1783,15 +1904,7 @@ export function IncomePage() {
             title="No income variants yet"
             description="Add each income scenario the household goes through — Usual, and any parental-leave phases — starting with Usual."
             action={
-              // Clears the edit target first: after archiving the last
-              // variant from its own Edit, the form still held it, and "Add"
-              // opened an edit of the archived record.
-              <Button
-                onClick={() => {
-                  setEditingVariant(null);
-                  setVariantFormOpen(true);
-                }}
-              >
+              <Button onClick={() => setVariantFormOpen(true)}>
                 <PlusIcon />
                 Add income variant
               </Button>
@@ -1807,15 +1920,12 @@ export function IncomePage() {
                   isActive={resolveQuery.data?.variantId === variant.id}
                   people={people}
                   payCadenceLabel={payCadenceLabel}
-                  onEdit={() => {
-                    setEditingVariant(variant);
-                    setVariantFormOpen(true);
-                  }}
+                  onUpdate={(data) => updateVariant.mutateAsync({ id: variant.id, data })}
                   duplicating={duplicateVariant.isPending}
                   onDuplicate={() => duplicateVariant.mutate(variant.id)}
                   onArchive={() => confirmArchiveVariant(variant)}
-                  onAddLine={() => setLineForm({ variantId: variant.id, line: null })}
-                  onEditLine={(line) => setLineForm({ variantId: variant.id, line })}
+                  onAddLine={() => setLineFormVariantId(variant.id)}
+                  onUpdateLine={(id, data) => updateLine.mutateAsync({ id, data })}
                   onDeleteLine={confirmDeleteLine}
                 />
               ))}
@@ -1868,29 +1978,19 @@ export function IncomePage() {
       <VariantFormDialog
         open={variantFormOpen}
         onOpenChange={setVariantFormOpen}
-        variant={editingVariant}
-        submitting={createVariant.isPending || updateVariant.isPending}
+        submitting={createVariant.isPending}
         onSubmit={async (data) => {
-          if (editingVariant) {
-            await updateVariant.mutateAsync({ id: editingVariant.id, data });
-          } else {
-            await createVariant.mutateAsync(data);
-          }
+          await createVariant.mutateAsync(data);
         }}
       />
 
       <IncomeLineFormDialog
-        open={lineForm !== null}
-        onOpenChange={(open) => !open && setLineForm(null)}
-        line={lineForm?.line ?? null}
+        open={lineFormVariantId !== null}
+        onOpenChange={(open) => !open && setLineFormVariantId(null)}
         people={people}
-        submitting={createLine.isPending || updateLine.isPending}
+        submitting={createLine.isPending}
         onSubmit={async (data) => {
-          if (lineForm?.line) {
-            await updateLine.mutateAsync({ id: lineForm.line.id, data });
-          } else if (lineForm) {
-            await createLine.mutateAsync({ variantId: lineForm.variantId, ...data });
-          }
+          if (lineFormVariantId) await createLine.mutateAsync({ variantId: lineFormVariantId, ...data });
         }}
       />
 
@@ -1933,10 +2033,8 @@ export function IncomePage() {
         people={people}
         payCadenceLabel={payCadenceLabel}
         onOpenChange={(open) => !open && setDetailVariantId(null)}
-        onEdit={() => {
-          setEditingVariant(detailVariant);
-          setDetailVariantId(null);
-          setVariantFormOpen(true);
+        onUpdate={async (data) => {
+          if (detailVariant) await updateVariant.mutateAsync({ id: detailVariant.id, data });
         }}
         duplicating={duplicateVariant.isPending}
         onDuplicate={() => detailVariant && duplicateVariant.mutate(detailVariant.id)}
@@ -1945,8 +2043,8 @@ export function IncomePage() {
           if (!(await confirmArchiveVariant(detailVariant))) return;
           setDetailVariantId(null);
         }}
-        onAddLine={() => detailVariant && setLineForm({ variantId: detailVariant.id, line: null })}
-        onEditLine={(line) => detailVariant && setLineForm({ variantId: detailVariant.id, line })}
+        onAddLine={() => detailVariant && setLineFormVariantId(detailVariant.id)}
+        onUpdateLine={(id, data) => updateLine.mutateAsync({ id, data })}
         onDeleteLine={confirmDeleteLine}
       />
     </>

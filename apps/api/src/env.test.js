@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { envSchema } from "./env.js";
 
-// PUBLIC_ORIGIN is the WebAuthn RP ID's source, and getting it slightly
-// wrong doesn't fail at startup on its own — it fails at the passkey prompt,
-// naming nothing. These are the near-misses that actually happen.
+// PUBLIC_ORIGIN is the address the household types, and CORS and the invite
+// CLI's links are built from it. Getting it slightly wrong doesn't fail at
+// startup on its own, so these are the near-misses that actually happen.
 
 const BASE = {
   DATABASE_URL: "postgres://budget:pw@db:5432/budget",
@@ -24,11 +24,12 @@ function problemWith(origin) {
 
 describe("PUBLIC_ORIGIN", () => {
   it.each([
-    ["https://budget.tail1234.ts.net", "https://budget.tail1234.ts.net"],
+    ["http://budget.local", "http://budget.local"],
     // Harmless spellings of the same origin, normalised to what the browser
     // sends — so CORS and the invite CLI's links match it exactly.
-    ["https://budget.tail1234.ts.net/", "https://budget.tail1234.ts.net"],
-    ["https://Budget.Tail1234.ts.net:443", "https://budget.tail1234.ts.net"],
+    ["http://budget.local/", "http://budget.local"],
+    ["http://Budget.Local:80", "http://budget.local"],
+    ["https://budget.example.com", "https://budget.example.com"],
     ["http://localhost:5173", "http://localhost:5173"],
     ["http://127.0.0.1:5173", "http://127.0.0.1:5173"],
   ])("accepts %s as %s", (input, expected) => {
@@ -37,12 +38,12 @@ describe("PUBLIC_ORIGIN", () => {
   });
 
   it.each([
-    ["budget.tail1234.ts.net", "is not a URL"],
-    ["http://budget.tail1234.ts.net", "must be https://"],
-    ["https://budget.tail1234.ts.net.", "must not end in a dot"],
-    ["https://budget.tail1234.ts.net/budget", "no path"],
-    ["https://budget.tail1234.ts.net/?x=1", "no path, query"],
-    ["https://user@budget.tail1234.ts.net", "username or password"],
+    ["budget.local", "is not a URL"],
+    ["ftp://budget.local", "must start with http:// or https://"],
+    ["http://budget.local.", "must not end in a dot"],
+    ["http://budget.local/budget", "no path"],
+    ["http://budget.local/?x=1", "no path, query"],
+    ["http://user@budget.local", "username or password"],
   ])("rejects %s, naming the value", (input, why) => {
     const problem = problemWith(input);
     expect(problem).toContain(why);
