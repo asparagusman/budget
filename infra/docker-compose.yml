@@ -126,13 +126,13 @@ services:
     depends_on:
       api:
         condition: service_healthy
-    # The household's address: http://budget.local, on port 80 of this host,
-    # reachable from the home network (infra/README.md step 5). This is the
-    # one service anything off the host can reach. Until the first user exists
-    # it serves the set-up screen to whoever opens it first, so set up
-    # straight after the first start (step 6).
+    # Loopback only. The host's Caddy owns port 80 and is what answers
+    # http://budget.local on the home network, proxying to this
+    # (infra/README.md step 5). Until the first user exists the app serves the
+    # set-up screen to whoever opens it first, so set up straight after the
+    # first start (step 6).
     ports:
-      - "80:80"
+      - "127.0.0.1:8080:80"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/ || exit 1"]
       interval: 5s

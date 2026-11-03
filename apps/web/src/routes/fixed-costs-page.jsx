@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { addDaysIso } from "@budget/engine";
@@ -54,6 +54,7 @@ import {
 } from "@/lib/fixed-costs-draft.js";
 import { useSettings } from "@/lib/settings.jsx";
 import { useUnsavedGuard } from "@/lib/use-unsaved-guard.js";
+import { cn } from "@/lib/utils.js";
 
 /** @import { Cents, PaySchedule, WindowFigures } from "@budget/engine" */
 /** @import { Bill, DraftBill } from "@/lib/fixed-costs-draft.js" */
@@ -195,6 +196,17 @@ export function FixedCostsPage() {
   const [detailBillId, setDetailBillId] = useState(/** @type {string | null} */ (null));
   const [editing, setEditing] = useState(false);
   const [drafts, setDrafts] = useState(/** @type {DraftBill[]} */ ([]));
+  // The mode the TABLE is drawn in, which trails `editing` on purpose. Every
+  // bill becomes a small form when the table goes into edit mode — a name
+  // field, a money field, a date picker, three or four dropdowns — and
+  // building all of them is the slow part of pressing Edit. Waiting for it
+  // before showing anything left the button looking dead for most of a
+  // second. Deferred, the click commits the header (Save / Cancel) at once
+  // and the table is rebuilt in the background, interruptibly, with the
+  // current one dimmed meanwhile (`switching`). The same in reverse on
+  // Cancel and Save.
+  const tableEditing = useDeferredValue(editing);
+  const switching = editing !== tableEditing;
 
   const categoriesQuery = useQuery(costCategoriesQueryOptions("fixed"));
 
@@ -256,7 +268,10 @@ export function FixedCostsPage() {
     }
     const seeded = bills.map(billToDraft);
     if (focusCategoryId) seeded.push(blankDraft(focusCategoryId, incomeLandingId));
-    setDrafts(seeded);
+    // The ghost rows go in now rather than from the effect below: left to the
+    // effect, entering edit mode built the whole table twice, once without
+    // them and once with.
+    setDrafts(withGhosts(seeded));
     setEditing(true);
   }
 
@@ -270,14 +285,22 @@ export function FixedCostsPage() {
   // old "Add bill" dialog replaced with a modal.
   useEffect(() => {
     if (!editing) return;
-    setDrafts((prev) => {
-      const missing = categories.filter(
-        (cat) => !prev.some((d) => d.categoryId === cat.id && d.billId === null && isBlankGhost(d)),
-      );
-      if (missing.length === 0) return prev;
-      return [...prev, ...missing.map((cat) => blankDraft(cat.id, incomeLandingId))];
-    });
+    setDrafts(withGhosts);
   }, [editing, drafts, categories, incomeLandingId]);
+
+  /**
+   * `drafts` plus a blank ghost for every category that has none — the same
+   * array back when nothing is missing, so the effect above settles.
+   *
+   * @param {DraftBill[]} prev
+   */
+  function withGhosts(prev) {
+    const missing = categories.filter(
+      (cat) => !prev.some((d) => d.categoryId === cat.id && d.billId === null && isBlankGhost(d)),
+    );
+    if (missing.length === 0) return prev;
+    return [...prev, ...missing.map((cat) => blankDraft(cat.id, incomeLandingId))];
+  }
 
   /** @param {string} key @param {Partial<DraftBill>} patch */
   function changeDraft(key, patch) {
@@ -335,7 +358,7 @@ export function FixedCostsPage() {
   const figuresByKey = useMemo(() => {
     /** @type {Map<string, WindowFigures | null>} */
     const map = new Map();
-    if (!editing) {
+    if (!tableEditing) {
       for (const [billId, figures] of serverFigures) map.set(billId, figures);
       return map;
     }
@@ -360,7 +383,7 @@ export function FixedCostsPage() {
       );
     }
     return map;
-  }, [editing, drafts, serverFigures, billsById, contributionWindow, primarySchedule]);
+  }, [tableEditing, drafts, serverFigures, billsById, contributionWindow, primarySchedule]);
 
   /**
    * The rows each category renders. At rest they come straight from the loaded
@@ -368,7 +391,7 @@ export function FixedCostsPage() {
    * have no bill behind them yet.
    */
   const rowsByCategory = useMemo(() => {
-    const source = editing ? drafts : bills.map(billToDraft);
+    const source = tableEditing ? drafts : bills.map(billToDraft);
     /** @type {Map<string, import("@/components/fixed-costs-table.jsx").BillRow[]>} */
     const map = new Map();
     for (const draft of source) {
@@ -379,12 +402,12 @@ export function FixedCostsPage() {
         bill,
         figures: figuresByKey.get(draft.key) ?? null,
         spread: bill ? historySpread(bill.history) : null,
-        error: editing ? draftError(draft) : null,
+        error: tableEditing ? draftError(draft) : null,
       });
       map.set(draft.categoryId, list);
     }
     return map;
-  }, [editing, drafts, bills, billsById, figuresByKey]);
+  }, [tableEditing, drafts, bills, billsById, figuresByKey]);
 
   /**
    * A category's subtotal is the sum of the rows printed under it — never a
@@ -597,7 +620,7 @@ export function FixedCostsPage() {
   // Either failing would otherwise read as "No categories yet" / "No bills
   // yet" — an invitation to re-enter bills that exist.
   const loadError = categoriesQuery.error ?? billsQuery.error ?? null;
-  const populatedCategories = editing
+  const populatedCategories = tableEditing
     ? categories
     : categories.filter((cat) => (rowsByCategory.get(cat.id) ?? []).length > 0);
 
@@ -738,7 +761,19 @@ export function FixedCostsPage() {
       ) : (
         // One block: the categories are parts of a single list of bills, so
         // they sit closer to each other than the page's blocks do.
-        <div className="flex flex-col gap-5 md:gap-6">
+        //
+        // Dimmed and inert while the table catches up with the mode (see
+        // `tableEditing`): it's still the old table, and a click on it would
+        // land on a row that is about to be replaced.
+        <div
+          aria-busy={switching}
+          className={cn("flex flex-col gap-5 transition-opacity md:gap-6", switching && "pointer-events-none opacity-60")}
+        >
+          {switching ? (
+            <span className="sr-only" aria-live="polite">
+              {editing ? "Opening the editor" : "Closing the editor"}
+            </span>
+          ) : null}
           {populatedCategories.map((cat) => {
             const rows = rowsByCategory.get(cat.id) ?? [];
             return (
@@ -748,7 +783,7 @@ export function FixedCostsPage() {
                 rows={rows}
                 totals={groupTotals(rows)}
                 payCadenceLabel={payCadenceLabel}
-                editing={editing}
+                editing={tableEditing}
                 people={people}
                 accounts={accounts}
                 locale={locale}

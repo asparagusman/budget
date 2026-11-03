@@ -49,7 +49,9 @@ function subscriberFor(query) {
  * Plain responsive classes are the default answer and cost nothing; this is
  * for the cases where rendering the hidden branch is actively wrong — a
  * chart measures its container, and inside `display: none` that container
- * is 0x0, so it mounts and draws nothing.
+ * is 0x0, so it mounts and draws nothing — or where it's expensive: the
+ * fixed-costs table in edit mode is a form per bill, and building a hidden
+ * phone copy of every one doubled the cost of pressing Edit.
  *
  * @param {string} query
  */
@@ -60,3 +62,6 @@ export function useMediaQuery(query) {
 // Tailwind's own `lg` breakpoint, so `useMediaQuery(LG)` and a `lg:` class
 // always agree about which side of it the viewport is on.
 export const LG = "(min-width: 64rem)";
+
+// Tailwind's `md`, likewise.
+export const MD = "(min-width: 48rem)";

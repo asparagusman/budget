@@ -12,6 +12,7 @@ import { AMOUNT_MODEL_LABELS, AMOUNT_MODELS, CADENCES, CADENCE_LABELS } from "@/
 import { formatIsoDate } from "@/lib/dates.js";
 import { billToDraft, draftSignature, isBlankGhost, restatedFigures } from "@/lib/fixed-costs-draft.js";
 import { formatDecimalText, formatMoneyText, parseDecimalText, parseMoneyText } from "@/lib/numeric-text.js";
+import { MD, useMediaQuery } from "@/lib/use-media-query.js";
 import { cn } from "@/lib/utils.js";
 import { ScrollArea } from "@/components/scroll-area.jsx";
 
@@ -682,14 +683,12 @@ function CategoryGroupMobile({ category, rows, totals, editing, people, locale, 
  * }} props
  */
 export function CategoryGroup(props) {
+  // One layout mounted, not both with one hidden: in edit mode each bill is a
+  // small form, and the hidden copy cost as much to build as the shown one.
+  const isDesktop = useMediaQuery(MD);
   return (
     <div className="flex flex-col gap-2">
-      <div className="hidden md:block">
-        <CategoryGroupDesktop {...props} />
-      </div>
-      <div className="md:hidden">
-        <CategoryGroupMobile {...props} />
-      </div>
+      {isDesktop ? <CategoryGroupDesktop {...props} /> : <CategoryGroupMobile {...props} />}
       {props.editing ? (
         <Button
           variant="ghost"

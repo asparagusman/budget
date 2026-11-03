@@ -49,16 +49,41 @@ sudo apt-get update && sudo apt-get install -y git curl jq
 curl -fsSL https://get.docker.com | sh
 sudo usermod -aG docker "$USER"     # log out and back in
 
-# The name the household types. Avahi announces <hostname>.local on the network,
-# so the hostname is "budget".
-sudo hostnamectl set-hostname budget
+# Avahi announces names on the network as <name>.local. Most desktop distros
+# (Linux Mint, Ubuntu desktop) already run it.
 sudo apt-get install -y avahi-daemon avahi-utils
 sudo systemctl enable --now avahi-daemon
 
-docker --version && docker compose version && avahi-resolve -n budget.local
+# Caddy: the front door on port 80. It answers http://budget.local and passes
+# it to the app (step 5). Skip if the host already runs it.
+sudo apt-get install -y caddy
+
+docker --version && docker compose version
 ```
 
-`avahi-resolve` (from `avahi-utils`) should print this machine's address. Then, from a laptop or
+Then give the machine the extra name `budget.local`, without renaming it — it may already be known
+by its own name to other things on the network. A small service announces the alias, at this
+machine's address on the home network (find it with `ip -4 -br addr`):
+
+```sh
+sudo tee /etc/systemd/system/budget-mdns.service >/dev/null <<'EOF'
+[Unit]
+Description=Announce budget.local on the home network
+After=avahi-daemon.service network-online.target
+Requires=avahi-daemon.service
+
+[Service]
+ExecStart=/usr/bin/avahi-publish -a -R budget.local 192.168.0.211
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl enable --now budget-mdns
+avahi-resolve -n budget.local
+```
+
+Put this machine's own address where `192.168.0.211` is. `avahi-resolve` should print it back. Then, from a laptop or
 phone on the same Wi-Fi, open `http://budget.local` once the stack is up (step 4) to check the name
 resolves there too. iPhones, Macs and Windows resolve `.local` names; Android does from version 13.
 If an Android phone can't find it, add a DNS entry on the router mapping `budget.local` to this
@@ -165,8 +190,8 @@ Four services, in this order, enforced by compose rather than by you remembering
    `api` waits for it to exit **successfully**, so the app can never start against a schema older
    than its own code.
 3. **`api`** — Hono on `${PORT}`, published on `127.0.0.1` only.
-4. **`web`** — nginx serving the built SPA on port 80 of the host, which is `http://budget.local`,
-   proxying `/api/` to the api container.
+4. **`web`** — nginx serving the built SPA on `127.0.0.1:8080`, proxying `/api/` to the api
+   container. Caddy puts it on the network as `http://budget.local` (step 5).
 
 Check it:
 
@@ -199,14 +224,31 @@ without the `migrate` service; bring the stack up again with the compose file ra
 
 ---
 
-## 5. Open it from another device
+## 5. Put it on the network
+
+Add this block to `/etc/caddy/Caddyfile`, alongside anything already there:
+
+```
+http://budget.local {
+	reverse_proxy 127.0.0.1:8080
+}
+```
+
+The `http://` matters: without it Caddy tries to get an HTTPS certificate for the name, which no one
+issues for `.local`. Then:
+
+```sh
+sudo caddy validate --config /etc/caddy/Caddyfile && sudo systemctl reload caddy
+```
 
 On a phone on the home Wi-Fi, open `http://budget.local`. If it doesn't load, check in this order:
 
-1. `curl -s localhost/ | head -c 100` on the host returns HTML — the stack is serving.
-2. `avahi-resolve -n budget.local` on the host prints its address — the name is being announced.
-3. The phone is on the same network (not the guest network, not mobile data, no VPN).
-4. On Android older than 13, use the router DNS entry from step 1.
+1. `curl -s localhost:8080/ | head -c 100` on the host returns HTML — the stack is serving.
+2. `curl -s -H 'Host: budget.local' localhost/ | head -c 100` returns the same — Caddy is passing
+   it through.
+3. `avahi-resolve -n budget.local` on the host prints its address — the name is being announced.
+4. The phone is on the same network (not the guest network, not mobile data, no VPN).
+5. On Android older than 13, use the router DNS entry from step 1.
 
 ---
 
@@ -381,10 +423,10 @@ is proportionate.
 docker compose -f infra/docker-compose.yml exec db psql -U budget -d budget
 ```
 
-**Ports.** Only `web` (80) and `api` (3001) publish anything. Port 80 is the app, on every
-interface, which is what makes `http://budget.local` reachable from the home network. 3001 is
-published on the host's loopback (`127.0.0.1`) only, so nothing off the host reaches the api except
-through nginx — it is published only so `curl localhost:3001/health` works here. Postgres publishes nothing at all;
+**Ports.** Only `web` (8080) and `api` (3001) publish anything, and both only on the host's
+loopback (`127.0.0.1`), so nothing on the network reaches either directly. Caddy, on port 80, is
+what makes 8080 reachable as `http://budget.local`; nothing makes 3001 reachable off the host — it
+is published only so `curl localhost:3001/health` works here. Postgres publishes nothing at all;
 `docker-compose.dev.yml` exists solely to add a published 5432 for local development and must never
 be merged in on this host.
 

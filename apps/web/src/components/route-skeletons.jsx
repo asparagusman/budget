@@ -27,7 +27,8 @@ const SKELETONS = {
   "/": () => (
     <>
       <PageHeader title="Overview" />
-      <div className="flex flex-col gap-4 md:gap-6">
+      <div className="flex flex-col gap-4 md:gap-6" aria-busy="true" aria-live="polite">
+        <span className="sr-only">Loading the overview</span>
         <DashboardSkeleton />
       </div>
     </>
